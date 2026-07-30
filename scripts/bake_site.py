@@ -422,6 +422,25 @@ def main() -> None:  # noqa: PLR0915
     )
     log(f"标签表:节点 {len(labels):,} + 社区 {len(comm_labels):,}")
 
+    # ---- 分享卡片:top-N og:meta 静态 stub(爬虫用,人类被跳转)----
+    (SITE / "n").mkdir(exist_ok=True)
+    for rank in range(min(10_000, n)):
+        ki = int(key_r[rank])
+        d0 = info[ki]
+        title = str(d0["cn"] or d0["name"])
+        bits = [str(d0["t"])]
+        if d0.get("score"):
+            bits.append(f"评分 {d0['score']}")
+        desc = " · ".join(bits) + " | Bangumi 星图"
+        (SITE / "n" / f"{ki}.html").write_text(
+            "<!doctype html><meta charset=utf-8>"
+            f"<title>{title}</title>"
+            f'<meta property="og:title" content="{title}">'
+            f'<meta property="og:description" content="{desc}">'
+            f'<script>location.replace("../#n={ki}")</script>'
+        )
+    log("分享卡片 10,000 个写出")
+
     # ---- manifest ----
     files = {
         p.relative_to(SITE).as_posix(): p.stat().st_size
