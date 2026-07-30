@@ -92,15 +92,27 @@ def load_edges(index: dict[int, int]) -> np.ndarray:
 def run_layout(
     g: ig.Graph, algo: str, weights: list[float], seed: np.ndarray | None
 ) -> np.ndarray:
+    """对决裁决(2026-07-31):UMAP 胜出——全图 15 分钟 vs DRL 子图
+    2h+ 未完成;周更协议 = 热启动 + 小 epoch + Procrustes 对齐。"""
     seed_list = seed.tolist() if seed is not None else None
     if algo == "drl":
         layout = g.layout_drl(seed=seed_list, dim=3)
     elif algo == "umap":
-        layout = g.layout_umap(dim=3, epochs=200, seed=seed_list)
+        epochs = 10 if seed is not None else 200
+        layout = g.layout_umap(dim=3, epochs=epochs, seed=seed_list)
     else:
         raise ValueError(algo)
     del weights  # DRL/UMAP 权重接口不稳定,v1 用无权布局
-    return np.asarray(layout.coords, dtype=np.float32)
+    coords = np.asarray(layout.coords, dtype=np.float32)
+    if seed is not None:
+        # 旋转对齐回上周坐标框架,保持心智地图连续
+        from scipy.linalg import orthogonal_procrustes
+
+        a = coords - coords.mean(0)
+        b = seed - seed.mean(0)
+        rot, _ = orthogonal_procrustes(a, b)
+        coords = (a @ rot + seed.mean(0)).astype(np.float32)
+    return coords
 
 
 def align_communities(

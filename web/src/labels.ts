@@ -22,7 +22,7 @@ export function labelLayers(
 ): unknown[] {
   const chars = [...new Set(labels.charset + "0123456789…")].join("");
   const out: unknown[] = [];
-  if (zoom < 2.2) {
+  if (zoom < 3.2) {
     const comm = Object.values(labels.comm);
     out.push(
       new TextLayer({
@@ -47,11 +47,11 @@ export function labelLayers(
       }),
     );
   }
-  if (zoom >= 0.8) {
+  if (zoom >= 1.2) {
     // 节点标签:zoom 越深显示越多(按 rank 截断)
     const cap = Math.min(
       labels.nodes.length,
-      Math.floor(200 * Math.pow(4, zoom)),
+      Math.floor(60 * Math.pow(4, Math.max(0, zoom - 1))),
     );
     out.push(
       new TextLayer({

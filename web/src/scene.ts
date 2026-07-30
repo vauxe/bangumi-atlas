@@ -17,13 +17,6 @@ export interface OrbitState {
   [k: string]: unknown;
 }
 
-const HOME: OrbitState = {
-  target: [0, 0, 0],
-  zoom: 0.05,
-  rotationX: 25,
-  rotationOrbit: 0,
-};
-const EDGE_ZOOM = 1.2; // 近景阈值:边淡入(spike:边为填充率杀手)
 const DIM_ALPHA = 38; // 聚光时语境层 ~15% 亮度
 
 export interface SceneCallbacks {
@@ -34,13 +27,21 @@ export interface SceneCallbacks {
 
 export class Scene {
   private deck: Deck<OrbitView>;
+  /** 视口恰好装下全图的 zoom(由 bbox 自适应标定)。 */
+  private fitZoom: number;
+  private homeState: OrbitState;
   private geo: Geometry;
   private colors: Uint8Array;
   private commColors: Uint8Array | null = null;
   private edges: Uint32Array | null = null;
   private labels: LabelData | null = null;
   private edgePositions: Float32Array | null = null;
-  private viewState: OrbitState = { ...HOME };
+  private viewState: OrbitState = {
+    target: [0, 0, 0],
+    zoom: 0,
+    rotationX: 25,
+    rotationOrbit: 0,
+  };
   private version = 0;
   private lastPickCycle: { x: number; y: number; depth: number } | null =
     null;
@@ -48,9 +49,20 @@ export class Scene {
   constructor(
     parent: HTMLDivElement,
     geo: Geometry,
+    worldSize: number,
     private cb: SceneCallbacks,
   ) {
     this.geo = geo;
+    this.fitZoom = Math.log2(
+      Math.min(innerWidth, innerHeight) / Math.max(worldSize, 1),
+    );
+    this.homeState = {
+      target: [0, 0, 0],
+      zoom: this.fitZoom - 0.2,
+      rotationX: 25,
+      rotationOrbit: 0,
+    };
+    this.viewState = { ...this.homeState };
     this.colors = new Uint8Array(geo.key.length * 4);
     this.deck = new Deck({
       parent,
@@ -144,12 +156,13 @@ export class Scene {
     this.recolor();
   }
 
-  flyTo(rank: number, zoom = 3): void {
+  flyTo(rank: number, zoom?: number): void {
+    const z = zoom ?? this.fitZoom + 4.5;
     const p = this.geo.positions;
     this.viewState = {
       ...this.viewState,
       target: [p[rank * 3] ?? 0, p[rank * 3 + 1] ?? 0, p[rank * 3 + 2] ?? 0],
-      zoom,
+      zoom: z,
       transitionDuration: prefersReducedMotion() ? 0 : 400,
       transitionInterpolator: new LinearInterpolator([
         "target",
@@ -176,7 +189,7 @@ export class Scene {
   }
 
   home(): void {
-    this.setView({ ...HOME });
+    this.setView({ ...this.homeState });
   }
 
   private workingSetLayers(): unknown[] {
@@ -314,7 +327,7 @@ export class Scene {
     ];
     if (
       this.edgePositions &&
-      this.viewState.zoom >= EDGE_ZOOM &&
+      this.viewState.zoom >= this.fitZoom + 2.5 &&
       this.edges
     ) {
       layers.push(
@@ -344,7 +357,7 @@ export class Scene {
     }
     if (this.labels)
       layers.push(
-        ...labelLayers(this.labels, geo, this.viewState.zoom),
+        ...labelLayers(this.labels, geo, this.viewState.zoom - this.fitZoom),
       );
     layers.push(...this.workingSetLayers());
     this.deck.setProps({ layers: layers as never[] });
