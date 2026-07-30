@@ -5,3 +5,4 @@ data/dump.zip
 data/parquet/
 db/
 .ruff_cache/
+.DS_Store
