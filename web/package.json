@@ -1,0 +1,17 @@
+{
+  "name": "bangumi-atlas-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --minify --format=iife --outfile=../site/app.js",
+    "dev": "esbuild src/main.ts --bundle --format=iife --outfile=../site/app.js --servedir=../site --serve=127.0.0.1:8300",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "deck.gl": "^9.3.7"
+  }
+}
