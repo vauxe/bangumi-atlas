@@ -49,7 +49,11 @@ async function boot(): Promise<void> {
   });
   (drawer as unknown as { deps: { geo: typeof geo } }).deps.geo = geo;
 
-  scene = new Scene($<HTMLDivElement>("#map"), geo, {
+  const [blo, bhi] = manifest.bbox;
+  const worldSize = Math.max(
+    ...[0, 1, 2].map((i) => (bhi[i] ?? 1) - (blo[i] ?? 0)),
+  );
+  scene = new Scene($<HTMLDivElement>("#map"), geo, worldSize, {
     onPick: (rank) => {
       if (rank === null) deselect();
       else select(rank, false);
