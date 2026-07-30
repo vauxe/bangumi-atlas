@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bangumi 星图</title>
+<meta property="og:title" content="Bangumi 星图">
+<meta property="og:description"
+      content="99 万个作品、人物与角色的 3D 关系宇宙">
+<style>
+:root {
+  --surface: #0b0e1a; --panel: #12172a; --ink: #e8e9ec;
+  --ink-2: #9aa0b4; --line: #232a44;
+  --c-subject: #3987e5; --c-person: #d95926; --c-character: #199e70;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--surface);
+  color: var(--ink);
+  font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+#map { position: fixed; inset: 0; }
+#hud { position: fixed; bottom: 12px; right: 12px; color: var(--ink-2);
+  font-family: monospace; z-index: 5; pointer-events: none; }
+
+#cold { position: fixed; inset: 0; display: grid; place-items: center;
+  z-index: 4; pointer-events: none; transition: opacity .6s; }
+#cold .inner { pointer-events: auto; width: min(560px, 90vw);
+  text-align: center; }
+#cold h1 { font-weight: 600; letter-spacing: .1em; margin: 0 0 16px; }
+#cold.ready .hint { opacity: 1; }
+#cold .hint { color: var(--ink-2); opacity: 0; transition: opacity .6s;
+  margin-top: 12px; }
+#cold.away { opacity: 0; pointer-events: none; }
+#cold.away .inner { pointer-events: none; }
+
+#searchwrap { position: relative; }
+#search { width: 100%; padding: 12px 16px; font-size: 16px;
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 10px; outline: none; }
+#search:focus { border-color: var(--c-subject); }
+#hits { position: absolute; top: 100%; left: 0; right: 0; z-index: 9;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 0 0 10px 10px; text-align: left; max-height: 320px;
+  overflow: auto; }
+#hits .hit { padding: 8px 16px; cursor: pointer; }
+#hits .hit.active, #hits .hit:hover { background: var(--line); }
+
+.docked #cold { display: none; }
+.docked #searchwrap-dock { display: block; }
+#searchwrap-dock { display: none; position: fixed; top: 14px; left: 14px;
+  width: 300px; z-index: 6; }
+
+#drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 420px;
+  max-width: 92vw; background: var(--panel); z-index: 7; padding: 20px;
+  overflow-y: auto; transform: translateX(105%); transition: transform .25s;
+  border-left: 1px solid var(--line); }
+#drawer.open { transform: none; }
+#drawer h2 { margin: 4px 24px 2px 0; font-size: 20px; }
+#drawer .subtitle { color: var(--ink-2); margin-bottom: 8px; }
+#drawer-close { position: absolute; top: 10px; right: 12px; border: 0;
+  background: none; color: var(--ink-2); font-size: 22px; cursor: pointer; }
+.badge { background: var(--line); border-radius: 6px; padding: 2px 8px;
+  font-size: 12px; margin-right: 6px; }
+.tag { color: var(--ink-2); font-size: 12px; margin-right: 8px; }
+.stats { color: var(--ink-2); margin: 8px 0; font-size: 13px; }
+.sum { margin: 10px 0; max-height: 4.8em; overflow: hidden;
+  position: relative; white-space: pre-line; }
+.sum.expanded { max-height: none; }
+.sum-toggle { display: block; border: 0; background: none;
+  color: var(--c-subject); cursor: pointer; padding: 2px 0; }
+.group { margin-top: 14px; }
+.group-label { color: var(--ink-2); font-size: 12px; margin-bottom: 6px; }
+.chip { background: var(--line); color: var(--ink); border: 0;
+  border-radius: 14px; padding: 4px 10px; margin: 0 6px 6px 0;
+  cursor: pointer; font-size: 13px; }
+.chip:hover { background: #31395e; }
+.chip.on { background: var(--c-subject); }
+.more, .note, .ep-date { color: var(--ink-2); font-size: 12px; }
+.ep { font-size: 13px; padding: 2px 0; }
+.ext { display: inline-block; margin-top: 16px; color: var(--c-subject); }
+.loading { color: var(--ink-2); }
+
+#toolbar { position: fixed; right: 14px; bottom: 40px; z-index: 6;
+  display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+#toolbar .row { background: rgba(18,23,42,.85); border: 1px solid var(--line);
+  border-radius: 10px; padding: 8px 10px; backdrop-filter: blur(4px); }
+#toolbar button { cursor: pointer; }
+#year-row input[type="number"] { width: 64px; background: var(--surface);
+  color: var(--ink); border: 1px solid var(--line); border-radius: 6px;
+  padding: 2px 6px; }
+#legend { position: fixed; left: 14px; bottom: 12px; z-index: 5;
+  color: var(--ink-2); font-size: 12px; }
+#legend i { display: inline-block; width: 10px; height: 10px;
+  border-radius: 50%; margin: 0 4px 0 10px; vertical-align: -1px; }
+#tooltip { position: fixed; display: none; z-index: 8;
+  background: rgba(18,23,42,.95); border: 1px solid var(--line);
+  padding: 4px 10px; border-radius: 8px; pointer-events: none;
+  font-size: 13px; }
+#tooltip .tt { color: var(--ink-2); font-size: 11px; }
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="cold">
+  <div class="inner">
+    <h1>Bangumi 星图</h1>
+    <div id="searchwrap">
+      <input id="search" placeholder="搜索作品 / 人物 / 角色…"
+             autocomplete="off">
+      <div id="hits"></div>
+    </div>
+    <div class="hint">回车飞往 · 🎲 随机传送 · 拖动环视这片宇宙</div>
+  </div>
+</div>
+<div id="searchwrap-dock"></div>
+
+<div id="drawer"></div>
+
+<div id="toolbar">
+  <div class="row" id="media-chips"></div>
+  <div class="row" id="year-row">
+    年代 <input id="year-min" type="number" placeholder="1970">
+    – <input id="year-max" type="number" placeholder="2026">
+  </div>
+  <div class="row">
+    <button id="layer-toggle" class="chip">社区着色</button>
+    <button id="dice" class="chip" title="随机传送">🎲</button>
+    <label style="font-size:12px;color:var(--ink-2)">
+      <input id="nsfw-toggle" type="checkbox"> NSFW
+    </label>
+  </div>
+</div>
+
+<div id="legend">
+  <i style="background:var(--c-subject)"></i>作品
+  <i style="background:var(--c-person)"></i>人物
+  <i style="background:var(--c-character)"></i>角色
+  <span style="margin-left:10px">`2` 俯视 · `H` 复位 · `/` 搜索</span>
+</div>
+<div id="tooltip"></div>
+<div id="hud"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
