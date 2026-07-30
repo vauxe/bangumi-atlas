@@ -6,3 +6,8 @@ data/parquet/
 db/
 .ruff_cache/
 .DS_Store
+site/data/
+data/layout/
+web/node_modules/
+site/app.js
+spike/*.bin
