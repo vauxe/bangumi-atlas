@@ -35,5 +35,5 @@ no_implicit_optional = true
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["ladybug.*", "pyarrow.*", "igraph.*", "umap.*", "pacmap.*", "opencc.*"]
+module = ["ladybug.*", "pyarrow.*", "igraph.*", "umap.*", "pacmap.*", "opencc.*", "scipy.*"]
 ignore_missing_imports = true
