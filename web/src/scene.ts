@@ -3,6 +3,8 @@
 import { Deck, LinearInterpolator, OrbitView } from "@deck.gl/core";
 import { DataFilterExtension } from "@deck.gl/extensions";
 import { LineLayer, ScatterplotLayer } from "@deck.gl/layers";
+import { labelLayers } from "./labels";
+import type { LabelData } from "./labels";
 import { state } from "./store";
 import { TYPE_COLORS, etype } from "./types";
 import type { Geometry } from "./types";
@@ -36,6 +38,7 @@ export class Scene {
   private colors: Uint8Array;
   private commColors: Uint8Array | null = null;
   private edges: Uint32Array | null = null;
+  private labels: LabelData | null = null;
   private edgePositions: Float32Array | null = null;
   private viewState: OrbitState = { ...HOME };
   private version = 0;
@@ -129,6 +132,11 @@ export class Scene {
       }
     }
     this.edgePositions = p;
+    this.render();
+  }
+
+  setLabels(l: LabelData): void {
+    this.labels = l;
     this.render();
   }
 
@@ -334,6 +342,10 @@ export class Scene {
         }),
       );
     }
+    if (this.labels)
+      layers.push(
+        ...labelLayers(this.labels, geo, this.viewState.zoom),
+      );
     layers.push(...this.workingSetLayers());
     this.deck.setProps({ layers: layers as never[] });
   }
