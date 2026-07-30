@@ -11,6 +11,7 @@ import {
   loadNames,
   prefetch,
 } from "./loader";
+import { loadLabels } from "./labels";
 import { Scene } from "./scene";
 import { Search } from "./search";
 import { notify, state, subscribe } from "./store";
@@ -84,6 +85,7 @@ async function boot(): Promise<void> {
     names = n;
   });
   void loadEdges(manifest).then((e) => scene?.setEdges(e));
+  void loadLabels().then((l) => scene?.setLabels(l));
   scene.setCommunityColors();
 
   const rankOfKey = (key: number): number | null => {

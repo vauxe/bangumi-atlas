@@ -1,0 +1,90 @@
+# 每周烘焙与发布(EXPLORER.md §8)
+# dump 周三 05:00 GMT+8 更新;本 workflow 周三 08:00 GMT+8 运行。
+name: bake-and-deploy
+
+on:
+  schedule:
+    - cron: "0 0 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  bake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Fetch dump (SHA256 verified)
+        run: uv run python scripts/fetch_dump.py
+
+      - name: Build graph database
+        run: uv run python scripts/build_db.py
+
+      - name: Verify database against dump
+        run: uv run python scripts/verify_db.py
+
+      - name: Pull last week's coordinates (warm start)
+        run: |
+          curl -fsSL -o /tmp/prev_coords.parquet \
+            "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/data/coords.parquet" \
+            || echo "no previous coordinates (first run)"
+
+      - name: Layout
+        run: |
+          if [ -f /tmp/prev_coords.parquet ]; then
+            uv run python scripts/layout.py --algo umap \
+              --warm-start /tmp/prev_coords.parquet
+          else
+            uv run python scripts/layout.py --algo umap
+          fi
+
+      - name: Bake site data
+        run: |
+          uv run python scripts/bake_site.py
+          # 发布坐标供下周热启动与后续 3D 全图点云
+          cp data/layout/coords.parquet site/data/coords.parquet
+
+      - name: Build client
+        run: |
+          cd web
+          npm ci
+          npm run check
+          npm run build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+
+  deploy:
+    needs: bake
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+# 防 60 天不活跃停用 cron:本文件本身的定期提交即 keepalive;
+# 若仓库长期无提交,手动 workflow_dispatch 一次即可续期。
