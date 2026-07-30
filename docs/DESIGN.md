@@ -72,16 +72,21 @@ graph LR
   节点上同时保留一份,孤儿集(所属条目已删除)靠它记录归属
 - **person-characters 三元关系压平**:"人在某作品中配某角色"有三方而边只有两端,
   建 Person→Character 边,作品降为边属性 subject_id
-- **person-relations 拆两表**:边表端点类型必须固定,按 person_type 拆分
+- **person-relations 拆两表**:边表端点类型必须固定,按 person_type(prsn=人物、crt=角色)拆分
 
 字段变换(其余 1:1 入库):
 
 - 枚举码按"条目类型 + 码"解码为中文新增列(★ 列及节点的 type_name、platform),
   原始码保留
-- `favorite` → 五个整数列;`score_details` → `INT64[]`(下标 = 分数);
+- `favorite` → wish/done/doing/on_hold/dropped 五个整数列;
+  `score_details` → `INT64[]`(下标 = 分数);
   `tags` → `STRUCT(name,count)[]`
 - `order` → `sort_order`(保留字);主键去重;null 归一 `""`/`[]`
 
+节点关键字段——Subject:name/name_cn/type(5 类)/date/score/rank/
+nsfw/favorite 五档/tags/meta_tags/summary/infobox;Person 与
+Character:name/type 或 role/comments/collects/summary/infobox;
+Episode:name/name_cn/airdate/sort/type/subject_id/description。
 完整 DDL 见 `scripts/build_db.py`。
 
 ## 3. 构建流程
@@ -106,4 +111,4 @@ graph LR
 **每周全量重建**(约 1 分钟,增量同步不值得);**全保真**(字段 1:1 入库,
 唯一例外是悬空边,过滤必打印计数)。
 
-实测(M 系列 MacBook):268 万节点、546 万边,库 1.1GB,多跳查询亚秒。
+实测(M 系列 MacBook):266 万节点、546 万边,库 1.1GB,多跳查询亚秒。

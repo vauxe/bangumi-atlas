@@ -18,7 +18,7 @@ uv run python scripts/verify_db.py       # 对账验证(行级核对 + 冒烟查
 
 ## 图模型
 
-节点:`Subject`(条目 67 万)、`Person`(人物 10 万)、`Character`(角色 22 万)、`Episode`(章节 168 万)
+节点:`Subject`(条目 67 万)、`Person`(人物/公司 10 万)、`Character`(角色 22 万)、`Episode`(分集 168 万)
 
 | 边 | 方向 | 关键属性 | 规模 |
 |---|---|---|---|
@@ -28,6 +28,8 @@ uv run python scripts/verify_db.py       # 对账验证(行级核对 + 冒烟查
 | `VOICED` | Person→Character | subject_id(在哪部作品中配音) | 28 万 |
 | `EPISODE_OF` | Episode→Subject | | 166 万 |
 | `PERSON_REL` / `CHARACTER_REL` | 同类互联 | relation(家人/前传角色…) | 7 万 |
+
+规模为过滤悬空引用后的入库数。
 
 枚举码(relation_type、position、platform)在导入时已按
 [bangumi/common](https://github.com/bangumi/common) 的映射表解码为中文;
@@ -57,8 +59,6 @@ dump 中的字段全量入库,无删减:`infobox` 原始 wiki 文本、`Episode.
 
 唯一的例外:两端节点不存在于 dump 中的悬空边(指向已删除条目,
 episode 约 1.5 万条、各关联表数千条)无法建边,导入时被过滤并打印计数。
-
-- `person-characters` 是三元关系(人-角色-作品),`subject_id` 存为边属性
 
 ## 许可
 
