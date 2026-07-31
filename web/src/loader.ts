@@ -33,8 +33,10 @@ async function streamInto(
   path: string,
   buffer: Uint8Array,
   onProgress: (bytes: number) => void,
+  priority: "high" | "low" = "high",
 ): Promise<void> {
-  const res = await fetch(url(path));
+  // 优先级提示:几何六件 high(首块即渲),名字表 low(不抢带宽)
+  const res = await fetch(url(path), { priority } as RequestInit);
   if (!res.ok || !res.body) throw new Error(`fetch ${path}: ${res.status}`);
   const reader = res.body.getReader();
   let offset = 0;
@@ -139,7 +141,9 @@ export function loadNames(
     loaded: 0,
   };
   const done = (async (): Promise<void> => {
-    const res = await fetch(url("names.ndjson"));
+    const res = await fetch(url("names.ndjson"), {
+      priority: "low",
+    } as RequestInit);
     if (!res.ok || !res.body)
       throw new Error(`fetch names.ndjson: ${res.status}`);
     const reader = res.body.getReader();
