@@ -12,12 +12,15 @@ export interface Filters {
 export interface State {
   selection: number | null; // rank
   neighbors: number[]; // 工作集邻居 ranks(top-50 已亮)
+  /** 与 neighbors 对齐的解码关系 labelId(工作集边 tooltip 用)。 */
+  neighborLabels: number[];
   filters: Filters;
 }
 
 export const state: State = {
   selection: null,
   neighbors: [],
+  neighborLabels: [],
   filters: {
     yearMin: 0,
     yearMax: 9999,

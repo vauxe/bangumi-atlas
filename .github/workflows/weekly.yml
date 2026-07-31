@@ -11,6 +11,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  actions: write # keepalive:重置 60 天 cron 停用计时
 
 concurrency:
   group: pages
@@ -35,6 +36,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      - name: Check pipeline types and lint (mypy 契约,§3)
+        run: |
+          uv run ruff check scripts/
+          uv run mypy scripts/
+
       - name: Fetch dump (SHA256 verified)
         run: uv run python scripts/fetch_dump.py
 
@@ -44,26 +50,77 @@ jobs:
       - name: Verify database against dump
         run: uv run python scripts/verify_db.py
 
+      - name: Restore coordinate cache (warm-start fallback)
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/cached_coords.parquet
+          key: coords-${{ github.run_id }}
+          restore-keys: coords-
+
       - name: Pull last week's coordinates (warm start)
         run: |
-          curl -fsSL -o /tmp/prev_coords.parquet \
+          # curl -f 失败时仍会留下空文件,必须清掉,否则 layout 读空 parquet 崩溃
+          curl -fsSL --retry 3 --retry-delay 10 \
+            -o /tmp/prev_coords.parquet \
             "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/data/coords.parquet" \
-            || echo "no previous coordinates (first run)"
+            || rm -f /tmp/prev_coords.parquet
+          if [ -s /tmp/prev_coords.parquet ]; then
+            echo "warm start: coordinates pulled from published site"
+          else
+            rm -f /tmp/prev_coords.parquet
+            echo "published coordinates unavailable"
+          fi
 
-      - name: Layout
+      - name: Layout (site coords -> cache fallback -> cold start)
         run: |
-          if [ -f /tmp/prev_coords.parquet ]; then
-            uv run python scripts/layout.py --algo umap \
-              --warm-start /tmp/prev_coords.parquet
+          if [ -s /tmp/prev_coords.parquet ]; then
+            SRC=/tmp/prev_coords.parquet
+          elif [ -s /tmp/cached_coords.parquet ]; then
+            SRC=/tmp/cached_coords.parquet
+            echo "warm start from actions/cache fallback"
+          else
+            SRC=""
+            echo "cold start: no previous coordinates anywhere"
+          fi
+          if [ -n "$SRC" ]; then
+            uv run python scripts/layout.py --algo umap --warm-start "$SRC"
           else
             uv run python scripts/layout.py --algo umap
           fi
+          cp data/layout/coords.parquet /tmp/cached_coords.parquet
+          echo "layout report:" && cat data/layout/report.json
+          # §7 位移门槛 3% 的执行点:超限打 warning 注记,人工裁断
+          uv run python - <<'EOF'
+          import json
+          r = json.load(open("data/layout/report.json"))
+          p95 = r.get("p95_shift_pct")
+          if p95 is not None and p95 > 3:
+              print(f"::warning::跨周 p95 位移 {p95}% 超过 3% 门槛(§7),"
+                    "本次仍发布,请人工核查布局稳定性")
+          EOF
 
-      - name: Bake site data
+      - name: Save coordinate cache
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/cached_coords.parquet
+          key: coords-${{ github.run_id }}
+
+      - name: Bake site data (row-level reconciliation inside)
+        run: uv run python scripts/bake_site.py
+
+      - name: Enforce size / file-count budgets (§8)
         run: |
-          uv run python scripts/bake_site.py
-          # 发布坐标供下周热启动与后续 3D 全图点云
-          cp data/layout/coords.parquet site/data/coords.parquet
+          uv run python - <<'EOF'
+          import json, sys
+          m = json.load(open("site/data/manifest.json"))
+          print(f"site: {m['total_bytes'] / 1e6:,.0f} MB, {m['n_files']:,} files")
+          if m["total_bytes"] > 1_000_000_000:
+              sys.exit("site exceeds GH Pages 1GB hard limit -> migrate to R2 (§8)")
+          if m["total_bytes"] > 900_000_000:
+              print("::warning::site size within 10% of the 1GB Pages limit")
+          if m["n_files"] > 20_000:
+              print("::warning::file count exceeds CF Pages 20k limit; migration must target R2")
+          EOF
 
       - name: Build client
         run: |
@@ -76,6 +133,14 @@ jobs:
         with:
           path: site/
 
+      - name: Keepalive (reset the 60-day cron-disable timer)
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X PUT \
+            repos/${{ github.repository }}/actions/workflows/weekly.yml/enable
+
   deploy:
     needs: bake
     runs-on: ubuntu-latest
@@ -85,6 +150,3 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
-
-# 防 60 天不活跃停用 cron:本文件本身的定期提交即 keepalive;
-# 若仓库长期无提交,手动 workflow_dispatch 一次即可续期。

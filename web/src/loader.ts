@@ -1,8 +1,11 @@
-/** 数据加载:几何 SoA 流式渐进、名字表、分片按需 fetch(带缓存)。 */
+/** 数据加载:几何 SoA 流式渐进、名字表流式、分片按需 fetch(带缓存)、
+ * Range 按 rank 点查、热分片预取。全部数据请求携带 ?v=(防缓存错配)。 */
 
 import type {
   AdjEntry,
+  AdjPage,
   Detail,
+  EpisodeRow,
   Geometry,
   Manifest,
   Names,
@@ -10,19 +13,29 @@ import type {
 } from "./types";
 
 const BASE = "data";
+let version = "";
+
+/** manifest 之后的一切数据请求都以数据版本寻址(§6 防缓存错配)。 */
+function url(path: string): string {
+  return version
+    ? `${BASE}/${path}?v=${encodeURIComponent(version)}`
+    : `${BASE}/${path}`;
+}
 
 export async function loadManifest(): Promise<Manifest> {
-  const res = await fetch(`${BASE}/manifest.json`);
-  return (await res.json()) as Manifest;
+  const res = await fetch(`${BASE}/manifest.json`, { cache: "no-cache" });
+  const m = (await res.json()) as Manifest;
+  version = m.version;
+  return m;
 }
 
 async function streamInto(
-  url: string,
+  path: string,
   buffer: Uint8Array,
   onProgress: (bytes: number) => void,
 ): Promise<void> {
-  const res = await fetch(url);
-  if (!res.ok || !res.body) throw new Error(`fetch ${url}: ${res.status}`);
+  const res = await fetch(url(path));
+  if (!res.ok || !res.body) throw new Error(`fetch ${path}: ${res.status}`);
   const reader = res.body.getReader();
   let offset = 0;
   for (;;) {
@@ -34,11 +47,16 @@ async function streamInto(
   }
 }
 
-/** 流式加载几何;onChunk(loadedNodes) 以 ~250ms 节流回调。 */
-export async function loadGeometry(
-  manifest: Manifest,
-  onChunk: (loaded: number) => void,
-): Promise<Geometry> {
+export interface GeometryStream {
+  geo: Geometry;
+  /** 启动六个 SoA 文件的并行流式填充;onChunk(loaded) 以 ~250ms
+   * 节流回调。分配与启动分离:调用方先建场景再 start,
+   * 首块回调必然晚于场景就绪(首块即渲的前提)。 */
+  start(onChunk: (loaded: number) => void): Promise<void>;
+}
+
+/** 预分配全量缓冲并立即返回 geo 与启动句柄。 */
+export function openGeometry(manifest: Manifest): GeometryStream {
   const n = manifest.n_nodes;
   const raw = {
     positions: new Uint8Array(n * 6),
@@ -65,6 +83,7 @@ export async function loadGeometry(
     size: raw.size,
     flags: raw.flags,
     loaded: 0,
+    sparse: new Map(),
   };
   const [lo, hi] = manifest.bbox;
   const scale = [0, 1, 2].map(
@@ -74,54 +93,116 @@ export async function loadGeometry(
   let dequantized = 0;
   let lastEmit = 0;
 
-  const update = (): void => {
-    const loaded = Math.min(
-      ...Object.entries(raw).map(([k, buf]) =>
-        Math.floor(
-          (progress[k] ?? 0) / stride[k as keyof typeof raw],
-        ),
-      ),
-    );
-    for (; dequantized < loaded; dequantized++) {
-      for (let a = 0; a < 3; a++) {
-        geo.positions[dequantized * 3 + a] =
-          (qpos[dequantized * 3 + a] ?? 0) * (scale[a] ?? 1) +
-          (lo[a] ?? 0);
+  const start = (onChunk: (loaded: number) => void): Promise<void> => {
+    const update = (): void => {
+      const loaded = Math.min(
+        ...Object.entries(raw).map(([k, buf]) => {
+          void buf;
+          return Math.floor(
+            (progress[k] ?? 0) / stride[k as keyof typeof raw],
+          );
+        }),
+      );
+      for (; dequantized < loaded; dequantized++) {
+        for (let a = 0; a < 3; a++) {
+          geo.positions[dequantized * 3 + a] =
+            (qpos[dequantized * 3 + a] ?? 0) * (scale[a] ?? 1) +
+            (lo[a] ?? 0);
+        }
       }
-    }
-    geo.loaded = loaded;
-    const now = performance.now();
-    if (now - lastEmit > 250 || loaded === n) {
-      lastEmit = now;
-      onChunk(loaded);
-    }
-  };
-
-  await Promise.all(
-    (Object.keys(raw) as (keyof typeof raw)[]).map((k) =>
-      streamInto(`${BASE}/${k === "positions" ? "positions" : k}.bin`,
-        raw[k], (bytes) => {
+      geo.loaded = loaded;
+      const now = performance.now();
+      if (now - lastEmit > 250 || loaded === n) {
+        lastEmit = now;
+        onChunk(loaded);
+      }
+    };
+    return Promise.all(
+      (Object.keys(raw) as (keyof typeof raw)[]).map((k) =>
+        streamInto(`${k}.bin`, raw[k], (bytes) => {
           progress[k] = bytes;
           update();
         }),
-    ),
-  );
-  update();
-  return geo;
+      ),
+    ).then(() => update());
+  };
+  return { geo, start };
 }
 
-export async function loadNames(): Promise<Names> {
-  const res = await fetch(`${BASE}/names.json`);
-  return (await res.json()) as Names;
+/** 名字表:NDJSON 逐行流式填充(与几何同序)。 */
+export function loadNames(
+  n: number,
+): { names: Names; done: Promise<void> } {
+  const names: Names = {
+    n: new Array<string | null>(n).fill(null),
+    c: new Array<string | null>(n).fill(null),
+    loaded: 0,
+  };
+  const done = (async (): Promise<void> => {
+    const res = await fetch(url("names.ndjson"));
+    if (!res.ok || !res.body)
+      throw new Error(`fetch names.ndjson: ${res.status}`);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let tail = "";
+    const feed = (text: string, flush: boolean): void => {
+      const lines = (tail + text).split("\n");
+      tail = flush ? "" : (lines.pop() ?? "");
+      for (const line of lines) {
+        if (!line) continue;
+        const [nm, cn] = JSON.parse(line) as [string, string | null];
+        names.n[names.loaded] = nm;
+        names.c[names.loaded] = cn;
+        names.loaded++;
+      }
+    };
+    for (;;) {
+      const { done: eof, value } = await reader.read();
+      if (eof) break;
+      feed(decoder.decode(value, { stream: true }), false);
+    }
+    feed(decoder.decode(), true);
+  })();
+  return { names, done };
 }
 
-export async function loadEdges(
-  manifest: Manifest,
-): Promise<Uint32Array> {
-  const res = await fetch(`${BASE}/edges.bin`);
+export async function loadEdges(): Promise<Uint32Array> {
+  const res = await fetch(url("edges.bin"));
   const buf = await res.arrayBuffer();
-  void manifest;
   return new Uint32Array(buf);
+}
+
+/** Range 点查:深链/行走落点在流式未覆盖时先取坐标(§6 定长记录)。
+ * 开发环境等不支持 Range 的服务器会回整文件,这里做兼容切片。 */
+export async function pointByRank(
+  manifest: Manifest,
+  rank: number,
+): Promise<{ pos: [number, number, number]; key: number } | null> {
+  const range = async (
+    path: string,
+    start: number,
+    len: number,
+  ): Promise<ArrayBuffer | null> => {
+    const res = await fetch(url(path), {
+      headers: { Range: `bytes=${start}-${start + len - 1}` },
+    });
+    if (res.status === 206) return res.arrayBuffer();
+    if (res.ok) return (await res.arrayBuffer()).slice(start, start + len);
+    return null;
+  };
+  const [posBuf, keyBuf] = await Promise.all([
+    range("positions.bin", rank * 6, 6),
+    range("key.bin", rank * 4, 4),
+  ]);
+  if (!posBuf || !keyBuf || posBuf.byteLength < 6 || keyBuf.byteLength < 4)
+    return null;
+  const q = new Uint16Array(posBuf.slice(0, 6));
+  const [lo, hi] = manifest.bbox;
+  const pos = [0, 1, 2].map(
+    (i) =>
+      ((q[i] ?? 0) * ((hi[i] ?? 1) - (lo[i] ?? 0))) / 65535 + (lo[i] ?? 0),
+  ) as [number, number, number];
+  return { pos, key: new Uint32Array(keyBuf.slice(0, 4))[0] ?? 0 };
 }
 
 const adjCache = new Map<number, Record<string, AdjEntry>>();
@@ -134,7 +215,7 @@ async function shard<T>(
 ): Promise<Record<string, T>> {
   const hit = cache.get(bucket);
   if (hit) return hit;
-  const res = await fetch(`${BASE}/${dir}/${bucket}.json`);
+  const res = await fetch(url(`${dir}/${bucket}.json`));
   const data = (await res.json()) as Record<string, T>;
   cache.set(bucket, data);
   return data;
@@ -156,7 +237,25 @@ export async function loadDetail(
   return s[String(key)] ?? null;
 }
 
-/** 悬停预取:填充分片缓存,点击时大概率已热。 */
+/** 邻接溢出分页("展开全部 N 个"逐页加载)。 */
+export async function loadAdjPage(
+  key: number,
+  page: number,
+): Promise<AdjPage> {
+  const res = await fetch(url(`adj_over/${key}/${page}.json`));
+  return res.ok ? ((await res.json()) as AdjPage) : [];
+}
+
+/** 分集溢出分页(超 200 集)。 */
+export async function loadEpsPage(
+  key: number,
+  page: number,
+): Promise<EpisodeRow[]> {
+  const res = await fetch(url(`det_eps/${key}/${page}.json`));
+  return res.ok ? ((await res.json()) as EpisodeRow[]) : [];
+}
+
+/** 悬停预取:填充分片缓存,点击时大概率已热(对冲每周失效后的冷 CDN)。 */
 export function prefetch(key: number, buckets: number): void {
   void loadAdj(key, buckets);
   void loadDetail(key, buckets);
@@ -164,10 +263,16 @@ export function prefetch(key: number, buckets: number): void {
 
 const searchCache = new Map<string, SearchEntry[]>();
 let charmap: Record<string, string> | null = null;
+let charmapPromise: Promise<void> | null = null;
 
-export async function loadCharmap(): Promise<void> {
-  const res = await fetch(`${BASE}/charmap.json`);
-  charmap = (await res.json()) as Record<string, string>;
+/** 幂等:搜索路径 await 它,保证折叠表就绪后才归一查询
+ * (否则冷启动头几百毫秒繁体/日文旧字查询会漏命中并污染缓存)。 */
+export function loadCharmap(): Promise<void> {
+  charmapPromise ??= (async () => {
+    const res = await fetch(url("charmap.json"));
+    charmap = (await res.json()) as Record<string, string>;
+  })();
+  return charmapPromise;
 }
 
 export function fold(text: string): string {
@@ -178,17 +283,25 @@ export function fold(text: string): string {
   return out;
 }
 
-export async function searchShard(
-  first: string,
-): Promise<SearchEntry[]> {
+async function fetchShard(first: string): Promise<SearchEntry[]> {
   const hit = searchCache.get(first);
   if (hit) return hit;
   const cp = first.codePointAt(0);
   if (cp === undefined) return [];
-  const res = await fetch(`${BASE}/search/${cp.toString(16)}.json`);
+  const res = await fetch(url(`search/${cp.toString(16)}.json`));
   const data: SearchEntry[] = res.ok
     ? ((await res.json()) as SearchEntry[])
     : [];
   searchCache.set(first, data);
   return data;
+}
+
+export const searchShard = fetchShard;
+
+/** 高频首字分片随首块预取(§1:冷分片 p95 对冲)。 */
+export function prefetchHotShards(manifest: Manifest): void {
+  for (const hex of manifest.hot_shards) {
+    const cp = Number.parseInt(hex, 16);
+    if (Number.isFinite(cp)) void fetchShard(String.fromCodePoint(cp));
+  }
 }

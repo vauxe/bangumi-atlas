@@ -90,9 +90,24 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 #toolbar label { display: inline-flex; align-items: center; gap: 4px;
   min-height: 44px; }
 #toolbar button { cursor: pointer; }
-#year-row input[type="number"] { width: 64px; background: var(--surface);
-  color: var(--ink); border: 1px solid var(--line); border-radius: 6px;
-  padding: 2px 6px; }
+#year-row { min-height: 44px; }
+#year-label { font-size: 12px; color: var(--ink-2); min-width: 76px;
+  text-align: right; }
+#year-slider { position: relative; width: 170px; height: 24px; }
+#year-slider::before { content: ""; position: absolute; left: 0; right: 0;
+  top: 11px; height: 3px; background: var(--line); border-radius: 2px; }
+#year-slider input[type="range"] { position: absolute; inset: 0;
+  width: 100%; margin: 0; background: none; pointer-events: none;
+  -webkit-appearance: none; appearance: none; }
+#year-slider input[type="range"]::-webkit-slider-thumb {
+  pointer-events: auto; -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--c-subject); border: 0; cursor: pointer; }
+#year-slider input[type="range"]::-moz-range-thumb {
+  pointer-events: auto; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--c-subject); border: 0; cursor: pointer; }
+#year-slider input[type="range"]::-moz-range-track { background: none; }
+.expand { display: block; margin-top: 8px; }
 #legend { position: fixed; left: 14px; bottom: 12px; z-index: 5;
   color: var(--ink-2); font-size: 12px; pointer-events: none; }
 #legend i { display: inline-block; width: 10px; height: 10px;
@@ -118,7 +133,10 @@ html, body { margin: 0; height: 100%; background: var(--surface);
              autocomplete="off">
       <div id="hits"></div>
     </div>
-    <div class="hint">回车飞往 · 🎲 随机传送 · 拖动环视这片宇宙</div>
+    <div class="hint">回车飞往 · 拖动环视这片缓缓自转的宇宙</div>
+    <div class="hint">
+      <button id="dice-cold" class="chip">🎲 随机传送</button>
+    </div>
   </div>
 </div>
 <div id="searchwrap-dock"></div>
@@ -128,11 +146,15 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 <div id="toolbar">
   <div class="row" id="media-chips"></div>
   <div class="row" id="year-row">
-    年代 <input id="year-min" type="number" placeholder="1970">
-    – <input id="year-max" type="number" placeholder="2026">
+    <span id="year-label">全部年代</span>
+    <div id="year-slider">
+      <input id="year-min" type="range" step="1">
+      <input id="year-max" type="range" step="1">
+    </div>
   </div>
   <div class="row">
     <button id="layer-toggle" class="chip">社区着色</button>
+    <button id="top-toggle" class="chip" title="俯视(正交)">俯视</button>
     <button id="dice" class="chip" title="随机传送">🎲</button>
     <label style="font-size:12px;color:var(--ink-2)">
       <input id="nsfw-toggle" type="checkbox"> NSFW

@@ -16,7 +16,7 @@ dependencies = [
     "umap-learn>=0.5.12",
     "pacmap>=0.9.1",
     "scipy>=1.18.0",
-    "opencc-python-reimplemented>=0.1.7",
+    "opencc>=1.1.9",
 ]
 
 [dependency-groups]
