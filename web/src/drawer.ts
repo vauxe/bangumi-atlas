@@ -98,14 +98,6 @@ export class Drawer {
     this.rerender();
   }
 
-  /** NSFW 关时不显示 NSFW 邻居(名字也是泄漏,§4 反模式)。 */
-  private hidden(rank: number): boolean {
-    return (
-      !state.filters.nsfw &&
-      rank < this.deps.geo.loaded &&
-      ((this.deps.geo.flags[rank] ?? 0) & 1) !== 0
-    );
-  }
 
   /** 工作集邻居 = 全局收藏度 top-N。rank 即全库收藏度序,inline
    * 各组组内已按 rank 升序,扁平后取最小的 N 个即全局 top-N(§4)。 */
@@ -116,7 +108,7 @@ export class Drawer {
     if (!adj) return { ranks: [], labels: [] };
     const flat: [number, number][] = [];
     for (const [lid, , ranks] of adj.g)
-      for (const r of ranks) if (!this.hidden(r)) flat.push([r, lid]);
+      for (const r of ranks) flat.push([r, lid]);
     flat.sort((a, b) => a[0] - b[0]);
     const top = flat.slice(0, cap);
     return {
@@ -168,7 +160,7 @@ export class Drawer {
     this.rerender();
   }
 
-  /** 过滤条件变化(如 NSFW 开关)后按当前 store 重绘。 */
+  /** 过滤条件变化后按当前 store 重绘。 */
   refresh(): void {
     this.rerender();
   }
@@ -201,16 +193,12 @@ export class Drawer {
       lst.push(r);
       extraByLid.set(lid, lst);
     }
-    // 溢出页全部加载后,组内"还有 N 个"只剩 NSFW 隐藏项,
-    // 再显示可点提示就是死按钮——此时不再出提示
+    // 溢出页全部加载后不再出"还有 N 个"提示(已无可加载项)
     const allLoaded = cur.pagesLoaded >= (adj?.op?.length ?? 0);
     const groups = (adj?.g ?? [])
       .map(([lid, total, ranks]) => {
         const label = this.deps.manifest.labels[lid] ?? "关联";
-        const members = [
-          ...ranks,
-          ...(extraByLid.get(lid) ?? []),
-        ].filter((r) => !this.hidden(r));
+        const members = [...ranks, ...(extraByLid.get(lid) ?? [])];
         const shown = cur.expanded
           ? members
           : members.slice(0, GROUP_CHIPS);
@@ -235,10 +223,8 @@ export class Drawer {
       })
       .join("");
     const shownCount = (adj?.g ?? []).reduce((s, [lid, , ranks]) => {
-      const members = [
-        ...ranks,
-        ...(extraByLid.get(lid) ?? []),
-      ].filter((r) => !this.hidden(r)).length;
+      const members =
+        ranks.length + (extraByLid.get(lid)?.length ?? 0);
       return s + (cur.expanded ? members : Math.min(members, GROUP_CHIPS));
     }, 0);
     const expandBtn =

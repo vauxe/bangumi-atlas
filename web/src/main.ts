@@ -16,7 +16,6 @@ import {
   prefetch,
   prefetchHotShards,
 } from "./loader";
-import type { AdjEntry } from "./types";
 import { loadLabels } from "./labels";
 import { prefersReducedMotion } from "./camera";
 import { Scene } from "./scene";
@@ -164,7 +163,6 @@ async function boot(): Promise<void> {
     return null;
   };
   let pendingKey: number | null = null; // 深链 n= 未覆盖时的挂起落点
-  let lastAdj: AdjEntry | null = null; // NSFW 开关重算邻居用
 
   /** 相机语义:fly = 飞行聚焦(搜索/骰子/行走);center = 枢轴
    * 滑移到节点、保持缩放(单击选中——此后滚轮推向它、右键绕它转);
@@ -191,7 +189,6 @@ async function boot(): Promise<void> {
       scene.flyTo(rank, scene.getViewState().zoom);
     const adj = await loadAdj(key, manifest.buckets);
     if (state.selection !== rank) return;
-    lastAdj = adj;
     const nb = drawer.neighborsOf(adj, 50);
     state.neighbors = nb.ranks;
     state.neighborLabels = nb.labels;
@@ -204,7 +201,6 @@ async function boot(): Promise<void> {
     state.selection = null;
     state.neighbors = [];
     state.neighborLabels = [];
-    lastAdj = null;
     drawer.hide();
     notify();
     if (push) pushUrl();
@@ -242,7 +238,7 @@ async function boot(): Promise<void> {
     }
   };
 
-  // ---- 搜索(联想过滤 NSFW;命中 → flyTo + 选中 + 亮邻居)----
+  // ---- 搜索(命中 → flyTo + 选中 + 亮邻居)----
   new Search($("#search"), $("#hits"), (rank) => void select(rank, "fly"));
 
   // ---- 骰子:随机传送(跳过隐藏节点;冷启动屏同款)----
@@ -296,17 +292,6 @@ async function boot(): Promise<void> {
     replaceUrl();
   });
 
-  $("#nsfw-toggle").addEventListener("change", (ev) => {
-    state.filters.nsfw = (ev.target as HTMLInputElement).checked;
-    // 开关双向对称:当前选中的邻居按新过滤条件重算(§4 可逆性)
-    if (state.selection !== null && lastAdj) {
-      const nb = drawer.neighborsOf(lastAdj, 50);
-      state.neighbors = nb.ranks;
-      state.neighborLabels = nb.labels;
-    }
-    notify(); // 刻意不写 URL(§4:分享链接不携带 NSFW)
-    drawer.refresh(); // 抽屉 chips 同步显隐
-  });
 
   // ---- 时间机器:双拇指年代滑块(选中状态保留在 URL)----
   const yMin = $("#year-min") as HTMLInputElement;

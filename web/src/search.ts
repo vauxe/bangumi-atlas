@@ -1,9 +1,7 @@
-/** 搜索:归一 → 前缀分片 → 联想下拉;回车/点击 → 选中。
- * NSFW 条目默认过滤(§4 反模式:NSFW 不进默认视图)。 */
+/** 搜索:归一 → 前缀分片 → 联想下拉;回车/点击 → 选中。 */
 
 import { esc, html } from "./html";
 import { fold, loadCharmap, searchShard } from "./loader";
-import { state } from "./store";
 import type { SearchEntry } from "./types";
 
 export class Search {
@@ -57,11 +55,7 @@ export class Search {
       cp === undefined ? "" : String.fromCodePoint(cp),
     );
     if (fold(this.box.value) !== q) return; // 已过期
-    this.items = entries
-      .filter(
-        (e) => e[0].startsWith(q) && (state.filters.nsfw || !e[3]),
-      )
-      .slice(0, 12);
+    this.items = entries.filter((e) => e[0].startsWith(q)).slice(0, 12);
     this.active = this.items.length ? 0 : -1;
     this.renderList();
   }

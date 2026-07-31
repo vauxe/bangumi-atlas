@@ -1,4 +1,4 @@
-/** URL 即状态:#c=…&n=…&r=…&y=…&m=…&l=…(NSFW 刻意不入 URL,§4)。
+/** URL 即状态:#c=…&n=…&r=…&y=…&m=…&l=…。
  * n = 全局键(稳定身份),r = rank(深链未流式覆盖时 Range 点查落点)。 */
 
 import { state } from "./store";

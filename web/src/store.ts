@@ -5,7 +5,6 @@ export interface Filters {
   yearMax: number;
   /** 空 = 不过滤;否则仅高亮所选媒介。 */
   media: Set<number>;
-  nsfw: boolean;
   colorBy: "type" | "community";
 }
 
@@ -25,7 +24,6 @@ export const state: State = {
     yearMin: 0,
     yearMax: 9999,
     media: new Set(),
-    nsfw: false,
     colorBy: "type",
   },
 };
