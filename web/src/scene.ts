@@ -701,7 +701,7 @@ export class Scene {
       new ScatterplotLayer({
         id: "ws-glow",
         data: { length: 1, attributes: { getPosition: { value: pos, size: 3 } } },
-        getFillColor: [243, 143, 184, 46],
+        getFillColor: [242, 91, 166, 46], // Miku 品红光晕
         radiusUnits: "common",
         getRadius: 7,
         radiusMinPixels: 12,
@@ -777,7 +777,7 @@ export class Scene {
           },
           filled: false,
           stroked: true,
-          getLineColor: [243, 143, 184, Math.round(200 * (1 - k))],
+          getLineColor: [242, 91, 166, Math.round(200 * (1 - k))],
           getLineWidth: 1.5,
           lineWidthUnits: "pixels",
           radiusUnits: "common",

@@ -11,10 +11,12 @@
       content="99 万个作品、人物与角色的 3D 关系宇宙">
 <style>
 :root {
-  /* 暖紫夜空 + 萌系三色(天蓝/珊瑚/薄荷,CVD ΔE≥8 校验通过)
-     粉色只作 UI 点缀,不是第四个类别色 */
-  --surface: #181226; --panel: #221a38; --ink: #f0edf6;
-  --ink-2: #a89fc0; --line: #3a2d55; --accent: #f38fb8;
+  /* 初音未来配色:葱色 #39C5BB 主调 + 黑青夜空底 + 品红粉点缀,
+     抽屉为粉色调面板。数据三色(天蓝/珊瑚/薄荷)是编码色,
+     在本底色上重新通过 CVD ΔE≥8 与对比度校验,不随主题漂移 */
+  --surface: #0f1a1c; --panel: #14262b; --panel-pink: #2a1524;
+  --ink: #eafcfa; --ink-2: #8fb8b5; --line: #24444a;
+  --miku: #39c5bb; --pink: #f25ba6;
   --c-subject: #3d8ede; --c-person: #e56a40; --c-character: #27ab7c;
 }
 * { box-sizing: border-box; }
@@ -30,8 +32,8 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 #search { width: 100%; padding: 12px 16px; font-size: 16px;
   background: var(--panel); color: var(--ink);
   border: 1px solid var(--line); border-radius: 20px; outline: none; }
-#search:focus { border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(243, 143, 184, .18); }
+#search:focus { border-color: var(--miku);
+  box-shadow: 0 0 0 3px rgba(57, 197, 187, .2); }
 #hits { position: absolute; top: 100%; left: 0; right: 0; z-index: 9;
   background: var(--panel); border: 1px solid var(--line);
   border-radius: 0 0 16px 16px; text-align: left; max-height: 320px;
@@ -43,38 +45,44 @@ html, body { margin: 0; height: 100%; background: var(--surface);
   width: 300px; z-index: 6; }
 
 #drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 420px;
-  max-width: 92vw; background: var(--panel); z-index: 7; padding: 20px;
+  max-width: 92vw; background: var(--panel-pink); z-index: 7; padding: 20px;
   overflow-y: auto; transform: translateX(105%); transition: transform .25s;
-  border-left: 1px solid var(--line); }
+  border-left: 2px solid var(--pink);
+  box-shadow: -8px 0 24px rgba(242, 91, 166, .12); }
+#drawer .group-label { color: #d79ab8; }
+#drawer .chip { background: #3c2133; }
+#drawer .chip:hover { background: #54304a; }
 #drawer.open { transform: none; }
 #drawer h2 { margin: 4px 24px 2px 0; font-size: 20px; }
 #drawer .subtitle { color: var(--ink-2); margin-bottom: 8px; }
 #drawer-close { position: absolute; top: 10px; right: 12px; border: 0;
   background: none; color: var(--ink-2); font-size: 22px; cursor: pointer; }
-.badge { background: var(--line); border-radius: 6px; padding: 2px 8px;
-  font-size: 12px; margin-right: 6px; }
+.badge { background: #46243a; border-radius: 8px; padding: 2px 8px;
+  font-size: 12px; margin-right: 6px; color: #f4cfe1; }
 .tag { color: var(--ink-2); font-size: 12px; margin-right: 8px; }
 .stats { color: var(--ink-2); margin: 8px 0; font-size: 13px; }
 .sum { margin: 10px 0; max-height: 4.8em; overflow: hidden;
   position: relative; white-space: pre-line; }
 .sum.expanded { max-height: none; }
 .sum-toggle { display: block; border: 0; background: none;
-  color: var(--c-subject); cursor: pointer; padding: 2px 0; }
+  color: var(--miku); cursor: pointer; padding: 2px 0; }
 .group { margin-top: 14px; }
 .group-label { color: var(--ink-2); font-size: 12px; margin-bottom: 6px; }
 .chip { background: var(--line); color: var(--ink); border: 0;
   border-radius: 16px; padding: 4px 10px; margin: 0 6px 6px 0;
-  cursor: pointer; font-size: 13px; }
-.chip:hover { background: #4b3a6e; }
-.chip.on { background: var(--accent); color: #2a1420; }
+  cursor: pointer; font-size: 13px; font-family: inherit;
+  /* 必须显式关掉原生外观:macOS 按钮的原生白底会盖过作者背景 */
+  appearance: none; -webkit-appearance: none; }
+.chip:hover { background: #1d3f45; }
+.chip.on { background: var(--miku); color: #06211f; }
 .more, .note, .ep-date { color: var(--ink-2); font-size: 12px; }
 .ep { font-size: 13px; padding: 2px 0; }
-.ext { display: inline-block; margin-top: 16px; color: var(--c-subject); }
+.ext { display: inline-block; margin-top: 16px; color: var(--miku); }
 .loading { color: var(--ink-2); }
 
 #toolbar { position: fixed; right: 14px; bottom: 40px; z-index: 6;
   display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
-#toolbar .row { background: rgba(34,26,56,.88); border: 1px solid var(--line);
+#toolbar .row { background: rgba(20,38,43,.88); border: 1px solid var(--line);
   border-radius: 16px; padding: 6px 8px; backdrop-filter: blur(4px);
   display: flex; align-items: center; gap: 6px; }
 #toolbar .chip { margin: 0; min-height: 44px; min-width: 44px;
@@ -95,10 +103,10 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 #year-slider input[type="range"]::-webkit-slider-thumb {
   pointer-events: auto; -webkit-appearance: none; appearance: none;
   width: 14px; height: 14px; border-radius: 50%;
-  background: var(--accent); border: 0; cursor: pointer; }
+  background: var(--pink); border: 0; cursor: pointer; }
 #year-slider input[type="range"]::-moz-range-thumb {
   pointer-events: auto; width: 14px; height: 14px; border-radius: 50%;
-  background: var(--accent); border: 0; cursor: pointer; }
+  background: var(--pink); border: 0; cursor: pointer; }
 #year-slider input[type="range"]::-moz-range-track { background: none; }
 .expand { display: block; margin-top: 8px; }
 #legend { position: fixed; left: 14px; bottom: 12px; z-index: 5;
@@ -106,7 +114,7 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 #legend i { display: inline-block; width: 10px; height: 10px;
   border-radius: 50%; margin: 0 4px 0 10px; vertical-align: -1px; }
 #tooltip { position: fixed; display: none; z-index: 8;
-  background: rgba(18,23,42,.95); border: 1px solid var(--line);
+  background: rgba(20,38,43,.95); border: 1px solid var(--line);
   padding: 4px 10px; border-radius: 8px; pointer-events: none;
   font-size: 13px; }
 #tooltip .tt { color: var(--ink-2); font-size: 11px; }
