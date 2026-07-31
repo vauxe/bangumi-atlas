@@ -6,6 +6,7 @@ Products: site/data/ 下 manifest.json、几何 SoA bins、names.ndjson(流式)�
 纪律:失败与截断显式报出、行级对账,对不上非零退出。
 """
 
+import gzip
 import hashlib
 import shutil
 import sys
@@ -25,6 +26,25 @@ def jdump(obj: Any) -> bytes:
     与标准库 dumps 行为一致,输出为紧凑 UTF-8)。"""
     return orjson.dumps(obj, option=orjson.OPT_NON_STR_KEYS)
 
+
+class PackWriter:
+    """逐片 gzip 打包:每片独立压缩后连续写入一个 pack 文件,
+    客户端按 [offset, length) HTTP Range 取片、DecompressionStream
+    解压。分片数不再等于文件数(文件数曾达 2.5 万,详情分片裸存
+    700MB 靠 CDN 压缩;打包后存储即压缩,体积与文件数同时解决)。"""
+
+    def __init__(self) -> None:
+        self.blob = bytearray()
+
+    def add(self, obj: Any) -> list[int]:
+        gz = gzip.compress(jdump(obj), 6)
+        off = len(self.blob)
+        self.blob += gz
+        return [off, len(gz)]
+
+    def write(self, path: Path) -> None:
+        path.write_bytes(bytes(self.blob))
+
 ROOT = Path(__file__).resolve().parent.parent
 PARQUET = ROOT / "data" / "parquet"
 LAYOUT = ROOT / "data" / "layout" / "coords.parquet"
@@ -36,6 +56,7 @@ BUCKETS = 8192
 ADJ_INLINE = 200
 EPS_INLINE = 200
 PAGE = 500
+DET_SPLIT = 4  # 详情 pack 按桶均分 4 个文件,单文件压缩后 <100MB
 SKELETON_TARGET = 500_000  # §2 预算;保底覆盖优先,超限显式报出
 LABELS_TOP = 20_000
 HOT_SHARDS = 24  # 高频首字分片数,随首块预取(§1 冷分片对冲)
@@ -361,13 +382,13 @@ def main() -> None:  # noqa: PLR0915
         f"(补反向 {synthesized_reverse:,} 条)"
     )
 
-    # ---- 邻接分片(top-200 + 各关系组总数 + 溢出分页)----
+    # ---- 邻接分片(top-200 + 各关系组总数 + 溢出分页入 pages.pack)----
     overflow_nodes = 0
     dup_dropped = 0
     written_inline = 0
     written_over = 0
     shards: list[dict[str, Any]] = [dict() for _ in range(BUCKETS)]
-    (SITE / "adj_over").mkdir(exist_ok=True)
+    pages_pack = PackWriter()  # 邻接溢出页与分集溢出页共用
     for k, lst in adj.items():
         # rank 即全库收藏度序:升序排序 = 按收藏度降序(§4 预排序)
         lst.sort()
@@ -394,27 +415,34 @@ def main() -> None:  # noqa: PLR0915
         written_inline += len(inline)
         if over:
             overflow_nodes += 1
-            pages = [over[i : i + PAGE] for i in range(0, len(over), PAGE)]
-            entry["p"] = len(pages)
-            odir = SITE / "adj_over" / str(k)
-            odir.mkdir(exist_ok=True)
-            for pi, page in enumerate(pages):
-                (odir / f"{pi}.json").write_bytes(
-                    jdump([[li, r] for r, li in page])
+            # 溢出页进 pages.pack,[offset, len] 内嵌进条目本身:
+            # 客户端"展开全部"无需任何索引往返
+            entry["op"] = [
+                pages_pack.add(
+                    [[li, r] for r, li in over[i : i + PAGE]]
                 )
+                for i in range(0, len(over), PAGE)
+            ]
             written_over += len(over)
         shards[k % BUCKETS][str(k)] = entry
-    (SITE / "adj").mkdir(exist_ok=True)
-    for i, sh in enumerate(shards):
-        (SITE / "adj" / f"{i}.json").write_bytes(jdump(sh))
+    adj_gz = [gzip.compress(jdump(sh), 6) for sh in shards]
+    adj_idx = np.zeros(BUCKETS + 1, dtype=np.uint32)
+    adj_idx[1:] = np.cumsum([len(g) for g in adj_gz])
+    (SITE / "adj.pack").write_bytes(b"".join(adj_gz))
+    (SITE / "adj.idx").write_bytes(adj_idx.tobytes())
+    reconcile(
+        "adj.pack 字节数 = 索引末位",
+        int(adj_idx[-1]),
+        (SITE / "adj.pack").stat().st_size,
+    )
     reconcile(
         "邻接 inline+溢出 = 去重后条目",
         entries_expected - dup_dropped,
         written_inline + written_over,
     )
     log(
-        f"邻接分片写出完成(溢出节点 {overflow_nodes:,},"
-        f"源重复行剔除 {dup_dropped:,})"
+        f"邻接打包完成(溢出节点 {overflow_nodes:,},"
+        f"源重复行剔除 {dup_dropped:,};pack {int(adj_idx[-1]) / 1e6:,.0f}MB)"
     )
 
     # ---- 骨架边:无向去重 → 每节点保底 top-1 + 权重补足,按权重降序 ----
@@ -481,7 +509,6 @@ def main() -> None:  # noqa: PLR0915
     for v in eps_by_subject.values():
         v.sort(key=lambda e: (e[0], e[1]))
     det_shards: list[dict[str, Any]] = [dict() for _ in range(BUCKETS)]
-    (SITE / "det_eps").mkdir(exist_ok=True)
     eps_paged = 0
     eps_attached = 0
     for rank, k in enumerate(key_r):
@@ -497,23 +524,32 @@ def main() -> None:  # noqa: PLR0915
             det["eps"] = elist[:EPS_INLINE]
             if len(elist) > EPS_INLINE:
                 eps_paged += 1
-                epages = [
-                    elist[i : i + PAGE]
+                det["eo"] = [
+                    pages_pack.add(elist[i : i + PAGE])
                     for i in range(EPS_INLINE, len(elist), PAGE)
                 ]
-                pdir = SITE / "det_eps" / str(ki)
-                pdir.mkdir(exist_ok=True)
-                for pi, epage in enumerate(epages):
-                    (pdir / f"{pi}.json").write_bytes(jdump(epage))
         det_shards[ki % BUCKETS][str(ki)] = det
-    (SITE / "det").mkdir(exist_ok=True)
-    for i, sh in enumerate(det_shards):
-        (SITE / "det" / f"{i}.json").write_bytes(jdump(sh))
+    # 4 个 pack 均分 8192 桶;索引存全局累计偏移,客户端按
+    # pack 首桶偏移换算 pack 内相对位置
+    det_gz = [gzip.compress(jdump(sh), 6) for sh in det_shards]
+    det_idx = np.zeros(BUCKETS + 1, dtype=np.uint32)
+    det_idx[1:] = np.cumsum([len(g) for g in det_gz])
+    per_pack = BUCKETS // DET_SPLIT
+    det_pack_bytes = 0
+    for p in range(DET_SPLIT):
+        seg = b"".join(det_gz[p * per_pack : (p + 1) * per_pack])
+        (SITE / f"det-{p}.pack").write_bytes(seg)
+        det_pack_bytes += len(seg)
+    (SITE / "det.idx").write_bytes(det_idx.tobytes())
+    reconcile("det pack 字节数 = 索引末位", int(det_idx[-1]), det_pack_bytes)
     # actual 取分片字典实存量而非循环计数(键冲突覆盖在此暴露)
     reconcile("详情条目数", n, sum(len(sh) for sh in det_shards))
+    pages_pack.write(SITE / "pages.pack")
     orphan_eps = sum(len(v) for v in eps_by_subject.values()) - eps_attached
     log(
-        f"详情分片写出完成(分集分页节点 {eps_paged:,};"
+        f"详情打包完成(分集分页节点 {eps_paged:,};det pack "
+        f"{det_pack_bytes / 1e6:,.0f}MB,溢出页 pack "
+        f"{len(pages_pack.blob) / 1e6:,.1f}MB;"
         f"孤儿分集 {orphan_eps:,} 条不挂靠,与库中记录一致)"
     )
 
@@ -563,17 +599,21 @@ def main() -> None:  # noqa: PLR0915
                 srec.append(1)
             entries[nk[0]].append(srec)
             n_entries += 1
-    (SITE / "search").mkdir(exist_ok=True)
-    for ch, slist in entries.items():
+    # 一字一档打包:pack + {首字码点 hex: [offset, len]} 偏移索引
+    search_pack = PackWriter()
+    search_idx: dict[str, list[int]] = {}
+    for ch in sorted(entries):
+        slist = entries[ch]
         slist.sort(key=lambda e: e[2])
-        (SITE / "search" / f"{ord(ch):x}.json").write_bytes(
-            jdump(slist)
-        )
+        search_idx[f"{ord(ch):x}"] = search_pack.add(slist)
+    search_pack.write(SITE / "search.pack")
+    (SITE / "search.idx.json").write_bytes(jdump(search_idx))
     reconcile(
         "搜索条目数",
         expected_entries,
         sum(len(v) for v in entries.values()),
     )
+    reconcile("搜索索引档数", len(entries), len(search_idx))
     hot_shards = [
         f"{ord(ch):x}"
         for ch, _ in sorted(
@@ -624,28 +664,18 @@ def main() -> None:  # noqa: PLR0915
     # ---- 坐标快照:下周热启动 + 位置恒定的事实来源,纳入清单 ----
     shutil.copy(LAYOUT, SITE / "coords.parquet")
 
-    # ---- manifest:版本 + 文件清单 + 哈希(客户端 ?v= 寻址防缓存错配)----
+    # ---- manifest:版本 + 文件清单 + 哈希(客户端 ?v= 寻址防缓存错配)。
+    # 分片已全部打包,产物只剩顶层文件,逐个 sha256 ----
     file_meta: dict[str, list[Any]] = {}
-    dir_meta: dict[str, list[Any]] = {}
     total_bytes = 0
     n_files = 0
-    for p in sorted(SITE.iterdir()):
-        if p.name == "manifest.json":
+    for fpath in sorted(SITE.iterdir()):
+        if fpath.name == "manifest.json":
             continue
-        if p.is_file():
-            file_meta[p.name] = [p.stat().st_size, sha256_of(p)]
-            total_bytes += p.stat().st_size
-            n_files += 1
-    for dpath in sorted(p for p in SITE.iterdir() if p.is_dir()):
-        files = sorted(p for p in dpath.rglob("*") if p.is_file())
-        dbytes = sum(p.stat().st_size for p in files)
-        agg = hashlib.sha256()
-        for p in files:
-            agg.update(p.relative_to(dpath).as_posix().encode())
-            agg.update(bytes.fromhex(sha256_of(p)))
-        dir_meta[dpath.name] = [len(files), dbytes, agg.hexdigest()]
-        total_bytes += dbytes
-        n_files += len(files)
+        assert fpath.is_file(), f"产物应全为顶层文件,发现目录 {fpath.name}"
+        file_meta[fpath.name] = [fpath.stat().st_size, sha256_of(fpath)]
+        total_bytes += fpath.stat().st_size
+        n_files += 1
     # 滑块标定:上游日期有脏值(实测 701 与 9000),钳到可信窗口;
     # 滑块拉满 = 不过滤,脏年份节点不受影响
     year_nonzero = year_r[year_r > 0]
@@ -672,6 +702,7 @@ def main() -> None:  # noqa: PLR0915
         "n_nodes": n,
         "n_edges_skeleton": len(skel),
         "buckets": BUCKETS,
+        "det_packs": DET_SPLIT,
         "adj_inline": ADJ_INLINE,
         "eps_inline": EPS_INLINE,
         "bbox": [lo, hi],
@@ -680,7 +711,6 @@ def main() -> None:  # noqa: PLR0915
         "hot_shards": hot_shards,
         "layout": layout_report,
         "files": file_meta,
-        "dirs": dir_meta,
         "total_bytes": total_bytes,
         "n_files": n_files,
     }

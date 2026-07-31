@@ -2,11 +2,12 @@
  * 组内 chips 点击即行走)+ "展开全部 N 个"分页 + 分集分页 + 外链。 */
 
 import { esc, html, raw } from "./html";
-import { loadAdj, loadAdjPage, loadDetail, loadEpsPage } from "./loader";
+import { loadAdj, loadDetail, loadPage } from "./loader";
 import { state } from "./store";
 import { bgmUrl, MEDIA_NAMES, TYPE_NAMES, etype } from "./types";
 import type {
   AdjEntry,
+  AdjPage,
   Detail,
   EpisodeRow,
   Geometry,
@@ -124,16 +125,18 @@ export class Drawer {
   }
 
   /** 展开全部:先放开各组 inline 上限,再按页拉取溢出条目(§6)。
+   * 页偏移内嵌在条目里(pages.pack 的 [offset, len]);
    * 在途锁 + 页号先占位:双击不会重复加载或跳页。 */
   private async expandRelations(): Promise<void> {
     const cur = this.cur;
     if (!cur || !cur.adj || cur.loading) return;
     cur.expanded = true;
-    if (cur.pagesLoaded < (cur.adj.p ?? 0)) {
+    const loc = (cur.adj.op ?? [])[cur.pagesLoaded];
+    if (loc) {
       cur.loading = true;
       const pageIdx = cur.pagesLoaded;
       try {
-        const page = await loadAdjPage(cur.key, pageIdx);
+        const page = await loadPage<AdjPage>(loc[0], loc[1]);
         if (this.cur !== cur) return;
         cur.extra.push(...page);
         cur.pagesLoaded = pageIdx + 1;
@@ -148,14 +151,12 @@ export class Drawer {
     const cur = this.cur;
     if (!cur || !cur.det || cur.loading) return;
     cur.epsExpanded = true;
-    const ne = cur.det.ne ?? 0;
-    const inline = cur.det.eps?.length ?? 0;
-    const shown = inline + cur.epsExtra.length;
-    if (shown < ne) {
+    const loc = (cur.det.eo ?? [])[cur.epsPagesLoaded];
+    if (loc) {
       cur.loading = true;
       const pageIdx = cur.epsPagesLoaded;
       try {
-        const page = await loadEpsPage(cur.key, pageIdx);
+        const page = await loadPage<EpisodeRow[]>(loc[0], loc[1]);
         if (this.cur !== cur) return;
         cur.epsExtra.push(...page);
         cur.epsPagesLoaded = pageIdx + 1;
