@@ -14,7 +14,7 @@ import type { Device } from "@luma.gl/core";
 import { IconLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { Camera, prefersReducedMotion } from "./camera";
 import type { OrbitState } from "./camera";
-import { coverItems, coverUrl } from "./covers";
+import { COVER_SIZES, coverItems, coverUrl } from "./covers";
 import type { CoverItem } from "./covers";
 import { labelLayers } from "./labels";
 import type { LabelCache, LabelData } from "./labels";
@@ -847,7 +847,7 @@ export class Scene {
           id: "ws-covers",
           data: covers,
           getIcon: (d) => ({
-            url: coverUrl(d.key, "small") ?? "",
+            url: coverUrl(d.key, COVER_SIZES.map) ?? "",
             id: String(d.key),
             width: 100,
             height: 100,

@@ -2,11 +2,20 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  COVER_SIZES,
   coverItems,
   coverUrl,
   drawerCover,
   chipCover,
 } from "../src/covers";
+
+test("uses right-sized cover assets for each UI context", () => {
+  assert.deepEqual(COVER_SIZES, {
+    map: "grid",
+    chip: "grid",
+    drawer: "small",
+  });
+});
 
 test("builds typed Bangumi cover URLs and rejects invalid entity keys", () => {
   assert.equal(
@@ -34,7 +43,7 @@ test("renders covers with a stable type-dot fallback", () => {
 
   const drawer = drawerCover(0x0100_002a);
   assert.match(drawer, /class="cover"/);
-  assert.match(drawer, /type=medium/);
+  assert.match(drawer, /type=small/);
   assert.match(drawer, /alt=""/);
 });
 

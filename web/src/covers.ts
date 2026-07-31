@@ -5,6 +5,14 @@ import { eid, etype } from "./types";
 
 export type CoverSize = "small" | "grid" | "medium";
 
+type CoverContext = "map" | "chip" | "drawer";
+
+export const COVER_SIZES: Readonly<Record<CoverContext, CoverSize>> = {
+  map: "grid",
+  chip: "grid",
+  drawer: "small",
+};
+
 const COVER_KINDS = ["", "subjects", "persons", "characters"] as const;
 
 export function coverUrl(key: number, size: CoverSize): string | null {
@@ -18,7 +26,7 @@ export function coverUrl(key: number, size: CoverSize): string | null {
 /** The dot stays underneath the image, so a failed optional request has a
  * stable, type-colored fallback without shifting the chip text. */
 export function chipCover(key: number): string {
-  const url = coverUrl(key, "grid");
+  const url = coverUrl(key, COVER_SIZES.chip);
   if (!url) return "";
   const type = etype(key);
   return html`<span class="chip-media type-${type}" aria-hidden="true">
@@ -35,7 +43,7 @@ export function chipCover(key: number): string {
 }
 
 export function drawerCover(key: number): string {
-  const url = coverUrl(key, "medium");
+  const url = coverUrl(key, COVER_SIZES.drawer);
   if (!url) return "";
   return html`<img
     class="cover"
@@ -63,7 +71,7 @@ export function coverItems(
   ranks.forEach((rank, index) => {
     if (seen.has(rank)) return;
     const key = keys[rank] ?? 0;
-    if (!coverUrl(key, "small")) return;
+    if (!coverUrl(key, COVER_SIZES.map)) return;
     seen.add(rank);
     items.push({ rank, key, index });
   });
