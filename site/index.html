@@ -11,14 +11,17 @@
       content="99 万个作品、人物与角色的 3D 关系宇宙">
 <style>
 :root {
-  --surface: #0b0e1a; --panel: #12172a; --ink: #e8e9ec;
-  --ink-2: #9aa0b4; --line: #232a44;
-  --c-subject: #3987e5; --c-person: #d95926; --c-character: #199e70;
+  /* 暖紫夜空 + 萌系三色(天蓝/珊瑚/薄荷,CVD ΔE≥8 校验通过)
+     粉色只作 UI 点缀,不是第四个类别色 */
+  --surface: #181226; --panel: #221a38; --ink: #f0edf6;
+  --ink-2: #a89fc0; --line: #3a2d55; --accent: #f38fb8;
+  --c-subject: #3d8ede; --c-person: #e56a40; --c-character: #27ab7c;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--surface);
   color: var(--ink);
-  font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  font: 14px/1.6 ui-rounded, "Yuanti SC", "YouYuan", "幼圆",
+    -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
 #map { position: fixed; inset: 0; }
 #hud { position: fixed; bottom: 12px; right: 12px; color: var(--ink-2);
   font-family: monospace; z-index: 5; pointer-events: none; }
@@ -26,11 +29,12 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 #searchwrap { position: relative; }
 #search { width: 100%; padding: 12px 16px; font-size: 16px;
   background: var(--panel); color: var(--ink);
-  border: 1px solid var(--line); border-radius: 10px; outline: none; }
-#search:focus { border-color: var(--c-subject); }
+  border: 1px solid var(--line); border-radius: 20px; outline: none; }
+#search:focus { border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(243, 143, 184, .18); }
 #hits { position: absolute; top: 100%; left: 0; right: 0; z-index: 9;
   background: var(--panel); border: 1px solid var(--line);
-  border-radius: 0 0 10px 10px; text-align: left; max-height: 320px;
+  border-radius: 0 0 16px 16px; text-align: left; max-height: 320px;
   overflow: auto; }
 #hits .hit { padding: 8px 16px; cursor: pointer; }
 #hits .hit.active, #hits .hit:hover { background: var(--line); }
@@ -59,10 +63,10 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 .group { margin-top: 14px; }
 .group-label { color: var(--ink-2); font-size: 12px; margin-bottom: 6px; }
 .chip { background: var(--line); color: var(--ink); border: 0;
-  border-radius: 14px; padding: 4px 10px; margin: 0 6px 6px 0;
+  border-radius: 16px; padding: 4px 10px; margin: 0 6px 6px 0;
   cursor: pointer; font-size: 13px; }
-.chip:hover { background: #31395e; }
-.chip.on { background: var(--c-subject); }
+.chip:hover { background: #4b3a6e; }
+.chip.on { background: var(--accent); color: #2a1420; }
 .more, .note, .ep-date { color: var(--ink-2); font-size: 12px; }
 .ep { font-size: 13px; padding: 2px 0; }
 .ext { display: inline-block; margin-top: 16px; color: var(--c-subject); }
@@ -70,8 +74,8 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 
 #toolbar { position: fixed; right: 14px; bottom: 40px; z-index: 6;
   display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
-#toolbar .row { background: rgba(18,23,42,.85); border: 1px solid var(--line);
-  border-radius: 10px; padding: 6px 8px; backdrop-filter: blur(4px);
+#toolbar .row { background: rgba(34,26,56,.88); border: 1px solid var(--line);
+  border-radius: 16px; padding: 6px 8px; backdrop-filter: blur(4px);
   display: flex; align-items: center; gap: 6px; }
 #toolbar .chip { margin: 0; min-height: 44px; min-width: 44px;
   display: inline-flex; align-items: center; justify-content: center;
@@ -91,10 +95,10 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 #year-slider input[type="range"]::-webkit-slider-thumb {
   pointer-events: auto; -webkit-appearance: none; appearance: none;
   width: 14px; height: 14px; border-radius: 50%;
-  background: var(--c-subject); border: 0; cursor: pointer; }
+  background: var(--accent); border: 0; cursor: pointer; }
 #year-slider input[type="range"]::-moz-range-thumb {
   pointer-events: auto; width: 14px; height: 14px; border-radius: 50%;
-  background: var(--c-subject); border: 0; cursor: pointer; }
+  background: var(--accent); border: 0; cursor: pointer; }
 #year-slider input[type="range"]::-moz-range-track { background: none; }
 .expand { display: block; margin-top: 8px; }
 #legend { position: fixed; left: 14px; bottom: 12px; z-index: 5;
@@ -116,7 +120,7 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 
 <div id="searchwrap-dock">
   <div id="searchwrap">
-    <input id="search" placeholder="搜索作品 / 人物 / 角色…"
+    <input id="search" placeholder="搜索作品 / 人物 / 角色 ✨"
            autocomplete="off">
     <div id="hits"></div>
   </div>

@@ -125,9 +125,9 @@ in float atlas_fogDepth;`,
   if (a_nsfw && atlas.nsfwOn < 0.5) discard;
   if (yearOn && isSubject && f_year > 0.5 &&
       (f_year < atlas.yearMin || f_year > atlas.yearMax)) discard;
-  vec3 rgb = isSubject ? vec3(57.0, 135.0, 229.0)
-           : f_etype < 2.5 ? vec3(217.0, 89.0, 38.0)
-           : vec3(25.0, 158.0, 112.0);
+  vec3 rgb = isSubject ? vec3(61.0, 142.0, 222.0)
+           : f_etype < 2.5 ? vec3(229.0, 106.0, 64.0)
+           : vec3(39.0, 171.0, 124.0);
   if (atlas.colorBy > 0.5 && f_comm < 65534.5) {
     float h = mod(f_comm * 137.508, 360.0) / 60.0;
     float x = 1.0 - abs(mod(h, 2.0) - 1.0);
@@ -137,7 +137,7 @@ in float atlas_fogDepth;`,
            : h < 4.0 ? vec3(0.0, x, 1.0)
            : h < 5.0 ? vec3(x, 0.0, 1.0)
            : vec3(1.0, 0.0, x);
-    rgb = 90.0 + c * 140.0;
+    rgb = 118.0 + c * 112.0; // 提底降幅:社区色更粉彩(§5 低饱和)
   }
   // 孤立外壳 9.2 万点包裹星系,远景亮度稍高即叠成实心球(实测
   // 压到 ~14% 才不糊本体,§7);近景密度自然稀疏,压制随缩放
@@ -697,11 +697,11 @@ export class Scene {
         },
         parameters: { depthCompare: "always", depthWriteEnabled: false },
       }),
-      // 辉光:选中点脚下的柔和光晕(§9-8 打磨)
+      // 辉光:选中点脚下的柔和粉色光晕(§9-8 打磨,萌系点缀)
       new ScatterplotLayer({
         id: "ws-glow",
         data: { length: 1, attributes: { getPosition: { value: pos, size: 3 } } },
-        getFillColor: [255, 255, 255, 40],
+        getFillColor: [243, 143, 184, 46],
         radiusUnits: "common",
         getRadius: 7,
         radiusMinPixels: 12,
@@ -777,7 +777,7 @@ export class Scene {
           },
           filled: false,
           stroked: true,
-          getLineColor: [255, 255, 255, Math.round(180 * (1 - k))],
+          getLineColor: [243, 143, 184, Math.round(200 * (1 - k))],
           getLineWidth: 1.5,
           lineWidthUnits: "pixels",
           radiusUnits: "common",
