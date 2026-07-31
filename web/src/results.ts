@@ -20,6 +20,7 @@ const COUNT_CAP = 5000; // 计数扫到这么多就停("5000+")
 export class Results {
   private shown = PAGE;
   private filterKey = "";
+  private collapsed = false; // 折叠态跨条件变化保持
 
   constructor(
     private el: HTMLElement,
@@ -34,6 +35,11 @@ export class Results {
       }
       if (t.id === "results-more") {
         this.shown += PAGE;
+        this.refresh();
+        return;
+      }
+      if (t.closest(".rhead")) {
+        this.collapsed = !this.collapsed;
         this.refresh();
       }
     });
@@ -102,13 +108,16 @@ export class Results {
             ${total >= COUNT_CAP ? `${COUNT_CAP}+` : total})
           </button>`
         : "";
-    this.el.innerHTML = html`
-      <div class="rhead">
+    const head = html`
+      <div class="rhead" role="button" title="点击折叠/展开">
         结果 ${total >= COUNT_CAP ? `${COUNT_CAP}+` : total}
         <span class="rmeta">按热度排序</span>
+        <span class="rchev">${this.collapsed ? "▸" : "▾"}</span>
       </div>
-      ${raw(rows)} ${raw(more)}
     `;
+    this.el.innerHTML = this.collapsed
+      ? head
+      : html`${raw(head)}${raw(rows)} ${raw(more)}`;
     this.el.classList.add("open");
   }
 }

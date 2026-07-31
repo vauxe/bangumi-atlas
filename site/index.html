@@ -49,7 +49,9 @@ html, body { margin: 0; height: 100%; background: var(--surface);
   border: 1px solid var(--line); border-radius: 16px; padding: 10px 12px;
   max-height: calc(100vh - 220px); overflow-y: auto; }
 #results.open { display: block; }
-.rhead { font-size: 13px; margin-bottom: 6px; }
+.rhead { font-size: 13px; margin-bottom: 6px; cursor: pointer;
+  display: flex; align-items: center; }
+.rchev { margin-left: auto; color: var(--ink-2); }
 .rrow { padding: 3px 4px; cursor: pointer; border-radius: 8px;
   font-size: 13px; }
 .rrow:hover { background: var(--line); }
