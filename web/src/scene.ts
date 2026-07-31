@@ -322,6 +322,9 @@ export class Scene {
       getCursor: ({ isHovering }) => (isHovering ? "pointer" : "grab"),
       layers: [],
     });
+    // 右键负责轨道旋转(§5):拦掉浏览器右键菜单,否则每次
+    // 旋转松手都会弹菜单打断操作
+    parent.addEventListener("contextmenu", (ev) => ev.preventDefault());
     // 双击 = 聚焦飞行(controller 的 doubleClickZoom 已让位)
     parent.addEventListener("dblclick", (ev) => {
       const picks = this.deck.pickMultipleObjects({
