@@ -81,13 +81,20 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--pink);
   box-shadow: -8px 0 24px rgba(242, 91, 166, .12); }
 #drawer.open { transform: none; }
 #drawer h2 { margin: 4px 24px 2px 0; font-size: 20px; }
+.chip-media { position: relative; width: 20px; height: 20px; flex: none;
+  display: inline-grid; place-items: center; border-radius: 50%;
+  overflow: hidden; }
 .chip-mark { width: 9px; height: 9px; border-radius: 50%; flex: none;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, .35); }
 .chip-mark.type-1 { background: var(--c-subject); }
 .chip-mark.type-2 { background: var(--c-person); }
 .chip-mark.type-3 { background: var(--c-character); }
-#drawer .chips .chip { display: inline-flex; align-items: center;
-  gap: 6px; }
+.chip-av { position: absolute; inset: 0; width: 100%; height: 100%;
+  border-radius: 50%; object-fit: cover; }
+#drawer .chip { display: inline-flex; align-items: center; gap: 6px; }
+#drawer .cover { float: right; width: 96px; height: 128px;
+  object-fit: cover; border-radius: 12px; margin: 8px 0 10px 12px;
+  clear: right; background: var(--line); }
 #drawer .subtitle { color: var(--ink-2); margin-bottom: 8px; }
 /* sticky:滚动时钉在视口顶部,任何深度都能关(absolute 会随内容滚走) */
 #drawer-close { position: sticky; top: 0; float: right; z-index: 2;

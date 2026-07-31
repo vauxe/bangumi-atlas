@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { uniqueNeighbors } from "../src/neighbors";
+import { relationNeighbors, uniqueNeighbors } from "../src/neighbors";
 import type { AdjEntry } from "../src/types";
 
 test("caps unique neighbor nodes without losing the primary label", () => {
@@ -18,4 +18,19 @@ test("caps unique neighbor nodes without losing the primary label", () => {
     labels: [9, 2, 9],
   });
   assert.deepEqual(uniqueNeighbors(adj, 2).ranks, [1, 2]);
+});
+
+test("keeps every relationship label in the visual working set", () => {
+  const adj: AdjEntry = {
+    g: [
+      [9, 2, [3, 1]],
+      [2, 2, [1, 2]],
+    ],
+    n: 4,
+  };
+
+  assert.deepEqual(relationNeighbors(adj, 4), {
+    ranks: [1, 1, 2, 3],
+    labels: [9, 2, 2, 9],
+  });
 });
