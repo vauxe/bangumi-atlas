@@ -2,12 +2,15 @@
  * n = 全局键(稳定身份),r = rank(深链未流式覆盖时 Range 点查落点)。 */
 
 import { state } from "./store";
+import type { LinkState } from "./store";
 import type { OrbitState } from "./camera";
 
 export interface UrlState {
   view: Partial<OrbitState> | null;
   key: number | null;
   rank: number | null;
+  /** 共同关联/路径模式及其稳定起点。旧 URL 缺省为 null。 */
+  link: LinkState | null;
   /** 俯视正交开关(相机位姿的一部分,§5"每个状态可分享")。 */
   ortho: boolean;
 }
@@ -17,6 +20,7 @@ export function encode(
   key: number | null,
   rank: number | null,
   ortho = false,
+  link: LinkState | null = null,
 ): string {
   const f = state.filters;
   const parts = [
@@ -27,17 +31,47 @@ export function encode(
   if (ortho) parts.push("o=1");
   if (key !== null) parts.push(`n=${key}`);
   if (rank !== null) parts.push(`r=${rank}`);
+  if (key !== null && link !== null) {
+    parts.push(`q=${link.kind}`);
+    parts.push(`f=${link.fromKey}`);
+    parts.push(`fr=${link.fromRank}`);
+  }
   if (f.yearMin > 0 || f.yearMax < 9999)
     parts.push(`y=${f.yearMin}-${f.yearMax}`);
-  if (f.media.size) parts.push(`m=${[...f.media].join(",")}`);
+  if (f.media.size)
+    parts.push(`m=${[...f.media].sort((a, b) => a - b).join(",")}`);
   if (f.scoreMin > 0) parts.push(`s=${f.scoreMin}`);
-  if (f.tags.size) parts.push(`t=${[...f.tags].join(",")}`);
+  if (f.tags.size)
+    parts.push(`t=${[...f.tags].sort((a, b) => a - b).join(",")}`);
   return "#" + parts.join("&");
+}
+
+function uintParam(
+  params: URLSearchParams,
+  name: string,
+  allowZero: boolean,
+): number | null {
+  const raw = params.get(name);
+  if (!raw || !/^\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  if (
+    !Number.isSafeInteger(value) ||
+    value > 0xffff_ffff ||
+    (allowZero ? value < 0 : value <= 0)
+  )
+    return null;
+  return value;
 }
 
 /** 解码并把过滤器写回 store(缺省参数恢复默认值,保证后退可逆)。 */
 export function decode(hash: string): UrlState {
-  const out: UrlState = { view: null, key: null, rank: null, ortho: false };
+  const out: UrlState = {
+    view: null,
+    key: null,
+    rank: null,
+    link: null,
+    ortho: false,
+  };
   const params = new URLSearchParams(hash.replace(/^#/, ""));
   out.ortho = params.get("o") === "1";
   const c = params.get("c");
@@ -52,28 +86,51 @@ export function decode(hash: string): UrlState {
       };
     }
   }
-  const n = params.get("n");
-  if (n && /^\d+$/.test(n)) out.key = Number(n);
-  const r = params.get("r");
-  if (r && /^\d+$/.test(r)) out.rank = Number(r);
+  out.key = uintParam(params, "n", false);
+  out.rank = uintParam(params, "r", true);
+  const kind = params.get("q");
+  const fromKey = uintParam(params, "f", false);
+  const fromRank = uintParam(params, "fr", true);
+  if (
+    (kind === "common" || kind === "path") &&
+    fromKey !== null &&
+    fromRank !== null
+  )
+    out.link = { kind, fromKey, fromRank };
   const y = params.get("y");
-  if (y) {
-    const [a, b] = y.split("-").map(Number);
-    state.filters.yearMin = a || 0;
-    state.filters.yearMax = b || 9999;
+  const years = y?.match(/^(\d{1,4})-(\d{1,4})$/);
+  const yearMin = Number(years?.[1]);
+  const yearMax = Number(years?.[2]);
+  if (
+    years &&
+    Number.isInteger(yearMin) &&
+    Number.isInteger(yearMax) &&
+    yearMin <= yearMax
+  ) {
+    state.filters.yearMin = yearMin;
+    state.filters.yearMax = yearMax;
   } else {
     state.filters.yearMin = 0;
     state.filters.yearMax = 9999;
   }
   const m = params.get("m");
-  state.filters.media = m
-    ? new Set(m.split(",").map(Number))
-    : new Set();
-  const s = params.get("s");
-  state.filters.scoreMin = s && /^\d+$/.test(s) ? Number(s) : 0;
+  const media = new Set([1, 2, 3, 4, 6]);
+  state.filters.media = new Set(
+    (m ?? "")
+      .split(",")
+      .map(Number)
+      .filter((value) => media.has(value)),
+  );
+  const score = uintParam(params, "s", true);
+  state.filters.scoreMin = score !== null && score <= 100 ? score : 0;
   const tg = params.get("t");
   state.filters.tags = tg
-    ? new Set(tg.split(",").map(Number).filter((b) => b >= 0 && b < 32))
+    ? new Set(
+        tg
+          .split(",")
+          .map(Number)
+          .filter((bit) => Number.isInteger(bit) && bit >= 0 && bit < 32),
+      )
     : new Set();
   return out;
 }

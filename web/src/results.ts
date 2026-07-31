@@ -95,10 +95,10 @@ export class Results {
         ]
           .filter(Boolean)
           .join(" · ");
-        return html`<div class="rrow" data-rank="${rank}">
+        return html`<button type="button" class="rrow" data-rank="${rank}">
           <span class="rn">${i + 1}.</span> ${name}
           <span class="rmeta">${meta}</span>
-        </div>`;
+        </button>`;
       })
       .join("");
     const more =
@@ -109,15 +109,21 @@ export class Results {
           </button>`
         : "";
     const head = html`
-      <div class="rhead" role="button" title="点击折叠/展开">
+      <button
+        type="button"
+        class="rhead"
+        title="点击折叠/展开"
+        aria-expanded="${!this.collapsed}"
+        aria-controls="results-list"
+      >
         结果 ${total >= COUNT_CAP ? `${COUNT_CAP}+` : total}
         <span class="rmeta">按热度排序</span>
         <span class="rchev">${this.collapsed ? "▸" : "▾"}</span>
-      </div>
+      </button>
     `;
     this.el.innerHTML = this.collapsed
       ? head
-      : html`${raw(head)}${raw(rows)} ${raw(more)}`;
+      : html`${raw(head)}<div id="results-list">${raw(rows)} ${raw(more)}</div>`;
     this.el.classList.add("open");
   }
 }

@@ -11,13 +11,13 @@
 import { Deck, LayerExtension, OrbitView } from "@deck.gl/core";
 import { Buffer as LumaBuffer } from "@luma.gl/core";
 import type { Device } from "@luma.gl/core";
-import { IconLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
+import { LineLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { Camera, prefersReducedMotion } from "./camera";
 import type { OrbitState } from "./camera";
 import { labelLayers } from "./labels";
 import type { LabelCache, LabelData } from "./labels";
 import { state } from "./store";
-import { coverUrl, TYPE_COLORS, etype } from "./types";
+import { TYPE_COLORS, etype } from "./types";
 import type { Geometry } from "./types";
 
 export type { OrbitState } from "./camera";
@@ -200,23 +200,6 @@ in float atlas_fogDepth;`,
   }
 }
 
-/** 封面圆形裁剪:icon 层的 geometry.uv 即四角 [-1,1] 局部坐标,
- * 裁成内切圆 + 边缘 6% 平滑,封面就是节点本体的视觉替换。 */
-class CircleCropExtension extends LayerExtension {
-  static override extensionName = "CircleCropExtension";
-
-  override getShaders(): Record<string, unknown> {
-    return {
-      inject: {
-        "fs:DECKGL_FILTER_COLOR": `
-  float cover_r = length(geometry.uv);
-  if (cover_r > 1.0) discard;
-  color.a *= smoothstep(1.0, 0.94, cover_r);`,
-      },
-    };
-  }
-}
-
 /** 大缓冲的 GPU 常驻镜像:流式期间只写增量区间,不整块重传。 */
 class GrowingBuffer {
   private buf: LumaBuffer | null = null;
@@ -360,6 +343,9 @@ export class Scene {
       getCursor: ({ isHovering }) => (isHovering ? "pointer" : "grab"),
       layers: [],
     });
+    const canvas = parent.querySelector("canvas");
+    canvas?.setAttribute("role", "application");
+    canvas?.setAttribute("aria-label", "Bangumi 三维关系星图");
     // 右键负责轨道旋转(§5):拦掉浏览器右键菜单,否则每次
     // 旋转松手都会弹菜单打断操作
     parent.addEventListener("contextmenu", (ev) => ev.preventDefault());
@@ -748,7 +734,7 @@ export class Scene {
               stride: 24,
               offset: 12,
             },
-            getColor: { value: lineAlpha, size: 4 },
+            getColor: { value: lineAlpha, size: 4, normalized: true },
           },
         },
         getWidth: chain ? 2.4 : 1.6,
@@ -784,7 +770,7 @@ export class Scene {
           length: ranks.length,
           attributes: {
             getPosition: { value: pos, size: 3 },
-            getLineColor: { value: col, size: 4 },
+            getLineColor: { value: col, size: 4, normalized: true },
           },
         },
         radiusUnits: "common",
@@ -809,7 +795,7 @@ export class Scene {
           length: ranks.length,
           attributes: {
             getPosition: { value: pos, size: 3 },
-            getFillColor: { value: col, size: 4 },
+            getFillColor: { value: col, size: 4, normalized: true },
           },
         },
         radiusUnits: "common",
@@ -833,51 +819,6 @@ export class Scene {
         },
       }),
     ];
-    // 封面 = 节点的视觉替换:圆形裁剪,几何严格对齐下层圆点
-    // (略小 8%,圆点描边露出一圈作头像环;拾取/悬停仍走圆点层,
-    // 图片加载失败时圆点自然兜底)
-    layers.push(
-      new IconLayer({
-        id: "ws-covers",
-        data: ranks.map((rk, i) => ({
-          rank: rk,
-          key: this.geo.key[rk] ?? 0,
-          i,
-        })),
-        getIcon: (d: { key: number }) => ({
-          url: coverUrl(d.key, "small"), // WebGL 纹理只能用 small(CORS)
-          id: String(d.key),
-          // 声明为正方形配合内切圆裁剪;非方图的轻微挤压在
-          // 节点尺寸(≤18px)下不可辨
-          width: 100,
-          height: 100,
-        }),
-        getPosition: (d: { rank: number }) =>
-          this.posOf(d.rank) ?? [0, 0, 0],
-        getSize: 4.05, // 圆点直径 4.4 的 92%
-        getColor: (d: { i: number }) => {
-          // 级联淡入与圆点同步(mask=false 时 alpha 即不透明度)
-          const k =
-            reduced || d.i === 0
-              ? 1
-              : Math.max(
-                  0,
-                  Math.min(
-                    1,
-                    (t - (d.i - 1) * CASCADE_STEP_MS) / CASCADE_FADE_MS,
-                  ),
-                );
-          return [255, 255, 255, Math.round(255 * k)];
-        },
-        updateTriggers: { getColor: t },
-        sizeUnits: "common",
-        sizeMinPixels: 5.5,
-        sizeMaxPixels: 16.5,
-        billboard: true,
-        extensions: [new CircleCropExtension()],
-        loadOptions: { image: { crossOrigin: "anonymous" } },
-      }),
-    );
     // 光环单脉冲:选中后 500ms 一次扩散(§5)
     if (!reduced && t < PULSE_MS) {
       const k = t / PULSE_MS;

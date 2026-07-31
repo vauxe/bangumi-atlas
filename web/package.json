@@ -5,15 +5,20 @@
   "scripts": {
     "build": "esbuild src/main.ts --bundle --minify --format=iife --outfile=../site/app.js",
     "dev": "esbuild src/main.ts --bundle --format=iife --outfile=../site/app.js --watch=forever & http-server ../site -p 8300 -c-1 --silent",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "esbuild tests/*.test.ts --bundle --platform=node --format=esm --outdir=.test-dist && node --test .test-dist/*.test.js"
   },
   "devDependencies": {
+    "@types/node": "^26.0.0",
     "esbuild": "^0.28.1",
     "http-server": "^14.1.1",
     "puppeteer-core": "^25.3.0",
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "deck.gl": "^9.3.7"
+    "@deck.gl/core": "^9.3.7",
+    "@deck.gl/extensions": "^9.3.7",
+    "@deck.gl/layers": "^9.3.7",
+    "@luma.gl/core": "^9.3.6"
   }
 }

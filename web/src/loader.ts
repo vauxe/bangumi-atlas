@@ -11,9 +11,12 @@ import type {
   Names,
   SearchEntry,
 } from "./types";
+import { AsyncMemo } from "./async-memo";
+import { assertByteLength, sha256Hex } from "./data-integrity";
 
 const BASE = "data";
 let version = "";
+let manifestRef: Manifest | null = null;
 
 /** manifest 之后的一切数据请求都以数据版本寻址(§6 防缓存错配)。 */
 function url(path: string): string {
@@ -24,10 +27,47 @@ function url(path: string): string {
 
 export async function loadManifest(): Promise<Manifest> {
   const res = await fetch(`${BASE}/manifest.json`, { cache: "no-cache" });
+  if (!res.ok) throw new Error(`manifest.json: ${res.status}`);
   const m = (await res.json()) as Manifest;
+  if (
+    !m.version ||
+    !Number.isInteger(m.n_nodes) ||
+    m.n_nodes <= 0 ||
+    !m.files
+  )
+    throw new Error("manifest.json: invalid data contract");
   version = m.version;
   manifestRef = m;
   return m;
+}
+
+function publishedMeta(path: string): [number, string] {
+  const meta = manifestRef?.files[path];
+  if (!meta) throw new Error(`${path}: missing manifest metadata`);
+  return meta;
+}
+
+async function verifyWholeFile(
+  path: string,
+  bytes: Uint8Array,
+): Promise<void> {
+  const [size, expectedHash] = publishedMeta(path);
+  assertByteLength(path, bytes.byteLength, size);
+  const actualHash = await sha256Hex(bytes);
+  if (actualHash !== expectedHash)
+    throw new Error(
+      `${path}: sha256 mismatch (${actualHash.slice(0, 12)} != ` +
+        `${expectedHash.slice(0, 12)})`,
+    );
+}
+
+/** Fetch and authenticate a complete JSON artifact from the manifest. */
+export async function loadPublishedJson<T>(path: string): Promise<T> {
+  const res = await fetch(url(path));
+  if (!res.ok) throw new Error(`${path}: ${res.status}`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  await verifyWholeFile(path, bytes);
+  return JSON.parse(new TextDecoder().decode(bytes)) as T;
 }
 
 async function streamInto(
@@ -44,10 +84,14 @@ async function streamInto(
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
+    if (offset + value.byteLength > buffer.byteLength)
+      throw new Error(`${path}: response exceeds allocated buffer`);
     buffer.set(value, offset);
     offset += value.length;
     onProgress(offset);
   }
+  assertByteLength(path, offset, buffer.byteLength);
+  await verifyWholeFile(path, buffer);
 }
 
 export interface GeometryStream {
@@ -152,12 +196,15 @@ export function loadNames(
       throw new Error(`fetch names.ndjson: ${res.status}`);
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
+    let received = 0;
     let tail = "";
     const feed = (text: string, flush: boolean): void => {
       const lines = (tail + text).split("\n");
       tail = flush ? "" : (lines.pop() ?? "");
       for (const line of lines) {
         if (!line) continue;
+        if (names.loaded >= n)
+          throw new Error(`names.ndjson: more than ${n} rows`);
         const [nm, cn] = JSON.parse(line) as [string, string | null];
         names.n[names.loaded] = nm;
         names.c[names.loaded] = cn;
@@ -167,17 +214,24 @@ export function loadNames(
     for (;;) {
       const { done: eof, value } = await reader.read();
       if (eof) break;
+      received += value.byteLength;
       feed(decoder.decode(value, { stream: true }), false);
     }
     feed(decoder.decode(), true);
+    assertByteLength("names.ndjson rows", names.loaded, n);
+    assertByteLength("names.ndjson", received, publishedMeta("names.ndjson")[0]);
   })();
   return { names, done };
 }
 
 export async function loadEdges(): Promise<Uint32Array> {
   const res = await fetch(url("edges.bin"));
-  const buf = await res.arrayBuffer();
-  return new Uint32Array(buf);
+  if (!res.ok) throw new Error(`edges.bin: ${res.status}`);
+  const buf = new Uint8Array(await res.arrayBuffer());
+  await verifyWholeFile("edges.bin", buf);
+  if (buf.byteLength % 8 !== 0)
+    throw new Error("edges.bin: byte length is not a u32 endpoint-pair array");
+  return new Uint32Array(buf.buffer);
 }
 
 /** Range 点查:深链/行走落点在流式未覆盖时先取坐标(§6 定长记录)。
@@ -186,17 +240,27 @@ export async function pointByRank(
   manifest: Manifest,
   rank: number,
 ): Promise<{ pos: [number, number, number]; key: number } | null> {
+  if (!Number.isInteger(rank) || rank < 0 || rank >= manifest.n_nodes)
+    throw new RangeError(`rank ${rank} is outside geometry`);
   const range = async (
     path: string,
     start: number,
     len: number,
   ): Promise<ArrayBuffer | null> => {
+    const [total] = publishedMeta(path);
+    if (start + len > total)
+      throw new RangeError(`${path}: byte range exceeds published file`);
     const res = await fetch(url(path), {
       headers: { Range: `bytes=${start}-${start + len - 1}` },
     });
-    if (res.status === 206) return res.arrayBuffer();
-    if (res.ok) return (await res.arrayBuffer()).slice(start, start + len);
-    return null;
+    if (!res.ok) throw new Error(`${path}: ${res.status}`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (res.status === 206) {
+      assertByteLength(`${path} range`, bytes.byteLength, len);
+      return bytes.buffer;
+    }
+    await verifyWholeFile(path, bytes);
+    return bytes.buffer.slice(start, start + len);
   };
   const [posBuf, keyBuf] = await Promise.all([
     range("positions.bin", rank * 6, 6),
@@ -226,16 +290,31 @@ async function packSlice(
   off: number,
   len: number,
 ): Promise<ArrayBuffer> {
+  const [total] = publishedMeta(path);
+  if (off < 0 || len < 0 || off + len > total)
+    throw new RangeError(`${path}: slice [${off}, ${off + len}) is invalid`);
   const cached = packFull.get(path);
   if (cached) return (await cached).slice(off, off + len);
   const res = await fetch(url(path), {
     headers: { Range: `bytes=${off}-${off + len - 1}` },
   });
-  if (res.status === 206) return res.arrayBuffer();
+  if (res.status === 206) {
+    const part = await res.arrayBuffer();
+    assertByteLength(`${path} range`, part.byteLength, len);
+    return part;
+  }
   if (res.ok) {
-    const whole = res.arrayBuffer();
+    const whole = res.arrayBuffer().then(async (buffer) => {
+      await verifyWholeFile(path, new Uint8Array(buffer));
+      return buffer;
+    });
     packFull.set(path, whole);
-    return (await whole).slice(off, off + len);
+    try {
+      return (await whole).slice(off, off + len);
+    } catch (error) {
+      if (packFull.get(path) === whole) packFull.delete(path);
+      throw error;
+    }
   }
   throw new Error(`${path}: ${res.status}`);
 }
@@ -247,56 +326,49 @@ async function gunzipJson<T>(buf: ArrayBuffer): Promise<T> {
   return (await new Response(stream).json()) as T;
 }
 
-const idxCache = new Map<string, Promise<Uint32Array>>();
+const idxCache = new AsyncMemo<string, Uint32Array>();
 
 /** u32 累计偏移索引(buckets+1 项):桶 b 的片 = [idx[b], idx[b+1])。 */
 function loadIdx(path: string): Promise<Uint32Array> {
-  let p = idxCache.get(path);
-  if (!p) {
-    p = fetch(url(path))
-      .then((r) => {
-        if (!r.ok) throw new Error(`${path}: ${r.status}`);
-        return r.arrayBuffer();
-      })
-      .then((b) => new Uint32Array(b));
-    idxCache.set(path, p);
-  }
-  return p;
+  return idxCache.get(path, async () => {
+    const res = await fetch(url(path));
+    if (!res.ok) throw new Error(`${path}: ${res.status}`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    await verifyWholeFile(path, bytes);
+    if (bytes.byteLength % 4 !== 0)
+      throw new Error(`${path}: byte length is not a u32 array`);
+    return new Uint32Array(bytes.buffer);
+  });
 }
 
-const adjCache = new Map<number, Record<string, AdjEntry>>();
-const detCache = new Map<number, Record<string, Detail>>();
+const adjCache = new AsyncMemo<number, Record<string, AdjEntry>>();
+const detCache = new AsyncMemo<number, Record<string, Detail>>();
 
 async function shard<T>(
-  cache: Map<number, Record<string, T>>,
+  cache: AsyncMemo<number, Record<string, T>>,
   kind: "adj" | "det",
   bucket: number,
   buckets: number,
   detPacks: number,
 ): Promise<Record<string, T>> {
-  const hit = cache.get(bucket);
-  if (hit) return hit;
-  const idx = await loadIdx(`${kind}.idx`);
-  const off = idx[bucket] ?? 0;
-  const len = (idx[bucket + 1] ?? off) - off;
-  let path = "adj.pack";
-  let rel = off;
-  if (kind === "det") {
-    // det 均分多个 pack:索引存全局累计偏移,减去 pack 首桶偏移
-    const per = Math.floor(buckets / detPacks);
-    const p = Math.floor(bucket / per);
-    path = `det-${p}.pack`;
-    rel = off - (idx[p * per] ?? 0);
-  }
-  const data =
-    len > 0
-      ? await gunzipJson<Record<string, T>>(await packSlice(path, rel, len))
+  return cache.get(bucket, async () => {
+    const idx = await loadIdx(`${kind}.idx`);
+    const off = idx[bucket] ?? 0;
+    const len = (idx[bucket + 1] ?? off) - off;
+    let path = "adj.pack";
+    let rel = off;
+    if (kind === "det") {
+      // det 均分多个 pack:索引存全局累计偏移,减去 pack 首桶偏移
+      const per = Math.floor(buckets / detPacks);
+      const p = Math.floor(bucket / per);
+      path = `det-${p}.pack`;
+      rel = off - (idx[p * per] ?? 0);
+    }
+    return len > 0
+      ? gunzipJson<Record<string, T>>(await packSlice(path, rel, len))
       : ({} as Record<string, T>);
-  cache.set(bucket, data);
-  return data;
+  });
 }
-
-let manifestRef: Manifest | null = null;
 
 export async function loadAdj(
   key: number,
@@ -336,11 +408,12 @@ export async function loadPage<T extends AdjPage | EpisodeRow[]>(
 
 /** 悬停预取:填充分片缓存,点击时大概率已热(对冲每周失效后的冷 CDN)。 */
 export function prefetch(key: number, buckets: number): void {
-  void loadAdj(key, buckets);
-  void loadDetail(key, buckets);
+  void Promise.all([loadAdj(key, buckets), loadDetail(key, buckets)]).catch(
+    (error: unknown) => console.warn("prefetch failed", error),
+  );
 }
 
-const searchCache = new Map<string, SearchEntry[]>();
+const searchCache = new AsyncMemo<string, SearchEntry[]>();
 let charmap: Record<string, string> | null = null;
 let charmapPromise: Promise<void> | null = null;
 
@@ -348,9 +421,11 @@ let charmapPromise: Promise<void> | null = null;
  * (否则冷启动头几百毫秒繁体/日文旧字查询会漏命中并污染缓存)。 */
 export function loadCharmap(): Promise<void> {
   charmapPromise ??= (async () => {
-    const res = await fetch(url("charmap.json"));
-    charmap = (await res.json()) as Record<string, string>;
-  })();
+    charmap = await loadPublishedJson<Record<string, string>>("charmap.json");
+  })().catch((error: unknown) => {
+    charmapPromise = null;
+    throw error;
+  });
   return charmapPromise;
 }
 
@@ -365,25 +440,26 @@ export function fold(text: string): string {
 let searchIdxP: Promise<Record<string, [number, number]>> | null = null;
 
 function loadSearchIdx(): Promise<Record<string, [number, number]>> {
-  searchIdxP ??= fetch(url("search.idx.json")).then(
-    (r) => r.json() as Promise<Record<string, [number, number]>>,
-  );
+  searchIdxP ??= loadPublishedJson<Record<string, [number, number]>>(
+    "search.idx.json",
+  ).catch((error: unknown) => {
+    searchIdxP = null;
+    throw error;
+  });
   return searchIdxP;
 }
 
 async function fetchShard(first: string): Promise<SearchEntry[]> {
-  const hit = searchCache.get(first);
-  if (hit) return hit;
-  const cp = first.codePointAt(0);
-  if (cp === undefined) return [];
-  const loc = (await loadSearchIdx())[cp.toString(16)];
-  const data: SearchEntry[] = loc
-    ? await gunzipJson<SearchEntry[]>(
-        await packSlice("search.pack", loc[0], loc[1]),
-      )
-    : [];
-  searchCache.set(first, data);
-  return data;
+  return searchCache.get(first, async () => {
+    const cp = first.codePointAt(0);
+    if (cp === undefined) return [];
+    const loc = (await loadSearchIdx())[cp.toString(16)];
+    return loc
+      ? gunzipJson<SearchEntry[]>(
+          await packSlice("search.pack", loc[0], loc[1]),
+        )
+      : [];
+  });
 }
 
 export const searchShard = fetchShard;
@@ -392,6 +468,9 @@ export const searchShard = fetchShard;
 export function prefetchHotShards(manifest: Manifest): void {
   for (const hex of manifest.hot_shards) {
     const cp = Number.parseInt(hex, 16);
-    if (Number.isFinite(cp)) void fetchShard(String.fromCodePoint(cp));
+    if (Number.isFinite(cp))
+      void fetchShard(String.fromCodePoint(cp)).catch((error: unknown) =>
+        console.warn("hot search shard prefetch failed", error),
+      );
   }
 }

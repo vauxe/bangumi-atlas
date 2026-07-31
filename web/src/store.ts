@@ -11,8 +11,16 @@ export interface Filters {
   tags: Set<number>;
 }
 
+export interface LinkState {
+  kind: "common" | "path";
+  fromRank: number;
+  fromKey: number;
+}
+
 export interface State {
   selection: number | null; // rank
+  /** 与 selection 配对的稳定全局身份;绝不从未完成的流式缓冲反推。 */
+  selectionKey: number | null;
   neighbors: number[]; // 工作集邻居 ranks(top-50 已亮)
   /** 与 neighbors 对齐的解码关系 labelId(工作集边 tooltip 用)。 */
   neighborLabels: number[];
@@ -22,16 +30,20 @@ export interface State {
   path: number[];
   /** path 相邻两点间的关系 labelId(链边 tooltip)。 */
   pathLabels: number[];
+  /** 当前共同关联/路径查询的稳定起点身份。 */
+  link: LinkState | null;
   filters: Filters;
 }
 
 export const state: State = {
   selection: null,
+  selectionKey: null,
   neighbors: [],
   neighborLabels: [],
   compareWith: null,
   path: [],
   pathLabels: [],
+  link: null,
   filters: {
     yearMin: 0,
     yearMax: 9999,

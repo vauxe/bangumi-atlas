@@ -4,8 +4,9 @@
 import type { CommonItem, PathResult } from "./graph";
 import { esc, html, raw } from "./html";
 import { loadAdj, loadDetail, loadPage } from "./loader";
+import { uniqueNeighbors } from "./neighbors";
 import { state } from "./store";
-import { bgmUrl, coverUrl, MEDIA_NAMES, TYPE_NAMES, etype } from "./types";
+import { bgmUrl, MEDIA_NAMES, TYPE_NAMES, etype } from "./types";
 import type {
   AdjEntry,
   AdjPage,
@@ -22,7 +23,7 @@ export interface DrawerDeps {
   manifest: Manifest;
   walk: (rank: number) => void;
   /** 连接查询:锁定起点,等待用户选第二个节点。 */
-  arm: (kind: "common" | "path", from: number) => void;
+  arm: (kind: "common" | "path", from: number, fromKey: number) => void;
 }
 
 const GROUP_CHIPS = 12; // 每组初始 chips 数,展开后放开
@@ -60,14 +61,14 @@ export class Drawer {
         .closest("[data-arm]")
         ?.getAttribute("data-arm") as "common" | "path" | null;
       if (armKind && this.cur) {
-        this.deps.arm(armKind, this.cur.rank);
+        this.deps.arm(armKind, this.cur.rank, this.cur.key);
         return;
       }
       if (t.id === "drawer-close") this.hide();
       if (t.id === "expand-rel" || t.classList.contains("more"))
-        void this.expandRelations(this.anchorOf(t));
+        this.run(this.expandRelations(this.anchorOf(t)), "关系分页");
       if (t.id === "expand-eps")
-        void this.expandEpisodes(this.anchorOf(t));
+        this.run(this.expandEpisodes(this.anchorOf(t)), "分集分页");
       if (t.classList.contains("sum-toggle")) {
         this.el.querySelector(".sum")?.classList.toggle("expanded");
       }
@@ -76,6 +77,14 @@ export class Drawer {
 
   hide(): void {
     this.el.classList.remove("open");
+  }
+
+  private run(task: Promise<void>, context: string): void {
+    void task.catch((error: unknown) => {
+      console.error(context, error);
+      const loading = this.el.querySelector<HTMLElement>(".loading");
+      if (loading) loading.textContent = `${context}失败,请重试`;
+    });
   }
 
   nameOf(rank: number): string {
@@ -116,16 +125,7 @@ export class Drawer {
     adj: AdjEntry | null,
     cap = 50,
   ): { ranks: number[]; labels: number[] } {
-    if (!adj) return { ranks: [], labels: [] };
-    const flat: [number, number][] = [];
-    for (const [lid, , ranks] of adj.g)
-      for (const r of ranks) flat.push([r, lid]);
-    flat.sort((a, b) => a[0] - b[0]);
-    const top = flat.slice(0, cap);
-    return {
-      ranks: top.map((e) => e[0]),
-      labels: top.map((e) => e[1]),
-    };
+    return uniqueNeighbors(adj, cap);
   }
 
   /** 展开全部:先放开各组 inline 上限,再按页拉取溢出条目(§6)。
@@ -205,17 +205,11 @@ export class Drawer {
 
   private chipOf(rank: number): string {
     const k = this.deps.geo.key[rank] ?? 0;
-    const av = k
-      ? html`<img
-          class="chip-av"
-          loading="lazy"
-          src="${coverUrl(k, "grid")}"
-          alt=""
-          onerror="this.remove()"
-        >`
+    const mark = k
+      ? html`<span class="chip-mark type-${etype(k)}" aria-hidden="true"></span>`
       : "";
     return html`<button class="chip" data-rank="${rank}">
-      ${raw(av)}${this.nameOf(rank)}
+      ${raw(mark)}${this.nameOf(rank)}
     </button>`;
   }
 
@@ -330,19 +324,14 @@ export class Drawer {
         const chips = shown
           .map((r) => {
             const k = this.deps.geo.key[r] ?? 0;
-            // 方形裁剪的 grid 尺寸作 chip 头像;失败即自移除,
-            // 未流式覆盖(key 未知)时不出图
-            const av = k
-              ? html`<img
-                  class="chip-av"
-                  loading="lazy"
-                  src="${coverUrl(k, "grid")}"
-                  alt=""
-                  onerror="this.remove()"
-                >`
+            const mark = k
+              ? html`<span
+                  class="chip-mark type-${etype(k)}"
+                  aria-hidden="true"
+                ></span>`
               : "";
             return html`<button class="chip" data-rank="${r}">
-              ${raw(av)}${this.nameOf(r)}
+              ${raw(mark)}${this.nameOf(r)}
             </button>`;
           })
           .join("");
@@ -399,12 +388,6 @@ export class Drawer {
 
     return html`
       <button id="drawer-close" aria-label="关闭">×</button>
-      <img
-        class="cover"
-        src="${coverUrl(key, "medium")}"
-        alt=""
-        onerror="this.remove()"
-      >
       <h2>${title}</h2>
       ${raw(sub ? html`<div class="subtitle">${sub}</div>` : "")}
       <div class="badges">
