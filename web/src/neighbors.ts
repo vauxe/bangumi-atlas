@@ -1,5 +1,23 @@
 import type { AdjEntry } from "./types";
 
+/** Preserve every relationship label for the visual working set. The same
+ * neighbor may therefore occur more than once, once per published group. */
+export function relationNeighbors(
+  adj: AdjEntry | null,
+  cap = 50,
+): { ranks: number[]; labels: number[] } {
+  if (!adj || cap <= 0) return { ranks: [], labels: [] };
+  const relations: [number, number][] = [];
+  for (const [label, , ranks] of adj.g)
+    for (const rank of ranks) relations.push([rank, label]);
+  relations.sort(([rankA], [rankB]) => rankA - rankB);
+  const selected = relations.slice(0, cap);
+  return {
+    ranks: selected.map(([rank]) => rank),
+    labels: selected.map(([, label]) => label),
+  };
+}
+
 /**
  * Select globally hottest unique neighbor nodes. A neighbor may occur in
  * several relation groups; its first published group remains the primary

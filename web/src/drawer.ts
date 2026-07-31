@@ -2,9 +2,10 @@
  * 组内 chips 点击即行走)+ "展开全部 N 个"分页 + 分集分页 + 外链。 */
 
 import type { CommonItem, PathResult } from "./graph";
+import { chipCover, drawerCover } from "./covers";
 import { esc, html, raw } from "./html";
 import { loadAdj, loadDetail, loadPage } from "./loader";
-import { uniqueNeighbors } from "./neighbors";
+import { relationNeighbors } from "./neighbors";
 import { state } from "./store";
 import { bgmUrl, MEDIA_NAMES, TYPE_NAMES, etype } from "./types";
 import type {
@@ -125,7 +126,7 @@ export class Drawer {
     adj: AdjEntry | null,
     cap = 50,
   ): { ranks: number[]; labels: number[] } {
-    return uniqueNeighbors(adj, cap);
+    return relationNeighbors(adj, cap);
   }
 
   /** 展开全部:先放开各组 inline 上限,再按页拉取溢出条目(§6)。
@@ -205,11 +206,8 @@ export class Drawer {
 
   private chipOf(rank: number): string {
     const k = this.deps.geo.key[rank] ?? 0;
-    const mark = k
-      ? html`<span class="chip-mark type-${etype(k)}" aria-hidden="true"></span>`
-      : "";
     return html`<button class="chip" data-rank="${rank}">
-      ${raw(mark)}${this.nameOf(rank)}
+      ${raw(chipCover(k))}${this.nameOf(rank)}
     </button>`;
   }
 
@@ -324,14 +322,8 @@ export class Drawer {
         const chips = shown
           .map((r) => {
             const k = this.deps.geo.key[r] ?? 0;
-            const mark = k
-              ? html`<span
-                  class="chip-mark type-${etype(k)}"
-                  aria-hidden="true"
-                ></span>`
-              : "";
             return html`<button class="chip" data-rank="${r}">
-              ${raw(mark)}${this.nameOf(r)}
+              ${raw(chipCover(k))}${this.nameOf(r)}
             </button>`;
           })
           .join("");
@@ -388,6 +380,7 @@ export class Drawer {
 
     return html`
       <button id="drawer-close" aria-label="关闭">×</button>
+      ${raw(drawerCover(key))}
       <h2>${title}</h2>
       ${raw(sub ? html`<div class="subtitle">${sub}</div>` : "")}
       <div class="badges">
