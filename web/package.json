@@ -9,6 +9,7 @@
   },
   "devDependencies": {
     "esbuild": "^0.28.1",
+    "puppeteer-core": "^25.3.0",
     "typescript": "^7.0.2"
   },
   "dependencies": {
