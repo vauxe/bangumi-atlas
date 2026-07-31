@@ -1,6 +1,7 @@
 /** 详情抽屉:属性 + summary + 关系分组列表(组头 = 解码关系名,
  * 组内 chips 点击即行走)+ "展开全部 N 个"分页 + 分集分页 + 外链。 */
 
+import type { CommonItem, PathResult } from "./graph";
 import { esc, html, raw } from "./html";
 import { loadAdj, loadDetail, loadPage } from "./loader";
 import { state } from "./store";
@@ -20,6 +21,8 @@ export interface DrawerDeps {
   names: () => Names | null;
   manifest: Manifest;
   walk: (rank: number) => void;
+  /** 连接查询:锁定起点,等待用户选第二个节点。 */
+  arm: (kind: "common" | "path", from: number) => void;
 }
 
 const GROUP_CHIPS = 12; // 每组初始 chips 数,展开后放开
@@ -51,6 +54,13 @@ export class Drawer {
       const rankAttr = t.closest("[data-rank]")?.getAttribute("data-rank");
       if (rankAttr) {
         this.deps.walk(Number(rankAttr));
+        return;
+      }
+      const armKind = t
+        .closest("[data-arm]")
+        ?.getAttribute("data-arm") as "common" | "path" | null;
+      if (armKind && this.cur) {
+        this.deps.arm(armKind, this.cur.rank);
         return;
       }
       if (t.id === "drawer-close") this.hide();
@@ -163,6 +173,87 @@ export class Drawer {
   /** 过滤条件变化后按当前 store 重绘。 */
   refresh(): void {
     this.rerender();
+  }
+
+  private chipOf(rank: number): string {
+    const k = this.deps.geo.key[rank] ?? 0;
+    const av = k
+      ? html`<img
+          class="chip-av"
+          loading="lazy"
+          src="${coverUrl(k, "grid")}"
+          alt=""
+          onerror="this.remove()"
+        >`
+      : "";
+    return html`<button class="chip" data-rank="${rank}">
+      ${raw(av)}${this.nameOf(rank)}
+    </button>`;
+  }
+
+  private lbl(lid: number): string {
+    return this.deps.manifest.labels[lid] ?? "关联";
+  }
+
+  /** 共同关联视图:两端点 + 交集列表(各自 top-200 关系内)。 */
+  showCompare(
+    aRank: number,
+    bRank: number,
+    items: CommonItem[],
+    direct: number | null,
+  ): void {
+    this.cur = null; // 非详情视图,分页态失效
+    this.el.classList.add("open");
+    const rows = items
+      .slice(0, 100)
+      .map(
+        (it) => html`<div class="prow">
+          ${raw(this.chipOf(it.rank))}
+          <span class="rmeta">
+            ${this.lbl(it.la)} ↔ ${this.lbl(it.lb)}
+          </span>
+        </div>`,
+      )
+      .join("");
+    this.el.innerHTML = html`
+      <button id="drawer-close" aria-label="关闭">×</button>
+      <h2>⚭ 共同关联</h2>
+      <div class="chips">
+        ${raw(this.chipOf(aRank))} × ${raw(this.chipOf(bRank))}
+      </div>
+      ${raw(
+        direct !== null
+          ? html`<div class="stats">两者直接相关:${this.lbl(direct)}</div>`
+          : "",
+      )}
+      <div class="group-label">
+        共同关联 ${items.length} 个(基于各自热度 top-200 关系)
+      </div>
+      ${raw(rows)}
+    `;
+  }
+
+  /** 最短路径视图:链式列表,关系名标在相邻两点之间。 */
+  showPath(res: PathResult): void {
+    this.cur = null;
+    this.el.classList.add("open");
+    const rows = res.ranks
+      .map((rank, i) => {
+        const arrow =
+          i < res.labels.length
+            ? html`<div class="parrow">↓ ${this.lbl(res.labels[i] ?? -1)}</div>`
+            : "";
+        return html`<div class="prow">${raw(this.chipOf(rank))}</div>${raw(arrow)}`;
+      })
+      .join("");
+    this.el.innerHTML = html`
+      <button id="drawer-close" aria-label="关闭">×</button>
+      <h2>🧭 最短路径(${res.ranks.length - 1} 跳)</h2>
+      ${raw(rows)}
+      <div class="note">
+        搜索范围:每层热度 top-48 邻居 × 6 跳内(有界双向 BFS)
+      </div>
+    `;
   }
 
   private rerender(): void {
@@ -297,6 +388,10 @@ export class Drawer {
         )}
       </div>
       <div class="stats">${statsBits.join(" · ")}</div>
+      <div class="linkops">
+        <button class="chip" data-arm="common">⚭ 共同关联</button>
+        <button class="chip" data-arm="path">🧭 查找路径</button>
+      </div>
       ${raw(
         det?.sum
           ? html`<div class="sum">

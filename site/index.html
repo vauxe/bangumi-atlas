@@ -44,6 +44,20 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 
 #searchwrap-dock { position: fixed; top: 14px; left: 14px;
   width: 300px; z-index: 6; }
+#results { display: none; position: fixed; top: 76px; left: 14px;
+  width: 300px; z-index: 5; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 16px; padding: 10px 12px;
+  max-height: calc(100vh - 220px); overflow-y: auto; }
+#results.open { display: block; }
+.rhead { font-size: 13px; margin-bottom: 6px; }
+.rrow { padding: 3px 4px; cursor: pointer; border-radius: 8px;
+  font-size: 13px; }
+.rrow:hover { background: var(--line); }
+.rn { color: var(--ink-2); font-size: 11px; }
+.rmeta { color: var(--ink-2); font-size: 11px; margin-left: 6px; }
+.linkops { margin: 8px 0 2px; }
+.prow { margin: 4px 0; }
+.parrow { color: var(--ink-2); font-size: 12px; margin: 0 0 4px 18px; }
 
 /* 抽屉:深青面板,粉色只作边缘高亮(描边 + 边缘光晕),内部无粉 */
 #drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 420px;
@@ -150,6 +164,7 @@ button.more:hover { text-decoration: underline; }
     <div id="hits"></div>
   </div>
 </div>
+<div id="results"></div>
 
 <div id="drawer"></div>
 

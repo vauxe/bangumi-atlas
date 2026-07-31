@@ -17,6 +17,12 @@ export interface State {
   neighbors: number[]; // 工作集邻居 ranks(top-50 已亮)
   /** 与 neighbors 对齐的解码关系 labelId(工作集边 tooltip 用)。 */
   neighborLabels: number[];
+  /** 共同关联的另一端(场景从它向邻居画第二扇边)。 */
+  compareWith: number | null;
+  /** 最短路径链(场景画链式边并抑制默认扇形)。 */
+  path: number[];
+  /** path 相邻两点间的关系 labelId(链边 tooltip)。 */
+  pathLabels: number[];
   filters: Filters;
 }
 
@@ -24,6 +30,9 @@ export const state: State = {
   selection: null,
   neighbors: [],
   neighborLabels: [],
+  compareWith: null,
+  path: [],
+  pathLabels: [],
   filters: {
     yearMin: 0,
     yearMax: 9999,

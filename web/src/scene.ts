@@ -704,24 +704,62 @@ export class Scene {
           );
       col.set([r, g, b, Math.round(255 * k)], (i + 1) * 4);
     });
-    const linePos = new Float32Array(shown.length * 6);
-    const lineAlpha = new Uint8Array(shown.length * 4);
-    shown.forEach((s, i) => {
-      linePos.set(selPos, i * 6);
-      linePos.set(s.pos, i * 6 + 3);
-      const k = reduced
-        ? 1
-        : Math.max(
-            0,
-            Math.min(1, (t - i * CASCADE_STEP_MS) / CASCADE_FADE_MS),
-          );
-      lineAlpha.set([255, 255, 255, Math.round(90 * k)], i * 4);
+    // 三种连线形态:路径链(抑制扇形)/ 默认扇形 / 对比第二扇形
+    const chain = state.path.length >= 2 ? state.path : null;
+    const edgeSegs: {
+      a: [number, number, number];
+      b: [number, number, number];
+      label: number;
+      alpha: number;
+    }[] = [];
+    if (chain) {
+      for (let i = 0; i + 1 < chain.length; i++) {
+        const pa = this.posOf(chain[i] ?? 0);
+        const pb = this.posOf(chain[i + 1] ?? 0);
+        if (pa && pb)
+          edgeSegs.push({
+            a: pa,
+            b: pb,
+            label: state.pathLabels[i] ?? -1,
+            alpha: 200,
+          });
+      }
+    } else {
+      shown.forEach((s, i) => {
+        const k = reduced
+          ? 1
+          : Math.max(
+              0,
+              Math.min(1, (t - i * CASCADE_STEP_MS) / CASCADE_FADE_MS),
+            );
+        edgeSegs.push({
+          a: selPos,
+          b: s.pos,
+          label: s.label,
+          alpha: Math.round(90 * k),
+        });
+      });
+      // 共同关联:从对比端再画一扇(标签属 A 侧,tooltip 不重复报)
+      const cw = state.compareWith;
+      const cwPos = cw !== null ? this.posOf(cw) : null;
+      if (cwPos) {
+        for (const s of shown)
+          if (s.rank !== cw)
+            edgeSegs.push({ a: cwPos, b: s.pos, label: -1, alpha: 70 });
+      }
+    }
+    const linePos = new Float32Array(edgeSegs.length * 6);
+    const lineAlpha = new Uint8Array(edgeSegs.length * 4);
+    edgeSegs.forEach((sg, i) => {
+      linePos.set(sg.a, i * 6);
+      linePos.set(sg.b, i * 6 + 3);
+      lineAlpha.set([255, 255, 255, sg.alpha], i * 4);
     });
     const layers: unknown[] = [
       new LineLayer({
         id: "ws-edges",
         data: {
-          length: shown.length,
+          length: edgeSegs.length,
           attributes: {
             getSourcePosition: { value: linePos, size: 3, stride: 24 },
             getTargetPosition: {
@@ -733,12 +771,12 @@ export class Scene {
             getColor: { value: lineAlpha, size: 4 },
           },
         },
-        getWidth: 1.6,
+        getWidth: chain ? 2.4 : 1.6,
         widthUnits: "pixels",
         pickable: true, // §5:悬停工作集边 → 解码关系名 tooltip
         onHover: (info: { index: number; x: number; y: number }) => {
           const lbl =
-            info.index >= 0 ? (shown[info.index]?.label ?? null) : null;
+            info.index >= 0 ? (edgeSegs[info.index]?.label ?? null) : null;
           this.cb.onHoverEdge(
             lbl !== null && lbl >= 0 ? lbl : null,
             info.x,
