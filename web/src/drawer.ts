@@ -4,7 +4,7 @@
 import { esc, html, raw } from "./html";
 import { loadAdj, loadDetail, loadPage } from "./loader";
 import { state } from "./store";
-import { bgmUrl, MEDIA_NAMES, TYPE_NAMES, etype } from "./types";
+import { bgmUrl, coverUrl, MEDIA_NAMES, TYPE_NAMES, etype } from "./types";
 import type {
   AdjEntry,
   AdjPage,
@@ -209,12 +209,23 @@ export class Drawer {
               </button>`
             : "";
         const chips = shown
-          .map(
-            (r) =>
-              html`<button class="chip" data-rank="${r}">
-                ${this.nameOf(r)}
-              </button>`,
-          )
+          .map((r) => {
+            const k = this.deps.geo.key[r] ?? 0;
+            // 方形裁剪的 grid 尺寸作 chip 头像;失败即自移除,
+            // 未流式覆盖(key 未知)时不出图
+            const av = k
+              ? html`<img
+                  class="chip-av"
+                  loading="lazy"
+                  src="${coverUrl(k, "grid")}"
+                  alt=""
+                  onerror="this.remove()"
+                >`
+              : "";
+            return html`<button class="chip" data-rank="${r}">
+              ${raw(av)}${this.nameOf(r)}
+            </button>`;
+          })
           .join("");
         return html`<div class="group">
           <div class="group-label">${label}(${total})</div>
@@ -269,6 +280,12 @@ export class Drawer {
 
     return html`
       <button id="drawer-close" aria-label="关闭">×</button>
+      <img
+        class="cover"
+        src="${coverUrl(key, "medium")}"
+        alt=""
+        onerror="this.remove()"
+      >
       <h2>${title}</h2>
       ${raw(sub ? html`<div class="subtitle">${sub}</div>` : "")}
       <div class="badges">

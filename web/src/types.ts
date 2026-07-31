@@ -109,3 +109,14 @@ export const bgmUrl = (key: number): string => {
   const kind = ["", "subject", "person", "character"][etype(key)];
   return `https://bgm.tv/${kind}/${eid(key)}`;
 };
+
+/** bgm.tv 官方封面重定向端点(302 带 1h 缓存)。
+ * WebGL 纹理必须用 small(唯一必经带 CORS 的 /r/100/ 缩放代理);
+ * DOM <img> 无 CORS 约束,可用 grid(方形裁剪)/medium(400px)。 */
+export const coverUrl = (
+  key: number,
+  size: "small" | "grid" | "medium",
+): string => {
+  const kind = ["", "subjects", "persons", "characters"][etype(key)];
+  return `https://api.bgm.tv/v0/${kind}/${eid(key)}/image?type=${size}`;
+};
