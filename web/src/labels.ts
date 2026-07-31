@@ -58,7 +58,10 @@ export function labelLayers(
         getColor: [200, 205, 220, 190],
         outlineWidth: 2,
         outlineColor: [11, 14, 26, 220],
-        fontSettings: { sdf: true },
+        // 32px 源字号:4.7k 字的图集控制在 GPU 纹理上限内
+        // (64px 默认值实测超 max texture size,字形全变实心块),
+        // 屏显 12-15px 的 SDF 质量不受影响
+        fontSettings: { sdf: true, fontSize: 32, buffer: 4 },
         billboard: true,
         extensions: [new CollisionFilterExtension()],
         collisionTestProps: { sizeScale: 2 },
@@ -103,7 +106,10 @@ export function labelLayers(
         getColor: [232, 233, 236, 210],
         outlineWidth: 2,
         outlineColor: [11, 14, 26, 200],
-        fontSettings: { sdf: true },
+        // 32px 源字号:4.7k 字的图集控制在 GPU 纹理上限内
+        // (64px 默认值实测超 max texture size,字形全变实心块),
+        // 屏显 12-15px 的 SDF 质量不受影响
+        fontSettings: { sdf: true, fontSize: 32, buffer: 4 },
         billboard: true,
         extensions: [new CollisionFilterExtension()],
         collisionTestProps: { sizeScale: 1.6 },

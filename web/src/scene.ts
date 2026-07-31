@@ -34,28 +34,35 @@ const PULSE_MS = 500; // §5:选中光环单脉冲
 // ---- 节点样式扩展:着色/过滤/雾一体,全在 GPU ----
 // 实例属性:instanceStyle = [flags, etype, sizeLog, 0](u8×4)、
 // instanceYearComm = [year, community](u16×2);其余全是 uniform。
+// 注意:luma 的 uniform block 解析按行取首个声明,必须一行一字段;
+// 全用 float——int 成员的默认精度 vs(highp)/fs(mediump)不一致,
+// 会在链接期报 precision mismatch,掩码值 ≤126 用 float 无损
+const ATLAS_UNIFORM_BLOCK = `uniform atlasUniforms {
+  vec3 cameraPos;
+  float fogStart;
+  float fogFalloff;
+  float yearMin;
+  float yearMax;
+  float mediaMask;
+  float nsfwOn;
+  float spotlight;
+  float colorBy;
+} atlas;`;
+
 const atlasShaderModule = {
   name: "atlas",
-  vs: `uniform atlasUniforms {
-  vec3 cameraPos; float fogStart; float fogFalloff;
-  float yearMin; float yearMax;
-  int mediaMask; int nsfwOn; int spotlight; int colorBy;
-} atlas;`,
-  fs: `uniform atlasUniforms {
-  vec3 cameraPos; float fogStart; float fogFalloff;
-  float yearMin; float yearMax;
-  int mediaMask; int nsfwOn; int spotlight; int colorBy;
-} atlas;`,
+  vs: ATLAS_UNIFORM_BLOCK,
+  fs: ATLAS_UNIFORM_BLOCK,
   uniformTypes: {
     cameraPos: "vec3<f32>",
     fogStart: "f32",
     fogFalloff: "f32",
     yearMin: "f32",
     yearMax: "f32",
-    mediaMask: "i32",
-    nsfwOn: "i32",
-    spotlight: "i32",
-    colorBy: "i32",
+    mediaMask: "f32",
+    nsfwOn: "f32",
+    spotlight: "f32",
+    colorBy: "f32",
   },
 } as const;
 
@@ -88,6 +95,10 @@ out float atlas_fogDepth;`,
 atlas_style = instanceStyle;
 atlas_yc = instanceYearComm;
 atlas_fogDepth = distance(geometry.worldPosition.xyz, atlas.cameraPos);`,
+        // 孤立外壳点缩到 0.35×:该钩子作用于像素钳制之后,
+        // 是唯一能把外壳压到亚像素、不糊住星系本体的通道(§7)
+        "vs:DECKGL_FILTER_SIZE": `
+if (mod(floor(instanceStyle.x / 2.0), 2.0) >= 1.0) size *= 0.35;`,
         "fs:#decl": `
 in vec4 atlas_style;
 in vec2 atlas_yc;
@@ -106,13 +117,13 @@ in float atlas_fogDepth;`,
   int a_media = int(floor(f_flags / 4.0));
   bool isSubject = f_etype < 1.5; // 档位比较,规避浮点等值
   bool yearOn = atlas.yearMin > 0.5 || atlas.yearMax < 9998.5;
-  if (a_nsfw && atlas.nsfwOn == 0) discard;
+  if (a_nsfw && atlas.nsfwOn < 0.5) discard;
   if (yearOn && isSubject && f_year > 0.5 &&
       (f_year < atlas.yearMin || f_year > atlas.yearMax)) discard;
   vec3 rgb = isSubject ? vec3(57.0, 135.0, 229.0)
            : f_etype < 2.5 ? vec3(217.0, 89.0, 38.0)
            : vec3(25.0, 158.0, 112.0);
-  if (atlas.colorBy == 1 && f_comm < 65534.5) {
+  if (atlas.colorBy > 0.5 && f_comm < 65534.5) {
     float h = mod(f_comm * 137.508, 360.0) / 60.0;
     float x = 1.0 - abs(mod(h, 2.0) - 1.0);
     vec3 c = h < 1.0 ? vec3(1.0, x, 0.0)
@@ -123,11 +134,14 @@ in float atlas_fogDepth;`,
            : vec3(1.0, 0.0, x);
     rgb = 90.0 + c * 140.0;
   }
-  float a = a_iso ? 110.0 : 160.0 + min(50.0, floor(f_size / 4.0));
+  // 孤立外壳 9.2 万点包裹星系,亮度稍高即叠成实心球(真机实测),
+  // 压到 ~14% 才守住"调暗不糊噪音"(§7)
+  float a = a_iso ? 36.0 : 160.0 + min(50.0, floor(f_size / 4.0));
   if (yearOn && (!isSubject || f_year < 0.5)) a = min(a, 90.0);
-  if (atlas.mediaMask != 0 && a_media > 0 &&
-      (atlas.mediaMask & (1 << a_media)) == 0) a = 40.0;
-  if (atlas.spotlight == 1) a = min(a, 38.0);
+  int mediaMask = int(atlas.mediaMask + 0.5);
+  if (mediaMask != 0 && a_media > 0 &&
+      (mediaMask & (1 << a_media)) == 0) a = 40.0;
+  if (atlas.spotlight > 0.5) a = min(a, 38.0);
   a *= mix(0.25, 1.0,
     exp(-max(atlas_fogDepth - atlas.fogStart, 0.0) * atlas.fogFalloff));
   // 入参 color.a 携带圆边平滑因子(SDF AA),必须保留
