@@ -127,8 +127,6 @@ async function boot(): Promise<void> {
     },
     onViewChange: () => replaceUrl(),
   });
-  $("#cold").classList.add("ready");
-
   // ---- 几何流:场景已就绪,首块回调即渲(§2/§9-1)----
   const geoDone = gstream.start((loaded) => {
     hud.textContent =
@@ -173,7 +171,6 @@ async function boot(): Promise<void> {
     fly: boolean,
     push = true,
   ): Promise<void> {
-    dockSearch();
     stopAutoRotate();
     state.selection = rank;
     // 落点未流式覆盖:一次 Range 点查同时解析坐标与 key(§6)
@@ -255,7 +252,6 @@ async function boot(): Promise<void> {
     }
   };
   $("#dice").addEventListener("click", rollDice);
-  $("#dice-cold").addEventListener("click", rollDice);
 
   // ---- 键盘(§5 输入语法表)----
   document.addEventListener("keydown", (ev) => {
@@ -357,23 +353,12 @@ async function boot(): Promise<void> {
 
   // ---- 冷启动背景自转(状态声明在前;首次交互即停)----
   const spin = (): void => {
-    if (!rotating || docked) return;
+    if (!rotating) return;
     scene.orbitStep(0.02);
     requestAnimationFrame(spin);
   };
   requestAnimationFrame(spin);
   $("#map").addEventListener("pointerdown", stopAutoRotate, { once: true });
-}
-
-let docked = false;
-function dockSearch(): void {
-  if (docked) return;
-  docked = true;
-  const wrap = document.querySelector("#searchwrap");
-  const dock = document.querySelector("#searchwrap-dock");
-  if (wrap && dock) dock.appendChild(wrap);
-  document.body.classList.add("docked");
-  document.querySelector("#cold")?.classList.add("away");
 }
 
 void boot();
