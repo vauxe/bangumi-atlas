@@ -116,22 +116,33 @@ button.more:hover { text-decoration: underline; }
 #toolbar .row { background: rgba(20,38,43,.88); border: 1px solid var(--line);
   border-radius: 16px; padding: 6px 8px; backdrop-filter: blur(4px);
   display: flex; align-items: center; gap: 6px; }
-#toolbar .chip { margin: 0; min-height: 44px; min-width: 44px;
+#toolbar > .row .chip { margin: 0; min-height: 44px; min-width: 44px;
   display: inline-flex; align-items: center; justify-content: center;
   line-height: 1; }
+#filters .chip { margin: 0 6px 6px 0; min-height: 28px;
+  display: inline-flex; align-items: center; }
 #toolbar label { display: inline-flex; align-items: center; gap: 4px;
   min-height: 44px; }
 #toolbar button { cursor: pointer; }
-#year-row { min-height: 44px; }
-#tag-chips { max-width: 380px; max-height: 108px; overflow-y: auto;
-  flex-wrap: wrap; justify-content: flex-end; }
-#score-row { min-height: 44px; }
-#score-label { font-size: 12px; color: var(--ink-2); min-width: 76px;
-  text-align: right; }
-#score-min { width: 170px; accent-color: var(--pink); }
-#year-label { font-size: 12px; color: var(--ink-2); min-width: 76px;
-  text-align: right; }
-#year-slider { position: relative; width: 170px; height: 24px; }
+/* 筛选面板:四个过滤维度统一宽度收纳,可折叠,形状归一 */
+#filters { width: 320px; background: rgba(20,38,43,.88);
+  border: 1px solid var(--line); border-radius: 16px;
+  backdrop-filter: blur(4px); overflow: hidden; }
+#filters-head { display: flex; align-items: center; gap: 6px;
+  padding: 0 14px; min-height: 44px; cursor: pointer; font-size: 13px; }
+#filters.closed #filters-body { display: none; }
+#filters-body { padding: 0 14px 12px; display: flex;
+  flex-direction: column; gap: 12px; }
+.fbadge:not(:empty) { background: var(--pink); color: #3a0b22;
+  border-radius: 10px; padding: 0 7px; font-size: 11px; line-height: 18px; }
+.fsec-label { font-size: 11px; color: var(--ink-2); margin-bottom: 6px;
+  display: flex; }
+.fsec-label span { margin-left: auto; }
+#tag-chips { max-height: 96px; overflow-y: auto; display: flex;
+  flex-wrap: wrap; }
+#media-chips { display: flex; flex-wrap: wrap; }
+#score-min { width: 100%; accent-color: var(--pink); margin: 0; }
+#year-slider { position: relative; width: 100%; height: 24px; }
 #year-slider::before { content: ""; position: absolute; left: 0; right: 0;
   top: 11px; height: 3px; background: var(--line); border-radius: 2px; }
 #year-slider input[type="range"] { position: absolute; inset: 0;
@@ -175,17 +186,32 @@ button.more:hover { text-decoration: underline; }
 <div id="drawer"></div>
 
 <div id="toolbar">
-  <div class="row" id="tag-chips"></div>
-  <div class="row" id="score-row">
-    <span id="score-label">评分不限</span>
-    <input id="score-min" type="range" min="0" max="95" step="5" value="0">
-  </div>
-  <div class="row" id="media-chips"></div>
-  <div class="row" id="year-row">
-    <span id="year-label">全部年代</span>
-    <div id="year-slider">
-      <input id="year-min" type="range" step="1">
-      <input id="year-max" type="range" step="1">
+  <div id="filters" class="closed">
+    <div id="filters-head" role="button" title="点击展开/收起">
+      筛选<span id="filters-count" class="fbadge"></span>
+      <span class="rchev">▸</span>
+    </div>
+    <div id="filters-body">
+      <div class="fsec">
+        <div class="fsec-label">标签<span>可多选,须同时满足</span></div>
+        <div id="tag-chips"></div>
+      </div>
+      <div class="fsec">
+        <div class="fsec-label">评分<span id="score-label">不限</span></div>
+        <input id="score-min" type="range" min="0" max="95" step="5"
+               value="0">
+      </div>
+      <div class="fsec">
+        <div class="fsec-label">媒介<span>选中高亮,其余调暗</span></div>
+        <div id="media-chips"></div>
+      </div>
+      <div class="fsec">
+        <div class="fsec-label">年代<span id="year-label">全部</span></div>
+        <div id="year-slider">
+          <input id="year-min" type="range" step="1">
+          <input id="year-max" type="range" step="1">
+        </div>
+      </div>
     </div>
   </div>
   <div class="row">

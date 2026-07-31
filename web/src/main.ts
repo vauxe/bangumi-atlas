@@ -375,12 +375,30 @@ async function boot(): Promise<void> {
   const applyScore = (): void => {
     const v = Number(sMin.value);
     state.filters.scoreMin = v;
-    scoreLabel.textContent =
-      v > 0 ? `评分 ≥ ${(v / 10).toFixed(1)}` : "评分不限";
+    scoreLabel.textContent = v > 0 ? `≥ ${(v / 10).toFixed(1)}` : "不限";
     notify();
     replaceUrl();
   };
   sMin.addEventListener("input", applyScore);
+
+  // 筛选面板折叠 + 激活计数徽标
+  const filtersPanel = $("#filters");
+  const filtersChev = $("#filters-head .rchev");
+  $("#filters-head").addEventListener("click", () => {
+    const closed = filtersPanel.classList.toggle("closed");
+    filtersChev.textContent = closed ? "▸" : "▾";
+  });
+  const filterBadge = $("#filters-count");
+  const updateFilterBadge = (): void => {
+    const f = state.filters;
+    const n =
+      f.tags.size +
+      f.media.size +
+      (f.scoreMin > 0 ? 1 : 0) +
+      (f.yearMin > 0 || f.yearMax < 9999 ? 1 : 0);
+    filterBadge.textContent = n > 0 ? String(n) : "";
+  };
+  subscribe(updateFilterBadge);
 
   const mediaBox = $("#media-chips");
   mediaBox.innerHTML = Object.entries(MEDIA_NAMES)
@@ -426,7 +444,7 @@ async function boot(): Promise<void> {
     const full = a <= Number(yMin.min) && b >= Number(yMax.max);
     state.filters.yearMin = full ? 0 : a;
     state.filters.yearMax = full ? 9999 : b;
-    yearLabel.textContent = full ? "全部年代" : `${a} – ${b}`;
+    yearLabel.textContent = full ? "全部" : `${a} – ${b}`;
     notify();
     replaceUrl();
   };
@@ -448,7 +466,7 @@ async function boot(): Promise<void> {
       );
     sMin.value = String(f.scoreMin);
     scoreLabel.textContent =
-      f.scoreMin > 0 ? `评分 ≥ ${(f.scoreMin / 10).toFixed(1)}` : "评分不限";
+      f.scoreMin > 0 ? `≥ ${(f.scoreMin / 10).toFixed(1)}` : "不限";
     $("#layer-toggle").textContent =
       f.colorBy === "type" ? "社区着色" : "类型着色";
     const full = f.yearMin <= 0 && f.yearMax >= 9999;
@@ -459,7 +477,7 @@ async function boot(): Promise<void> {
       ? yMax.max
       : String(Math.min(f.yearMax, Number(yMax.max)));
     yearLabel.textContent = full
-      ? "全部年代"
+      ? "全部"
       : `${yMin.value} – ${yMax.value}`;
   }
 
