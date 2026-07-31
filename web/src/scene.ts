@@ -990,7 +990,13 @@ export class Scene {
     for (const b of f.tags) sel |= 1 << b;
     return {
       cameraPos: this.cameraPosition(),
-      fogStart: this.cameraDistance() * 1.05,
+      // 起雾距离带绝对下限:无雾泡若随枢轴距离塌缩,拉近后除枢轴
+      // 紧邻外一切都算"远",凑近节点反而入雾更深(越近越暗);
+      // 雾只该压远景,近/中景(相机 0.3×世界内)永不入雾
+      fogStart: Math.max(
+        this.cameraDistance() * 1.05,
+        0.3 * this.worldSize,
+      ),
       fogFalloff: 1.6 / Math.max(this.worldSize, 1),
       yearMin: f.yearMin,
       yearMax: f.yearMax,
