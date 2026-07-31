@@ -6,6 +6,12 @@ on:
   schedule:
     - cron: "0 0 * * 3"
   workflow_dispatch:
+    inputs:
+      allow_cold_start:
+        description: Allow an unmeasured layout for the first deployment only
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -82,6 +88,10 @@ jobs:
           else
             SRC=""
             echo "cold start: no previous coordinates anywhere"
+            if [ "${{ inputs.allow_cold_start }}" != "true" ]; then
+              echo "cold-start publication requires an explicit manual override" >&2
+              exit 1
+            fi
           fi
           if [ -n "$SRC" ]; then
             uv run python scripts/layout.py --algo umap --warm-start "$SRC"
@@ -91,7 +101,12 @@ jobs:
           cp data/layout/coords.parquet /tmp/cached_coords.parquet
           echo "layout report:" && cat data/layout/report.json
           # §7 位移门槛 3% 是发布硬门禁;超限不得覆盖稳定坐标。
-          uv run python scripts/check_layout_report.py data/layout/report.json
+          if [ "${{ inputs.allow_cold_start }}" = "true" ]; then
+            uv run python scripts/check_layout_report.py \
+              --allow-cold-start data/layout/report.json
+          else
+            uv run python scripts/check_layout_report.py data/layout/report.json
+          fi
 
       - name: Save coordinate cache
         uses: actions/cache/save@v4

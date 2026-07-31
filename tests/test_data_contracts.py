@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import gzip
+import tempfile
 import unittest
+from pathlib import Path
 
 from scripts.content_fingerprint import RowFingerprint
 from scripts.site_contracts import (
     artifact_version,
     gzip_json,
+    read_dump_version,
     reverse_navigation_label,
 )
 
@@ -40,6 +43,24 @@ class SiteContractTests(unittest.TestCase):
         self.assertEqual(first, reordered)
         self.assertNotEqual(first, changed)
         self.assertTrue(first.startswith("dump-2026-07-28-"))
+
+    def test_dump_version_is_required_instead_of_using_build_time(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            version_file = Path(directory) / "VERSION"
+            with self.assertRaisesRegex(ValueError, "missing or empty"):
+                read_dump_version(version_file)
+
+            version_file.write_text("  \n")
+            with self.assertRaisesRegex(ValueError, "missing or empty"):
+                read_dump_version(version_file)
+
+            version_file.write_text("dump-2026-07-28\n")
+            self.assertEqual(
+                read_dump_version(version_file),
+                "dump-2026-07-28",
+            )
 
 
 class RowFingerprintTests(unittest.TestCase):

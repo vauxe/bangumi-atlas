@@ -21,6 +21,7 @@ from opencc import OpenCC
 from site_contracts import (
     artifact_version,
     gzip_json,
+    read_dump_version,
     reverse_navigation_label,
 )
 
@@ -213,15 +214,7 @@ def load_info() -> dict[int, dict[str, Any]]:
 
 def main() -> None:  # noqa: PLR0915
     t_start = time.time()
-    dump_version = (
-        DUMP_VERSION.read_text().strip() if DUMP_VERSION.exists() else ""
-    )
-    if not dump_version:
-        dump_version = time.strftime("%Y-%m-%d")
-        log(
-            f"WARNING: {DUMP_VERSION} 缺失,"
-            f"dump_version 回退构建日期 {dump_version}"
-        )
+    dump_version = read_dump_version(DUMP_VERSION)
     # 清场重建:防止上次运行的产物残留(与 fetch_dump 同一纪律)
     shutil.rmtree(SITE, ignore_errors=True)
     SITE.mkdir(parents=True, exist_ok=True)

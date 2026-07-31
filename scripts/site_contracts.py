@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+from pathlib import Path
 from typing import Any
 
 import orjson
@@ -38,3 +39,15 @@ def artifact_version(dump_version: str, contract: dict[str, Any]) -> str:
     payload = {"dump_version": dump_version, "contract": contract}
     digest = hashlib.sha256(_canonical_json(payload)).hexdigest()[:16]
     return f"{dump_version}-{digest}"
+
+
+def read_dump_version(path: Path) -> str:
+    """Read required source provenance without a wall-clock fallback."""
+
+    try:
+        version = path.read_text().strip()
+    except FileNotFoundError:
+        version = ""
+    if not version:
+        raise ValueError(f"{path}: dump VERSION is missing or empty")
+    return version

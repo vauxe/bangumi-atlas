@@ -14,11 +14,18 @@ from typing import Any
 def enforce_shift_limit(
     report: Mapping[str, Any],
     limit: float = 3.0,
+    *,
+    allow_cold_start: bool = False,
 ) -> None:
     if "p95_shift_pct" not in report:
         raise ValueError("layout report is missing p95_shift_pct")
     shift = report["p95_shift_pct"]
-    if shift is None:  # cold start has no previous coordinate set
+    if shift is None:
+        if not allow_cold_start:
+            raise ValueError(
+                "layout has no warm-start baseline; "
+                "cold-start publication requires explicit approval"
+            )
         return
     if (
         isinstance(shift, bool)
@@ -34,10 +41,19 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("report", type=Path)
     parser.add_argument("--limit", type=float, default=3.0)
+    parser.add_argument(
+        "--allow-cold-start",
+        action="store_true",
+        help="allow an unmeasured first publication (manual bootstrap only)",
+    )
     args = parser.parse_args()
     try:
         report = json.loads(args.report.read_text())
-        enforce_shift_limit(report, args.limit)
+        enforce_shift_limit(
+            report,
+            args.limit,
+            allow_cold_start=args.allow_cold_start,
+        )
     except (OSError, json.JSONDecodeError, ValueError) as error:
         sys.exit(f"layout publish gate failed: {error}")
     shift = report["p95_shift_pct"]
