@@ -39,15 +39,7 @@ const layout = await page.evaluate(() => {
   };
 });
 
-// 2) C 键:类型着色 ⇄ 社区着色(URL l= 参数)
-await page.keyboard.press("c");
-await new Promise((r) => setTimeout(r, 300));
-const hashAfterC = await page.evaluate(() => location.hash);
-await page.keyboard.press("c");
-await new Promise((r) => setTimeout(r, 300));
-const hashAfterCC = await page.evaluate(() => location.hash);
-
-// 3) 筛选展开 + 应用一个媒介过滤 → 结果面板出现在筛选下方
+// 2) 筛选展开 + 应用一个媒介过滤 → 结果面板出现在筛选下方
 await page.click("#filters-head");
 await new Promise((r) => setTimeout(r, 200));
 await page.click('#media-chips [data-media]');
@@ -72,7 +64,7 @@ await page.click('#media-chips [data-media]');
 await page.click("#filters-head");
 await new Promise((r) => setTimeout(r, 300));
 
-// 4) 骰子 → 选中 + 抽屉
+// 3) 骰子 → 选中 + 抽屉
 await page.click("#dice");
 await new Promise((r) => setTimeout(r, 3500));
 const dice = await page.evaluate(() => ({
@@ -82,7 +74,6 @@ const dice = await page.evaluate(() => ({
 }));
 
 console.log("LAYOUT:", JSON.stringify(layout));
-console.log("C-KEY:", JSON.stringify({ hashAfterC, hashAfterCC }));
 console.log("PANELS:", JSON.stringify(panels));
 console.log("DICE:", JSON.stringify(dice));
 console.log("ERRORS:", errs.length ? errs.slice(0, 10) : "none");

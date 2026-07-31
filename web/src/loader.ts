@@ -36,7 +36,7 @@ async function streamInto(
   onProgress: (bytes: number) => void,
   priority: "high" | "low" = "high",
 ): Promise<void> {
-  // 优先级提示:几何六件 high(首块即渲),名字表 low(不抢带宽)
+  // 优先级提示:几何七件 high(首块即渲),名字表 low(不抢带宽)
   const res = await fetch(url(path), { priority } as RequestInit);
   if (!res.ok || !res.body) throw new Error(`fetch ${path}: ${res.status}`);
   const reader = res.body.getReader();
@@ -52,7 +52,7 @@ async function streamInto(
 
 export interface GeometryStream {
   geo: Geometry;
-  /** 启动六个 SoA 文件的并行流式填充;onChunk(loaded) 以 ~250ms
+  /** 启动七个 SoA 文件的并行流式填充;onChunk(loaded) 以 ~250ms
    * 节流回调。分配与启动分离:调用方先建场景再 start,
    * 首块回调必然晚于场景就绪(首块即渲的前提)。 */
   start(onChunk: (loaded: number) => void): Promise<void>;
@@ -65,7 +65,6 @@ export function openGeometry(manifest: Manifest): GeometryStream {
     positions: new Uint8Array(n * 6),
     year: new Uint8Array(n * 2),
     key: new Uint8Array(n * 4),
-    community: new Uint8Array(n * 2),
     size: new Uint8Array(n),
     flags: new Uint8Array(n),
     score: new Uint8Array(n),
@@ -75,7 +74,6 @@ export function openGeometry(manifest: Manifest): GeometryStream {
     positions: 6,
     year: 2,
     key: 4,
-    community: 2,
     size: 1,
     flags: 1,
     score: 1,
@@ -86,7 +84,6 @@ export function openGeometry(manifest: Manifest): GeometryStream {
     positions: new Float32Array(n * 3),
     year: new Uint16Array(raw.year.buffer),
     key: new Uint32Array(raw.key.buffer),
-    community: new Uint16Array(raw.community.buffer),
     size: raw.size,
     flags: raw.flags,
     score: raw.score,

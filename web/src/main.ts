@@ -346,13 +346,6 @@ async function boot(): Promise<void> {
     const k = ev.key.toLowerCase();
     if (k === "t") scene.topView(); // Top
     if (k === "r") scene.home(); // Reset
-    if (k === "c") {
-      // Color:类型着色 ⇄ 社区着色
-      state.filters.colorBy =
-        state.filters.colorBy === "type" ? "community" : "type";
-      notify();
-      replaceUrl();
-    }
     if (ev.key === "Escape" && state.selection !== null) deselect(true);
   });
 
