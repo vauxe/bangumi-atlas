@@ -30,8 +30,9 @@ export class Search {
       }
     });
     document.addEventListener("keydown", (ev) => {
+      // S(Search)为主键位,/ 为通用惯例别名
       if (
-        ev.key === "/" &&
+        (ev.key.toLowerCase() === "s" || ev.key === "/") &&
         document.activeElement !== box &&
         !(document.activeElement instanceof HTMLInputElement)
       ) {

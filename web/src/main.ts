@@ -343,8 +343,10 @@ async function boot(): Promise<void> {
   // ---- 键盘(§5 输入语法表)----
   document.addEventListener("keydown", (ev) => {
     if (ev.target instanceof HTMLInputElement) return;
-    if (ev.key === "2") scene.topView();
-    if (ev.key.toLowerCase() === "h") scene.home();
+    // 见字知意的主键位 + 旧键别名(2/H 为历史习惯保留)
+    const k = ev.key.toLowerCase();
+    if (k === "t" || ev.key === "2") scene.topView();
+    if (k === "r" || k === "h") scene.home();
     if (ev.key === "Escape" && state.selection !== null) deselect(true);
   });
   $("#top-toggle").addEventListener("click", () => scene.topView());
