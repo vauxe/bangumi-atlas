@@ -12,7 +12,11 @@ import type {
   SearchEntry,
 } from "./types";
 import { AsyncMemo } from "./async-memo";
-import { assertByteLength, sha256Hex } from "./data-integrity";
+import {
+  assertByteLength,
+  assertContentRange,
+  sha256Hex,
+} from "./data-integrity";
 
 const BASE = "data";
 let version = "";
@@ -189,6 +193,8 @@ export function loadNames(
     loaded: 0,
   };
   const done = (async (): Promise<void> => {
+    const [publishedSize] = publishedMeta("names.ndjson");
+    const publishedBytes = new Uint8Array(publishedSize);
     const res = await fetch(url("names.ndjson"), {
       priority: "low",
     } as RequestInit);
@@ -214,12 +220,16 @@ export function loadNames(
     for (;;) {
       const { done: eof, value } = await reader.read();
       if (eof) break;
+      if (received + value.byteLength > publishedBytes.byteLength)
+        throw new Error("names.ndjson: response exceeds published size");
+      publishedBytes.set(value, received);
       received += value.byteLength;
       feed(decoder.decode(value, { stream: true }), false);
     }
     feed(decoder.decode(), true);
     assertByteLength("names.ndjson rows", names.loaded, n);
-    assertByteLength("names.ndjson", received, publishedMeta("names.ndjson")[0]);
+    assertByteLength("names.ndjson", received, publishedSize);
+    await verifyWholeFile("names.ndjson", publishedBytes);
   })();
   return { names, done };
 }
@@ -256,6 +266,13 @@ export async function pointByRank(
     if (!res.ok) throw new Error(`${path}: ${res.status}`);
     const bytes = new Uint8Array(await res.arrayBuffer());
     if (res.status === 206) {
+      assertContentRange(
+        path,
+        res.headers.get("Content-Range"),
+        start,
+        len,
+        total,
+      );
       assertByteLength(`${path} range`, bytes.byteLength, len);
       return bytes.buffer;
     }
@@ -281,7 +298,38 @@ export async function pointByRank(
 // 分片数(2.2 万)不再等于文件数(个位数 pack);详情从裸 JSON 存储
 // 700MB 变为存储即压缩(~250MB),传输量与原 CDN gzip 持平 ----
 
-const packFull = new Map<string, Promise<ArrayBuffer>>();
+type PackAccess =
+  | { kind: "whole"; buffer: ArrayBuffer }
+  | { kind: "range"; off: number; len: number; buffer: ArrayBuffer };
+
+const packAccess = new AsyncMemo<string, PackAccess>();
+
+async function probePack(
+  path: string,
+  off: number,
+  len: number,
+  total: number,
+): Promise<PackAccess> {
+  const res = await fetch(url(path), {
+    headers: { Range: `bytes=${off}-${off + len - 1}` },
+  });
+  if (res.status === 206) {
+    assertContentRange(
+      path,
+      res.headers.get("Content-Range"),
+      off,
+      len,
+      total,
+    );
+    const buffer = await res.arrayBuffer();
+    assertByteLength(`${path} range`, buffer.byteLength, len);
+    return { kind: "range", off, len, buffer };
+  }
+  if (!res.ok) throw new Error(`${path}: ${res.status}`);
+  const buffer = await res.arrayBuffer();
+  await verifyWholeFile(path, new Uint8Array(buffer));
+  return { kind: "whole", buffer };
+}
 
 /** Range 取片;服务器不支持 Range(开发环境)时整包缓存一次,
  * 后续切片全部本地完成。 */
@@ -293,28 +341,31 @@ async function packSlice(
   const [total] = publishedMeta(path);
   if (off < 0 || len < 0 || off + len > total)
     throw new RangeError(`${path}: slice [${off}, ${off + len}) is invalid`);
-  const cached = packFull.get(path);
-  if (cached) return (await cached).slice(off, off + len);
+  const access = await packAccess.get(path, () =>
+    probePack(path, off, len, total),
+  );
+  if (access.kind === "whole") return access.buffer.slice(off, off + len);
+  if (access.off === off && access.len === len) return access.buffer.slice(0);
+
   const res = await fetch(url(path), {
     headers: { Range: `bytes=${off}-${off + len - 1}` },
   });
   if (res.status === 206) {
+    assertContentRange(
+      path,
+      res.headers.get("Content-Range"),
+      off,
+      len,
+      total,
+    );
     const part = await res.arrayBuffer();
     assertByteLength(`${path} range`, part.byteLength, len);
     return part;
   }
   if (res.ok) {
-    const whole = res.arrayBuffer().then(async (buffer) => {
-      await verifyWholeFile(path, new Uint8Array(buffer));
-      return buffer;
-    });
-    packFull.set(path, whole);
-    try {
-      return (await whole).slice(off, off + len);
-    } catch (error) {
-      if (packFull.get(path) === whole) packFull.delete(path);
-      throw error;
-    }
+    const whole = await res.arrayBuffer();
+    await verifyWholeFile(path, new Uint8Array(whole));
+    return whole.slice(off, off + len);
   }
   throw new Error(`${path}: ${res.status}`);
 }

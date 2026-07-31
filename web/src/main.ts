@@ -50,8 +50,10 @@ async function boot(): Promise<void> {
   const gstream = openGeometry(manifest);
   const geo = gstream.geo;
   const { names, done: namesDone } = loadNames(manifest.n_nodes);
-  namesDone.catch(() => {
-    hud.textContent = "名字表加载失败,刷新重试"; // 失败显式报出
+  let namesFailed = false;
+  namesDone.catch((error: unknown) => {
+    namesFailed = true;
+    reportError("名字表加载", error);
   });
 
   const drawer = new Drawer($("#drawer"), {
@@ -148,10 +150,11 @@ async function boot(): Promise<void> {
   let geometryComplete = false;
   let pendingUrlHash: string | null = null;
   const geoDone = gstream.start((loaded) => {
-    hud.textContent =
-      loaded === manifest.n_nodes
-        ? ""
-        : `渲染 ${loaded.toLocaleString()} / ${manifest.n_nodes.toLocaleString()} 节点`;
+    if (!namesFailed)
+      hud.textContent =
+        loaded === manifest.n_nodes
+          ? ""
+          : `渲染 ${loaded.toLocaleString()} / ${manifest.n_nodes.toLocaleString()} 节点`;
     scene.geometryGrew();
   });
 
@@ -169,7 +172,7 @@ async function boot(): Promise<void> {
   runTask(
     geoDone.then(() => {
       geometryComplete = true;
-      hud.textContent = "";
+      if (!namesFailed) hud.textContent = "";
       scene.geometryGrew();
       // 稳定 key 在流式未覆盖时挂起整个 URL。全量就绪后从原 URL
       // 重新解析两端与相机，避免把 common/path 悄悄降级成普通选中。
