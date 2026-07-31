@@ -17,18 +17,8 @@ import type { OrbitState } from "./camera";
 import { labelLayers } from "./labels";
 import type { LabelCache, LabelData } from "./labels";
 import { state } from "./store";
-import { TYPE_COLORS, eid, etype } from "./types";
+import { coverUrl, TYPE_COLORS, etype } from "./types";
 import type { Geometry } from "./types";
-
-/** 工作集缩略图:bgm.tv 官方 API 的封面重定向端点(实测全链路
- * CORS 通过、302 带 1h 缓存)。dump 不含图片字段,只能实时取,
- * 因此仅工作集(≤51 张/次)用封面,语境层 98.5 万点维持圆点。 */
-function coverUrl(key: number): string {
-  const kind = ["", "subjects", "persons", "characters"][etype(key)];
-  // type=small 必经 /r/100/ 缩放代理(带 CORS);grid/large 会落到
-  // 无 CORS 头的原图路径,WebGL 纹理会被浏览器拦截(实测)
-  return `https://api.bgm.tv/v0/${kind}/${eid(key)}/image?type=small`;
-}
 
 export type { OrbitState } from "./camera";
 
@@ -788,7 +778,7 @@ export class Scene {
           i,
         })),
         getIcon: (d: { key: number }) => ({
-          url: coverUrl(d.key),
+          url: coverUrl(d.key, "small"), // WebGL 纹理只能用 small(CORS)
           id: String(d.key),
           // 声明为正方形配合内切圆裁剪;非方图的轻微挤压在
           // 节点尺寸(≤18px)下不可辨

@@ -53,6 +53,12 @@ html, body { margin: 0; height: 100%; background: var(--surface);
   box-shadow: -8px 0 24px rgba(242, 91, 166, .12); }
 #drawer.open { transform: none; }
 #drawer h2 { margin: 4px 24px 2px 0; font-size: 20px; }
+#drawer .cover { float: right; width: 96px; border-radius: 12px;
+  margin: 24px 0 10px 12px; }
+.chip-av { width: 20px; height: 20px; border-radius: 50%;
+  object-fit: cover; flex: none; }
+#drawer .chips .chip { display: inline-flex; align-items: center;
+  gap: 6px; }
 #drawer .subtitle { color: var(--ink-2); margin-bottom: 8px; }
 #drawer-close { position: absolute; top: 10px; right: 12px; border: 0;
   background: none; color: var(--ink-2); font-size: 22px; cursor: pointer; }
