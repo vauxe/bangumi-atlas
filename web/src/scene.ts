@@ -11,9 +11,11 @@
 import { Deck, LayerExtension, OrbitView } from "@deck.gl/core";
 import { Buffer as LumaBuffer } from "@luma.gl/core";
 import type { Device } from "@luma.gl/core";
-import { LineLayer, ScatterplotLayer } from "@deck.gl/layers";
+import { IconLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { Camera, prefersReducedMotion } from "./camera";
 import type { OrbitState } from "./camera";
+import { coverItems, coverUrl } from "./covers";
+import type { CoverItem } from "./covers";
 import { labelLayers } from "./labels";
 import type { LabelCache, LabelData } from "./labels";
 import { state } from "./store";
@@ -30,6 +32,22 @@ const EDGE_FADE_MS = 250;
 const CASCADE_STEP_MS = 30; // §5:邻居 30ms 级联淡入
 const CASCADE_FADE_MS = 200;
 const PULSE_MS = 500; // §5:选中光环单脉冲
+
+/** Crop dynamically packed cover textures to the circular node silhouette. */
+class CircleCropExtension extends LayerExtension {
+  static override extensionName = "CircleCropExtension";
+
+  override getShaders(): Record<string, unknown> {
+    return {
+      inject: {
+        "fs:DECKGL_FILTER_COLOR": `
+  float cover_r = length(geometry.uv);
+  if (cover_r > 1.0) discard;
+  color.a *= smoothstep(1.0, 0.94, cover_r);`,
+      },
+    };
+  }
+}
 
 // ---- 节点样式扩展:着色/过滤/雾一体,全在 GPU ----
 // 实例属性:instanceStyle = [flags, etype, sizeLog, 0](u8×4)、
@@ -819,6 +837,47 @@ export class Scene {
         },
       }),
     ];
+    const covers = coverItems(ranks, this.geo.key);
+    if (covers.length) {
+      // IconLayer auto-packing and onIconError are documented for deck.gl 9.x:
+      // https://deck.gl/docs/api-reference/layers/icon-layer#oniconerror-function
+      // A failed optional image is handled here; ws-lit remains the fallback.
+      layers.push(
+        new IconLayer<CoverItem>({
+          id: "ws-covers",
+          data: covers,
+          getIcon: (d) => ({
+            url: coverUrl(d.key, "small") ?? "",
+            id: String(d.key),
+            width: 100,
+            height: 100,
+          }),
+          getPosition: (d) => this.posOf(d.rank) ?? [0, 0, 0],
+          getSize: 4.05,
+          getColor: (d) => {
+            const k =
+              reduced || d.index === 0
+                ? 1
+                : Math.max(
+                    0,
+                    Math.min(
+                      1,
+                      (t - (d.index - 1) * CASCADE_STEP_MS) /
+                        CASCADE_FADE_MS,
+                    ),
+                  );
+            return [255, 255, 255, Math.round(255 * k)];
+          },
+          updateTriggers: { getColor: t },
+          sizeUnits: "common",
+          sizeMinPixels: 5.5,
+          sizeMaxPixels: 16.5,
+          billboard: true,
+          extensions: [new CircleCropExtension()],
+          onIconError: () => undefined,
+        }),
+      );
+    }
     // 光环单脉冲:选中后 500ms 一次扩散(§5)
     if (!reduced && t < PULSE_MS) {
       const k = t / PULSE_MS;

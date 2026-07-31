@@ -1,7 +1,7 @@
 // 冒烟:搜索栏内骰子、左侧筛选/结果布局及随机选点抽屉。
 import assert from "node:assert/strict";
 import puppeteer from "puppeteer-core";
-import { chromePath, pause } from "./probe_support.mjs";
+import { chromePath, pause, stubCoverImages } from "./probe_support.mjs";
 
 const [url, shot] = process.argv.slice(2);
 assert.ok(url, "usage: node probe_leftcol.mjs <url> [screenshot]");
@@ -12,6 +12,7 @@ const browser = await puppeteer.launch({
 });
 const page = await browser.newPage();
 await page.setViewport({ width: 1280, height: 900 });
+const coverRequests = await stubCoverImages(page);
 const errs = [];
 page.on("console", (m) => {
   if (m.type() === "error" || m.type() === "warn")
@@ -76,17 +77,21 @@ await pause(3500);
 const dice = await page.evaluate(() => ({
   drawerOpen: document.querySelector("#drawer")?.classList.contains("open"),
   drawerTitle: document.querySelector("#drawer h2")?.textContent?.trim(),
+  coverLoaded:
+    (document.querySelector("#drawer .cover")?.naturalWidth ?? 0) > 0,
   url: location.hash.slice(0, 80),
 }));
 
 console.log("LAYOUT:", JSON.stringify(layout));
 console.log("PANELS:", JSON.stringify(panels));
 console.log("DICE:", JSON.stringify(dice));
+console.log("COVERS:", JSON.stringify(coverRequests));
 console.log("ERRORS:", errs.length ? errs.slice(0, 10) : "none");
 if (shot) await page.screenshot({ path: shot });
 await browser.close();
 
 assert.deepEqual(errs, [], `browser errors:\n${errs.join("\n")}`);
+assert.deepEqual(coverRequests.errors, [], "cover request stub failed");
 assert.equal(layout.diceInSearchwrap, true, "dice is outside search wrapper");
 assert.equal(layout.toolbar, false, "legacy toolbar is still present");
 assert.equal(layout.layerToggle, false, "legacy layer toggle is present");
@@ -98,4 +103,7 @@ assert.equal(panels.resultsBelowFilters, true, "results overlap filters");
 assert.ok(panels.resultRows > 0, "filter produced no result rows");
 assert.equal(dice.drawerOpen, true, "dice did not open the drawer");
 assert.ok(dice.drawerTitle, "drawer title is empty");
+assert.equal(dice.coverLoaded, true, "drawer cover did not load");
+assert.ok(coverRequests.small > 0, "map covers were not requested");
+assert.ok(coverRequests.medium > 0, "drawer covers were not requested");
 assert.match(dice.url, /(?:^|&)n=\d+/, "URL lacks stable node identity");

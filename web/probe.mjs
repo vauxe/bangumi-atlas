@@ -2,7 +2,7 @@
 // 用法:node probe.mjs <url> <截图路径> [等待 ms]
 import assert from "node:assert/strict";
 import puppeteer from "puppeteer-core";
-import { chromePath, pause } from "./probe_support.mjs";
+import { chromePath, pause, stubCoverImages } from "./probe_support.mjs";
 
 const [url, shot, waitMs = "12000"] = process.argv.slice(2);
 assert.ok(url, "usage: node probe.mjs <url> [screenshot] [wait-ms]");
@@ -18,6 +18,7 @@ const browser = await puppeteer.launch({
 });
 const page = await browser.newPage();
 await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
+const coverRequests = await stubCoverImages(page);
 
 const logs = [];
 page.on("console", (m) => {
@@ -90,6 +91,7 @@ const walkAx = (node) => {
 };
 walkAx(accessibility);
 console.log("STATE:", JSON.stringify(state));
+console.log("COVERS:", JSON.stringify(coverRequests));
 console.log("FOCUS:", JSON.stringify(focusOrder));
 console.log(
   "AX:",
@@ -111,6 +113,7 @@ assert.equal(
   0,
   `browser errors:\n${logs.join("\n")}`,
 );
+assert.deepEqual(coverRequests.errors, [], "cover request stub failed");
 assert.equal(state.hasCanvas, true, "map canvas was not created");
 const minimumPainted = Math.max(
   1000,
