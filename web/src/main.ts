@@ -26,6 +26,7 @@ import { notify, state, subscribe } from "./store";
 import type { LinkState } from "./store";
 import { MEDIA_NAMES, TYPE_NAMES, etype } from "./types";
 import { decode, encode } from "./url";
+import { locateStableTarget, resolveUrlSelection } from "./url-restore";
 
 const $ = <T extends HTMLElement>(sel: string): T => {
   const el = document.querySelector<T>(sel);
@@ -102,7 +103,6 @@ async function boot(): Promise<void> {
     }, 200);
   };
   const pushUrl = (): void => {
-    if (historyApplications > 0) return;
     history.pushState(null, "", currentUrl());
   };
 
@@ -145,6 +145,8 @@ async function boot(): Promise<void> {
     },
   });
   // ---- 几何流:场景已就绪,首块回调即渲(§2/§9-1)----
+  let geometryComplete = false;
+  let pendingUrlHash: string | null = null;
   const geoDone = gstream.start((loaded) => {
     hud.textContent =
       loaded === manifest.n_nodes
@@ -166,14 +168,15 @@ async function boot(): Promise<void> {
   });
   runTask(
     geoDone.then(() => {
+      geometryComplete = true;
       hud.textContent = "";
       scene.geometryGrew();
-      // 仅带 n= 的深链在流式未覆盖时挂起:全量就绪后重试落点
-      if (pendingKey !== null && state.selection === null) {
-        const r = rankOfKey(pendingKey);
-        pendingKey = null;
-        if (r !== null) runTask(select(r, "fly", false), "深链恢复");
-      }
+      // 稳定 key 在流式未覆盖时挂起整个 URL。全量就绪后从原 URL
+      // 重新解析两端与相机，避免把 common/path 悄悄降级成普通选中。
+      const hash = pendingUrlHash;
+      pendingUrlHash = null;
+      if (hash !== null && location.hash === hash)
+        runTask(applyUrl(false), "深链恢复");
     }),
     "几何数据加载",
   );
@@ -186,9 +189,22 @@ async function boot(): Promise<void> {
     return null;
   };
   const sparseRankByKey = new Map<number, number>();
-  let pendingKey: number | null = null; // 深链 n= 未覆盖时的挂起落点
   let pendingLink: LinkState | null = null;
   let navigationEpoch = 0;
+
+  const locateUrlTarget = (
+    key: number | null,
+    rankHint: number | null,
+  ): Promise<{ key: number; rank: number } | null> =>
+    locateStableTarget(key, rankHint, rankOfKey, async (rank) => {
+      const point = await pointByRank(manifest, rank);
+      if (point) {
+        geo.sparse.set(rank, point.pos);
+        geo.key[rank] = point.key;
+        sparseRankByKey.set(point.key, rank);
+      }
+      return point;
+    });
 
   /** 连接查询:第二个节点选定后计算并呈现(§4 扩展)。 */
   async function handleLink(
@@ -345,54 +361,39 @@ async function boot(): Promise<void> {
     const epoch = ++navigationEpoch;
     historyApplications++;
     try {
-      const st = decode(location.hash);
+      const hash = location.hash;
+      const st = decode(hash);
+      pendingLink = null;
       scene.setOrtho(st.ortho);
       if (st.view) scene.setView(st.view);
       if (st.key === null && st.rank === null) {
+        pendingUrlHash = null;
         if (state.selection !== null || initial) deselect(false);
       } else {
-        let r = st.key !== null ? rankOfKey(st.key) : null;
-        let resolvedKey = st.key;
-        if (r === null && st.rank !== null) {
-          // 深链落点未覆盖:用 r= 提示的 rank Range 点查(有 n= 则核对)
-          const pt = await pointByRank(manifest, st.rank);
-          if (epoch !== navigationEpoch) return;
-          if (pt && (st.key === null || pt.key === st.key)) {
-            geo.sparse.set(st.rank, pt.pos);
-            geo.key[st.rank] = pt.key;
-            sparseRankByKey.set(pt.key, st.rank);
-            r = st.rank;
-            resolvedKey = pt.key;
-          }
+        const resolved = await resolveUrlSelection(st, locateUrlTarget);
+        if (epoch !== navigationEpoch) return;
+        if (resolved) {
+          pendingUrlHash = null;
+          if (resolved.link)
+            await handleLink(
+              resolved.link,
+              resolved.rank,
+              false,
+              resolved.camera,
+            );
+          else
+            await select(
+              resolved.rank,
+              resolved.camera,
+              false,
+              resolved.key,
+            );
+        } else if (st.key !== null && !geometryComplete) {
+          pendingUrlHash = hash;
+        } else {
+          pendingUrlHash = null;
+          hud.textContent = "链接中的节点已不存在或身份无法解析";
         }
-        if (r !== null && resolvedKey !== null) {
-          if (st.link) {
-            let fromRank = rankOfKey(st.link.fromKey);
-            if (fromRank === null) {
-              const pt = await pointByRank(manifest, st.link.fromRank);
-              if (epoch !== navigationEpoch) return;
-              if (pt?.key === st.link.fromKey) {
-                geo.sparse.set(st.link.fromRank, pt.pos);
-                geo.key[st.link.fromRank] = pt.key;
-                sparseRankByKey.set(pt.key, st.link.fromRank);
-                fromRank = st.link.fromRank;
-              }
-            }
-            if (fromRank !== null) {
-              await handleLink(
-                { ...st.link, fromRank },
-                r,
-                false,
-                st.view ? "none" : "fly",
-              );
-            } else {
-              await select(r, st.view ? "none" : "fly", false, resolvedKey);
-            }
-          } else {
-            await select(r, st.view ? "none" : "fly", false, resolvedKey);
-          }
-        }
-        else if (st.key !== null) pendingKey = st.key; // 全量就绪后重试
       }
       notify();
       syncControls(); // 工具栏随 store 还原(操作可逆性)
