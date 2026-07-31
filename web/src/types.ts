@@ -1,8 +1,10 @@
 /** 数据契约类型(EXPLORER.md §6;与烘焙侧 Python 手写镜像,变更须同步)。 */
 
 export interface Manifest {
-  /** 数据版本(dump-YYYY-MM-DD);全部数据请求以 ?v= 携带,防缓存错配。 */
+  /** 内容寻址版本(dump-YYYY-MM-DD-<hash>);全部数据请求以 ?v= 携带。 */
   version: string;
+  /** 上游归档版本,仅用于来源追踪,不可单独作为缓存身份。 */
+  dump_version: string;
   n_nodes: number;
   n_edges_skeleton: number;
   buckets: number;

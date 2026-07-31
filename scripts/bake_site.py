@@ -6,7 +6,6 @@ Products: site/data/ 下 manifest.json、几何 SoA bins、names.ndjson(流式)�
 纪律:失败与截断显式报出、行级对账,对不上非零退出。
 """
 
-import gzip
 import hashlib
 import shutil
 import sys
@@ -19,6 +18,11 @@ import numpy as np
 import orjson
 import pyarrow.parquet as pq
 from opencc import OpenCC
+from site_contracts import (
+    artifact_version,
+    gzip_json,
+    reverse_navigation_label,
+)
 
 
 def jdump(obj: Any) -> bytes:
@@ -37,7 +41,7 @@ class PackWriter:
         self.blob = bytearray()
 
     def add(self, obj: Any) -> list[int]:
-        gz = gzip.compress(jdump(obj), 6)
+        gz = gzip_json(obj)
         off = len(self.blob)
         self.blob += gz
         return [off, len(gz)]
@@ -79,7 +83,7 @@ def build_charmap(chars: set[str]) -> tuple[dict[str, str], int]:
     """返回 (单字映射表, 被丢弃的多字映射数)。丢弃必须显式报出。"""
     charmap = {}
     dropped = 0
-    for c in chars:
+    for c in sorted(chars):
         m = _t2s.convert(_jp2t.convert(c))
         if m == c:
             continue
@@ -209,12 +213,15 @@ def load_info() -> dict[int, dict[str, Any]]:
 
 def main() -> None:  # noqa: PLR0915
     t_start = time.time()
-    version = (
+    dump_version = (
         DUMP_VERSION.read_text().strip() if DUMP_VERSION.exists() else ""
     )
-    if not version:
-        version = time.strftime("%Y-%m-%d")
-        log(f"WARNING: {DUMP_VERSION} 缺失,version 回退构建日期 {version}")
+    if not dump_version:
+        dump_version = time.strftime("%Y-%m-%d")
+        log(
+            f"WARNING: {DUMP_VERSION} 缺失,"
+            f"dump_version 回退构建日期 {dump_version}"
+        )
     # 清场重建:防止上次运行的产物残留(与 fetch_dump 同一纪律)
     shutil.rmtree(SITE, ignore_errors=True)
     SITE.mkdir(parents=True, exist_ok=True)
@@ -232,7 +239,7 @@ def main() -> None:  # noqa: PLR0915
         [lay["x"][order], lay["y"][order], lay["z"][order]], axis=1
     )
     rank_of_key: dict[int, int] = {int(k): i for i, k in enumerate(key_r)}
-    log(f"节点 {n:,},rank 排序完成(数据版本 {version})")
+    log(f"节点 {n:,},rank 排序完成(dump 版本 {dump_version})")
 
     info = load_info()
     covered = sum(1 for k in key_r if int(k) in info)
@@ -321,7 +328,7 @@ def main() -> None:  # noqa: PLR0915
     reconcile("names.ndjson 行数", n, n_names)
     log("名字表写出完成")
 
-    # ---- 邻接(6 张边表;对称表去重:按源方向入列,缺反向行才补)----
+    # ---- 邻接(6 张边表;原始关系保留方向,缺反向行仅补导航项)----
     adj: dict[int, list[tuple[int, int]]] = defaultdict(list)
     label_table: list[str] = []
     label_id: dict[str, int] = {}
@@ -350,7 +357,8 @@ def main() -> None:  # noqa: PLR0915
 
     def add_sym(fname: str, etype_s: str, label_col: str) -> np.ndarray:
         """对称存储表(A→B 与 B→A 各带各的关系名)。每行只给源节点
-        入列;上游漏存反向行时补一条(用本行关系名,总比缺失好)。
+        入列;上游漏存反向行时给目标补一条带 ← 的反向导航项,
+        绝不把单向事实伪装成同名的互惠关系。
         期望条目数由行数 + 集合运算独立推导,不依赖入列过程。"""
         nonlocal entries_expected, synthesized_reverse
         a, b, labels = read_edges(fname, etype_s, etype_s, label_col)
@@ -368,7 +376,8 @@ def main() -> None:  # noqa: PLR0915
             li = lid(labels[i] or "关联")
             adj[ka].append((rank_of_key[kb], li))
             if int(rev_codes[i]) not in directed:
-                adj[kb].append((rank_of_key[ka], li))
+                reverse_li = lid(reverse_navigation_label(labels[i] or ""))
+                adj[kb].append((rank_of_key[ka], reverse_li))
         return np.stack([a, b], axis=1)
 
     def add_bip(
@@ -408,7 +417,7 @@ def main() -> None:  # noqa: PLR0915
     )
     log(
         f"邻接构建完成:{entries_expected:,} 条目"
-        f"(补反向 {synthesized_reverse:,} 条)"
+        f"(合成反向导航 {synthesized_reverse:,} 条)"
     )
 
     # ---- 邻接分片(top-200 + 各关系组总数 + 溢出分页入 pages.pack)----
@@ -454,7 +463,7 @@ def main() -> None:  # noqa: PLR0915
             ]
             written_over += len(over)
         shards[k % BUCKETS][str(k)] = entry
-    adj_gz = [gzip.compress(jdump(sh), 6) for sh in shards]
+    adj_gz = [gzip_json(sh) for sh in shards]
     adj_idx = np.zeros(BUCKETS + 1, dtype=np.uint32)
     adj_idx[1:] = np.cumsum([len(g) for g in adj_gz])
     (SITE / "adj.pack").write_bytes(b"".join(adj_gz))
@@ -561,7 +570,7 @@ def main() -> None:  # noqa: PLR0915
         det_shards[ki % BUCKETS][str(ki)] = det
     # 4 个 pack 均分 8192 桶;索引存全局累计偏移,客户端按
     # pack 首桶偏移换算 pack 内相对位置
-    det_gz = [gzip.compress(jdump(sh), 6) for sh in det_shards]
+    det_gz = [gzip_json(sh) for sh in det_shards]
     det_idx = np.zeros(BUCKETS + 1, dtype=np.uint32)
     det_idx[1:] = np.cumsum([len(g) for g in det_gz])
     per_pack = BUCKETS // DET_SPLIT
@@ -719,8 +728,7 @@ def main() -> None:  # noqa: PLR0915
             "WARNING: data/layout/report.json 缺失,manifest.layout = null"
             "(冷启动或本次未跑 layout.py)"
         )
-    manifest = {
-        "version": version,
+    manifest_contract = {
         "n_nodes": n,
         "n_edges_skeleton": len(skel),
         "buckets": BUCKETS,
@@ -736,6 +744,12 @@ def main() -> None:  # noqa: PLR0915
         "files": file_meta,
         "total_bytes": total_bytes,
         "n_files": n_files,
+    }
+    version = artifact_version(dump_version, manifest_contract)
+    manifest = {
+        "version": version,
+        "dump_version": dump_version,
+        **manifest_contract,
     }
     (SITE / "manifest.json").write_bytes(jdump(manifest))
     if total_bytes > SIZE_BUDGET:
