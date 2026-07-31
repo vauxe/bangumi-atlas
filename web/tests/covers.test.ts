@@ -9,12 +9,17 @@ import {
   chipCover,
 } from "../src/covers";
 
-test("uses right-sized cover assets for each UI context", () => {
+test("uses a CORS-compatible resized asset for WebGL map covers", () => {
   assert.deepEqual(COVER_SIZES, {
-    map: "grid",
+    map: "small",
     chip: "grid",
     drawer: "small",
   });
+
+  assert.equal(
+    coverUrl(0x0200_0007, COVER_SIZES.map),
+    "https://api.bgm.tv/v0/persons/7/image?type=small",
+  );
 });
 
 test("builds typed Bangumi cover URLs and rejects invalid entity keys", () => {
