@@ -346,9 +346,15 @@ async function boot(): Promise<void> {
     const k = ev.key.toLowerCase();
     if (k === "t") scene.topView(); // Top
     if (k === "r") scene.home(); // Reset
+    if (k === "c") {
+      // Color:类型着色 ⇄ 社区着色
+      state.filters.colorBy =
+        state.filters.colorBy === "type" ? "community" : "type";
+      notify();
+      replaceUrl();
+    }
     if (ev.key === "Escape" && state.selection !== null) deselect(true);
   });
-  $("#top-toggle").addEventListener("click", () => scene.topView());
 
   // ---- 媒介 chips:即时调暗 ----
   // ---- 标签过滤 chips(AND 语义)+ 评分下限滑块 ----
@@ -418,16 +424,6 @@ async function boot(): Promise<void> {
     replaceUrl();
   });
 
-  $("#layer-toggle").addEventListener("click", (ev) => {
-    state.filters.colorBy =
-      state.filters.colorBy === "type" ? "community" : "type";
-    (ev.target as HTMLElement).textContent =
-      state.filters.colorBy === "type" ? "社区着色" : "类型着色";
-    notify();
-    replaceUrl();
-  });
-
-
   // ---- 时间机器:双拇指年代滑块(选中状态保留在 URL)----
   const yMin = $("#year-min") as HTMLInputElement;
   const yMax = $("#year-max") as HTMLInputElement;
@@ -467,8 +463,6 @@ async function boot(): Promise<void> {
     sMin.value = String(f.scoreMin);
     scoreLabel.textContent =
       f.scoreMin > 0 ? `≥ ${(f.scoreMin / 10).toFixed(1)}` : "不限";
-    $("#layer-toggle").textContent =
-      f.colorBy === "type" ? "社区着色" : "类型着色";
     const full = f.yearMin <= 0 && f.yearMax >= 9999;
     yMin.value = full
       ? yMin.min
