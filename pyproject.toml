@@ -11,10 +11,8 @@ dependencies = [
     "pyarrow>=18",
     "orjson>=3.10",
     "pyyaml>=6",
-    "pandas>=2.2",
+    "numpy>=2.0",
     "igraph>=1.0.0",
-    "umap-learn>=0.5.12",
-    "pacmap>=0.9.1",
     "scipy>=1.18.0",
     "opencc>=1.1.9",
 ]
@@ -35,5 +33,5 @@ no_implicit_optional = true
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["ladybug.*", "pyarrow.*", "igraph.*", "umap.*", "pacmap.*", "opencc.*", "scipy.*"]
+module = ["ladybug.*", "pyarrow.*", "igraph.*", "opencc.*", "scipy.*"]
 ignore_missing_imports = true

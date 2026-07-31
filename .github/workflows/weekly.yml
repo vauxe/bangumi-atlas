@@ -38,7 +38,8 @@ jobs:
 
       - name: Check pipeline types and lint (mypy 契约,§3)
         run: |
-          uv run ruff check scripts/
+          uv run python -m unittest discover -s tests
+          uv run ruff check scripts/ tests/
           uv run mypy scripts/
 
       - name: Fetch dump (SHA256 verified)
@@ -89,15 +90,8 @@ jobs:
           fi
           cp data/layout/coords.parquet /tmp/cached_coords.parquet
           echo "layout report:" && cat data/layout/report.json
-          # §7 位移门槛 3% 的执行点:超限打 warning 注记,人工裁断
-          uv run python - <<'EOF'
-          import json
-          r = json.load(open("data/layout/report.json"))
-          p95 = r.get("p95_shift_pct")
-          if p95 is not None and p95 > 3:
-              print(f"::warning::跨周 p95 位移 {p95}% 超过 3% 门槛(§7),"
-                    "本次仍发布,请人工核查布局稳定性")
-          EOF
+          # §7 位移门槛 3% 是发布硬门禁;超限不得覆盖稳定坐标。
+          uv run python scripts/check_layout_report.py data/layout/report.json
 
       - name: Save coordinate cache
         uses: actions/cache/save@v4
@@ -126,8 +120,27 @@ jobs:
         run: |
           cd web
           npm ci
+          npm run test
           npm run check
           npm run build
+
+      - name: Browser smoke gates
+        run: |
+          CHROME_PATH="$(command -v google-chrome || command -v chromium || true)"
+          test -n "$CHROME_PATH"
+          web/node_modules/.bin/http-server site -p 8300 -c-1 --silent &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID"' EXIT
+          for attempt in {1..30}; do
+            curl -fsS http://127.0.0.1:8300/ >/dev/null && break
+            sleep 1
+          done
+          CHROME_PATH="$CHROME_PATH" node web/probe.mjs \
+            http://127.0.0.1:8300/ /tmp/overview.png 12000
+          CHROME_PATH="$CHROME_PATH" node web/probe_click.mjs \
+            http://127.0.0.1:8300/ /tmp/click.png
+          CHROME_PATH="$CHROME_PATH" node web/probe_leftcol.mjs \
+            http://127.0.0.1:8300/ /tmp/leftcol.png
 
       - uses: actions/upload-pages-artifact@v3
         with:
