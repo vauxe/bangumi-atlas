@@ -1,4 +1,4 @@
-# 每周烘焙与发布(EXPLORER.md §8)
+# 每周烘焙与发布(EXPLORER_ARCHITECTURE.md §8)
 # dump 周三 05:00 GMT+8 更新;本 workflow 周三 08:00 GMT+8 运行。
 name: bake-and-deploy
 

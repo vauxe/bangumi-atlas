@@ -1,4 +1,6 @@
-"""Bake all static site data from parquet + layout (EXPLORER.md §6).
+"""Bake all static site data from parquet + layout.
+
+See EXPLORER_ARCHITECTURE.md §6 for the data contract.
 
 Products: site/data/ 下 manifest.json、几何 SoA bins、names.ndjson(流式)、
 骨架边、邻接分片(top-200 + 组总数 + 溢出分页)、详情分片(分集分页)、

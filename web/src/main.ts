@@ -1,4 +1,4 @@
-/** 启动序列与交互接线(EXPLORER.md §3-§5)。
+/** 启动序列与交互接线(EXPLORER_ARCHITECTURE.md §3-§5)。
  * 关键次序:场景先于几何流建立 → 首块即渲;名字表并行流式;
  * 边/标签/热分片后台补齐。历史栈:离散导航 pushState,相机/过滤
  * replaceState;popstate 完整还原(每个操作可逆)。 */

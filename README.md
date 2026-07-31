@@ -2,8 +2,9 @@
 
 把 [bangumi/Archive](https://github.com/bangumi/Archive) 的每周 wiki dump 导入
 [LadybugDB](https://ladybugdb.com)(Kuzu 的社区延续分叉,嵌入式图数据库)。
-构建管道的设计见 [docs/DESIGN.md](docs/DESIGN.md);
-探索应用(星图)的设计见 [docs/EXPLORER.md](docs/EXPLORER.md)。
+数据管道与图模型见
+[docs/DATA_ARCHITECTURE.md](docs/DATA_ARCHITECTURE.md)；探索应用架构见
+[docs/EXPLORER_ARCHITECTURE.md](docs/EXPLORER_ARCHITECTURE.md)。
 
 ## 使用
 
