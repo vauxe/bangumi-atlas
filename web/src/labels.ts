@@ -15,6 +15,10 @@ export interface LabelData {
   charset: string;
 }
 
+// 圆体优先(macOS 圆体 / Windows 幼圆);canvas font 字符串不能含
+// ui-rounded 这类新 CSS 泛型,否则整串被忽略
+const LABEL_FONT = '"Yuanti SC", "YouYuan", "PingFang SC", sans-serif';
+
 /** 由 Scene 持有的缓存槽。 */
 export interface LabelCache {
   capBucket?: number;
@@ -54,6 +58,7 @@ export function labelLayers(
         ],
         getText: (d: [string, number[]]) => d[0],
         getSize: 15,
+        fontFamily: LABEL_FONT,
         sizeUnits: "pixels",
         getColor: [200, 205, 220, 190],
         outlineWidth: 2,
@@ -101,6 +106,7 @@ export function labelLayers(
         ],
         getText: (d: [number, string]) => d[1],
         getSize: 12,
+        fontFamily: LABEL_FONT,
         sizeUnits: "pixels",
         getPixelOffset: [0, -12],
         getColor: [232, 233, 236, 210],
