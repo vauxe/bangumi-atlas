@@ -14,7 +14,7 @@
   /* 初音未来配色:葱色 #39C5BB 主调 + 黑青夜空底 + 品红粉点缀,
      抽屉为粉色调面板。数据三色(天蓝/珊瑚/薄荷)是编码色,
      在本底色上重新通过 CVD ΔE≥8 与对比度校验,不随主题漂移 */
-  --surface: #0f1a1c; --panel: #14262b; --panel-pink: #2a1524;
+  --surface: #0f1a1c; --panel: #14262b; --panel-pink: #422339;
   --ink: #eafcfa; --ink-2: #8fb8b5; --line: #24444a;
   --miku: #39c5bb; --pink: #f25ba6;
   --c-subject: #3d8ede; --c-person: #e56a40; --c-character: #27ab7c;
@@ -32,8 +32,8 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 #search { width: 100%; padding: 12px 16px; font-size: 16px;
   background: var(--panel); color: var(--ink);
   border: 1px solid var(--line); border-radius: 20px; outline: none; }
-#search:focus { border-color: var(--miku);
-  box-shadow: 0 0 0 3px rgba(57, 197, 187, .2); }
+#search:focus { border-color: var(--pink);
+  box-shadow: 0 0 0 3px rgba(242, 91, 166, .22); }
 #hits { position: absolute; top: 100%; left: 0; right: 0; z-index: 9;
   background: var(--panel); border: 1px solid var(--line);
   border-radius: 0 0 16px 16px; text-align: left; max-height: 320px;
@@ -49,16 +49,14 @@ html, body { margin: 0; height: 100%; background: var(--surface);
   overflow-y: auto; transform: translateX(105%); transition: transform .25s;
   border-left: 2px solid var(--pink);
   box-shadow: -8px 0 24px rgba(242, 91, 166, .12); }
-#drawer .group-label { color: #d79ab8; }
-#drawer .chip { background: #3c2133; }
-#drawer .chip:hover { background: #54304a; }
+#drawer .group-label { color: #e9b6d0; }
 #drawer.open { transform: none; }
 #drawer h2 { margin: 4px 24px 2px 0; font-size: 20px; }
 #drawer .subtitle { color: var(--ink-2); margin-bottom: 8px; }
 #drawer-close { position: absolute; top: 10px; right: 12px; border: 0;
   background: none; color: var(--ink-2); font-size: 22px; cursor: pointer; }
-.badge { background: #46243a; border-radius: 8px; padding: 2px 8px;
-  font-size: 12px; margin-right: 6px; color: #f4cfe1; }
+.badge { background: #5a2f4a; border-radius: 8px; padding: 2px 8px;
+  font-size: 12px; margin-right: 6px; color: #f8dcea; }
 .tag { color: var(--ink-2); font-size: 12px; margin-right: 8px; }
 .stats { color: var(--ink-2); margin: 8px 0; font-size: 13px; }
 .sum { margin: 10px 0; max-height: 4.8em; overflow: hidden;
@@ -68,13 +66,14 @@ html, body { margin: 0; height: 100%; background: var(--surface);
   color: var(--miku); cursor: pointer; padding: 2px 0; }
 .group { margin-top: 14px; }
 .group-label { color: var(--ink-2); font-size: 12px; margin-bottom: 6px; }
-.chip { background: var(--line); color: var(--ink); border: 0;
+/* 交互元素:平时初音绿,高亮(激活/选中)发饰粉 */
+.chip { background: var(--miku); color: #06211f; border: 0;
   border-radius: 16px; padding: 4px 10px; margin: 0 6px 6px 0;
   cursor: pointer; font-size: 13px; font-family: inherit;
   /* 必须显式关掉原生外观:macOS 按钮的原生白底会盖过作者背景 */
   appearance: none; -webkit-appearance: none; }
-.chip:hover { background: #1d3f45; }
-.chip.on { background: var(--miku); color: #06211f; }
+.chip:hover { background: #5fd6cc; }
+.chip.on { background: var(--pink); color: #3a0b22; }
 .more, .note, .ep-date { color: var(--ink-2); font-size: 12px; }
 .ep { font-size: 13px; padding: 2px 0; }
 .ext { display: inline-block; margin-top: 16px; color: var(--miku); }

@@ -888,7 +888,7 @@ export class Scene {
         billboard: true,
         pickable: true,
         autoHighlight: true,
-        highlightColor: [255, 255, 255, 120],
+        highlightColor: [242, 91, 166, 150], // 悬停高亮 = 发饰粉
         getFillColor: [255, 255, 255, 255], // 实际颜色由 atlas 扩展推导
         extensions: [new NodeStyleExtension()],
         atlas: this.atlasUniforms(),
