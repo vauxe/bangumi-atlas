@@ -47,6 +47,7 @@ const ATLAS_UNIFORM_BLOCK = `uniform atlasUniforms {
   float nsfwOn;
   float spotlight;
   float colorBy;
+  float zoomRel;
 } atlas;`;
 
 const atlasShaderModule = {
@@ -63,6 +64,7 @@ const atlasShaderModule = {
     nsfwOn: "f32",
     spotlight: "f32",
     colorBy: "f32",
+    zoomRel: "f32",
   },
 } as const;
 
@@ -76,6 +78,7 @@ export interface AtlasUniforms {
   nsfwOn: number;
   spotlight: number;
   colorBy: number;
+  zoomRel: number;
 }
 
 class NodeStyleExtension extends LayerExtension {
@@ -95,10 +98,12 @@ out float atlas_fogDepth;`,
 atlas_style = instanceStyle;
 atlas_yc = instanceYearComm;
 atlas_fogDepth = distance(geometry.worldPosition.xyz, atlas.cameraPos);`,
-        // 孤立外壳点缩到 0.35×:该钩子作用于像素钳制之后,
-        // 是唯一能把外壳压到亚像素、不糊住星系本体的通道(§7)
+        // 孤立外壳的缩小随缩放消退:远景压到亚像素防糊住本体(§7),
+        // 近景恢复原尺寸——固定 0.35× 曾让贴近的节点时隐时现
+        // (该钩子作用于像素钳制之后,能真正压到亚像素)
         "vs:DECKGL_FILTER_SIZE": `
-if (mod(floor(instanceStyle.x / 2.0), 2.0) >= 1.0) size *= 0.35;`,
+if (mod(floor(instanceStyle.x / 2.0), 2.0) >= 1.0)
+  size *= mix(0.35, 1.0, smoothstep(1.5, 3.5, atlas.zoomRel));`,
         "fs:#decl": `
 in vec4 atlas_style;
 in vec2 atlas_yc;
@@ -134,9 +139,13 @@ in float atlas_fogDepth;`,
            : vec3(1.0, 0.0, x);
     rgb = 90.0 + c * 140.0;
   }
-  // 孤立外壳 9.2 万点包裹星系,亮度稍高即叠成实心球(真机实测),
-  // 压到 ~14% 才守住"调暗不糊噪音"(§7)
-  float a = a_iso ? 36.0 : 160.0 + min(50.0, floor(f_size / 4.0));
+  // 孤立外壳 9.2 万点包裹星系,远景亮度稍高即叠成实心球(实测
+  // 压到 ~14% 才不糊本体,§7);近景密度自然稀疏,压制随缩放
+  // 消退,凑近的孤立节点恢复接近普通节点的亮度
+  float isoT = smoothstep(1.5, 3.5, atlas.zoomRel);
+  float a = a_iso
+    ? mix(36.0, 150.0, isoT)
+    : 160.0 + min(50.0, floor(f_size / 4.0));
   if (yearOn && (!isSubject || f_year < 0.5)) a = min(a, 90.0);
   int mediaMask = int(atlas.mediaMask + 0.5);
   if (mediaMask != 0 && a_media > 0 &&
@@ -863,6 +872,7 @@ export class Scene {
       nsfwOn: f.nsfw ? 1 : 0,
       spotlight: state.selection !== null ? 1 : 0,
       colorBy: f.colorBy === "community" ? 1 : 0,
+      zoomRel: this.camera.viewState.zoom - this.camera.fitZoom,
     };
   }
 
