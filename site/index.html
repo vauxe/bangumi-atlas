@@ -14,7 +14,7 @@
   /* 初音未来配色:葱色 #39C5BB 主调 + 黑青夜空底 + 品红粉点缀,
      抽屉为粉色调面板。数据三色(天蓝/珊瑚/薄荷)是编码色,
      在本底色上重新通过 CVD ΔE≥8 与对比度校验,不随主题漂移 */
-  --surface: #0f1a1c; --panel: #14262b; --panel-pink: #422339;
+  --surface: #0f1a1c; --panel: #14262b;
   --ink: #eafcfa; --ink-2: #8fb8b5; --line: #24444a;
   --miku: #39c5bb; --pink: #f25ba6;
   --c-subject: #3d8ede; --c-person: #e56a40; --c-character: #27ab7c;
@@ -38,25 +38,26 @@ html, body { margin: 0; height: 100%; background: var(--surface);
   background: var(--panel); border: 1px solid var(--line);
   border-radius: 0 0 16px 16px; text-align: left; max-height: 320px;
   overflow: auto; }
+#hits:empty { display: none; } /* 空下拉不渲染,消除搜索框下的线 */
 #hits .hit { padding: 8px 16px; cursor: pointer; }
 #hits .hit.active, #hits .hit:hover { background: var(--line); }
 
 #searchwrap-dock { position: fixed; top: 14px; left: 14px;
   width: 300px; z-index: 6; }
 
+/* 抽屉:深青面板,粉色只作边缘高亮(描边 + 边缘光晕),内部无粉 */
 #drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 420px;
-  max-width: 92vw; background: var(--panel-pink); z-index: 7; padding: 20px;
+  max-width: 92vw; background: var(--panel); z-index: 7; padding: 20px;
   overflow-y: auto; transform: translateX(105%); transition: transform .25s;
   border-left: 2px solid var(--pink);
   box-shadow: -8px 0 24px rgba(242, 91, 166, .12); }
-#drawer .group-label { color: #e9b6d0; }
 #drawer.open { transform: none; }
 #drawer h2 { margin: 4px 24px 2px 0; font-size: 20px; }
 #drawer .subtitle { color: var(--ink-2); margin-bottom: 8px; }
 #drawer-close { position: absolute; top: 10px; right: 12px; border: 0;
   background: none; color: var(--ink-2); font-size: 22px; cursor: pointer; }
-.badge { background: #5a2f4a; border-radius: 8px; padding: 2px 8px;
-  font-size: 12px; margin-right: 6px; color: #f8dcea; }
+.badge { background: var(--line); border-radius: 8px; padding: 2px 8px;
+  font-size: 12px; margin-right: 6px; }
 .tag { color: var(--ink-2); font-size: 12px; margin-right: 8px; }
 .stats { color: var(--ink-2); margin: 8px 0; font-size: 13px; }
 .sum { margin: 10px 0; max-height: 4.8em; overflow: hidden;
