@@ -11,7 +11,7 @@
 uv sync                                  # 安装依赖
 uv run python scripts/fetch_dump.py      # 下载最新 dump 并校验 SHA256
 uv run python scripts/build_db.py        # 全量重建 db/bangumi.lb,约 1 分钟
-uv run python scripts/verify_db.py       # 对账验证(行级核对 + 冒烟查询)
+uv run python scripts/verify_db.py       # 源计数 + 全字段内容指纹 + 冒烟查询
 
 # build_db.py --offline 断网构建(用本地映射表快照);--skip-parquet 只重跑导入
 ```

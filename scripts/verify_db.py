@@ -1,10 +1,10 @@
-"""Verify db/bangumi.lb against the source dump.
+"""Verify db/bangumi.lb against the source dump and import artifacts.
 
-Independent row-level reconciliation: recounts source lines and dangling
-references straight from data/dump/ (not trusting the build's own
-output), asserts every row is either in the database or accounted for
-as a dangling reference, then runs smoke queries. Exits non-zero on any
-mismatch.
+The source pass independently recounts live rows and dangling references.
+The content pass then streams every Parquet and LadybugDB row through an
+order-independent, duplicate-sensitive fingerprint, so equal counts cannot
+hide changed properties, duplicated rows, or wrong endpoints. Any mismatch
+exits non-zero.
 """
 
 import sys
@@ -14,10 +14,29 @@ from typing import Any, cast
 
 import ladybug as lb
 import orjson
+import pyarrow.parquet as pq
+from content_fingerprint import RowFingerprint
 
 ROOT = Path(__file__).resolve().parent.parent
 DUMP = ROOT / "data" / "dump"
 DB_PATH = ROOT / "db" / "bangumi.lb"
+PARQUET = ROOT / "data" / "parquet"
+
+NODE_TABLES = {
+    "Subject": "subject",
+    "Person": "person",
+    "Character": "character",
+    "Episode": "episode",
+}
+EDGE_TABLES = {
+    "RELATES_TO": ("relates_to", "Subject", "Subject"),
+    "WORKED_ON": ("worked_on", "Person", "Subject"),
+    "APPEARS_IN": ("appears_in", "Character", "Subject"),
+    "VOICED": ("voiced", "Person", "Character"),
+    "EPISODE_OF": ("episode_of", "Episode", "Subject"),
+    "PERSON_REL": ("person_rel", "Person", "Person"),
+    "CHARACTER_REL": ("character_rel", "Character", "Character"),
+}
 
 failures: list[str] = []
 
@@ -48,6 +67,52 @@ def rows(name: str) -> Iterator[dict[str, Any]]:
             yield orjson.loads(line)
 
 
+def parquet_fingerprint(name: str) -> RowFingerprint:
+    path = PARQUET / f"{name}.parquet"
+    parquet = pq.ParquetFile(path)
+    fingerprint = RowFingerprint()
+    for batch in parquet.iter_batches(batch_size=32_768):
+        columns = [
+            batch.column(i).to_pylist() for i in range(batch.num_columns)
+        ]
+        for row in zip(*columns, strict=True):
+            fingerprint.add(row)
+    return fingerprint
+
+
+def query_fingerprint(conn: lb.Connection, query: str) -> RowFingerprint:
+    result = conn.execute(query)
+    assert isinstance(result, lb.QueryResult)
+    fingerprint = RowFingerprint()
+    while result.has_next():
+        # stub says get_next() yields a dict; at runtime it is a list
+        fingerprint.add(cast("list[Any]", result.get_next()))
+    return fingerprint
+
+
+def content_queries() -> Iterator[tuple[str, str, str]]:
+    """Yield (database table, parquet file, projection query)."""
+
+    for table, parquet_name in NODE_TABLES.items():
+        columns = pq.read_schema(PARQUET / f"{parquet_name}.parquet").names
+        projection = ",".join(f"n.{column}" for column in columns)
+        yield table, parquet_name, f"MATCH (n:{table}) RETURN {projection}"
+    for table, (parquet_name, source, target) in EDGE_TABLES.items():
+        columns = pq.read_schema(PARQUET / f"{parquet_name}.parquet").names
+        if columns[:2] != ["from_id", "to_id"]:
+            raise ValueError(
+                f"{parquet_name}.parquet must start with from_id,to_id"
+            )
+        properties = ",".join(f"r.{column}" for column in columns[2:])
+        projection = "a.id,b.id" + (f",{properties}" if properties else "")
+        yield (
+            table,
+            parquet_name,
+            f"MATCH (a:{source})-[r:{table}]->(b:{target}) "
+            f"RETURN {projection}",
+        )
+
+
 def main() -> None:
     db = lb.Database(str(DB_PATH), read_only=True)
     conn = lb.Connection(db)
@@ -58,7 +123,7 @@ def main() -> None:
         # stub says get_next() yields a dict; at runtime it is a list
         return cast("list[Any]", res.get_next())[0]
 
-    print("[1/3] entity counts")
+    print("[1/4] entity counts")
     subject_ids = ids_of("subject")
     person_ids = ids_of("person")
     character_ids = ids_of("character")
@@ -87,7 +152,7 @@ def main() -> None:
     )
 
     print(
-        "[2/3] edge counts (source rows minus dangling, recounted "
+        "[2/4] edge counts (source rows minus dangling, recounted "
         "independently)"
     )
 
@@ -155,7 +220,7 @@ def main() -> None:
         count("MATCH ()-[e:CHARACTER_REL]->() RETURN count(e)"),
     )
 
-    print("[3/3] decode coverage + smoke queries")
+    print("[3/4] decode coverage + smoke queries")
     # 全部 ★ 解码列的失配量;超基线 = 映射表陈旧,打 WARNING(§3)
     baselines = {
         ("RELATES_TO", "relation"): 6,  # 上游已删的历史码
@@ -179,6 +244,27 @@ def main() -> None:
         "RETURN count(DISTINCT s.id)"
     )
     check_true("宮崎駿 x 久石譲 collaborations > 0", collab > 0)
+
+    print("[4/4] full-content fingerprints (Parquet -> LadybugDB)")
+    for table, parquet_name, query in content_queries():
+        expected = parquet_fingerprint(parquet_name).snapshot()
+        actual = query_fingerprint(conn, query).snapshot()
+        ok = expected == actual
+        if not ok:
+            failures.append(f"{table} content")
+        print(
+            f"  {'ok' if ok else 'MISMATCH':8s} {table}: "
+            f"rows={actual[0]:,}, sum={actual[1][:12]}, xor={actual[2][:12]}"
+        )
+        if not ok:
+            print(
+                f"           expected rows={expected[0]:,}, "
+                f"sum={expected[1]}, xor={expected[2]}"
+            )
+            print(
+                f"           actual   rows={actual[0]:,}, "
+                f"sum={actual[1]}, xor={actual[2]}"
+            )
 
     conn.close()
     db.close()
