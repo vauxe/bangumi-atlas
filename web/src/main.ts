@@ -84,7 +84,7 @@ async function boot(): Promise<void> {
   hud.textContent = "";
   $("#cold").classList.add("ready");
 
-  // 名字与边:后台补齐
+  // 后台补齐,不阻塞首帧
   void loadNames().then((n) => {
     names = n;
   });

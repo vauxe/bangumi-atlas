@@ -92,8 +92,8 @@ def load_edges(index: dict[int, int]) -> np.ndarray:
 def run_layout(
     g: ig.Graph, algo: str, weights: list[float], seed: np.ndarray | None
 ) -> np.ndarray:
-    """对决裁决(2026-07-31):UMAP 胜出——全图 15 分钟 vs DRL 子图
-    2h+ 未完成;周更协议 = 热启动 + 小 epoch + Procrustes 对齐。"""
+    """3D 布局。传入 seed 即周更热启动:epochs 降为 10,
+    结果 Procrustes 对齐回 seed 坐标框架。"""
     seed_list = seed.tolist() if seed is not None else None
     if algo == "drl":
         layout = g.layout_drl(seed=seed_list, dim=3)
@@ -250,7 +250,7 @@ def main() -> None:
         comm[connected] = (aligned % 0xFFFF).astype(np.uint16)
         print(f"社区检测+对齐 {time.time() - t0:,.0f}s", flush=True)
 
-    # 居中缩放,孤立节点放外壳(半径 = 主体半径 × 1.35)
+    # 居中;孤立节点放逐外壳
     c = coords[connected]
     center = c.mean(0)
     coords[connected] = c - center
