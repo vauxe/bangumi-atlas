@@ -198,6 +198,23 @@ in float atlas_fogDepth;`,
   }
 }
 
+/** 封面圆形裁剪:icon 层的 geometry.uv 即四角 [-1,1] 局部坐标,
+ * 裁成内切圆 + 边缘 6% 平滑,封面就是节点本体的视觉替换。 */
+class CircleCropExtension extends LayerExtension {
+  static override extensionName = "CircleCropExtension";
+
+  override getShaders(): Record<string, unknown> {
+    return {
+      inject: {
+        "fs:DECKGL_FILTER_COLOR": `
+  float cover_r = length(geometry.uv);
+  if (cover_r > 1.0) discard;
+  color.a *= smoothstep(1.0, 0.94, cover_r);`,
+      },
+    };
+  }
+}
+
 /** 大缓冲的 GPU 常驻镜像:流式期间只写增量区间,不整块重传。 */
 class GrowingBuffer {
   private buf: LumaBuffer | null = null;
@@ -759,8 +776,9 @@ export class Scene {
         },
       }),
     ];
-    // 封面缩略图:叠在圆点之上,不可拾取(拾取/悬停仍走圆点层);
-    // 加载失败时该图不画,下层圆点自然兜底
+    // 封面 = 节点的视觉替换:圆形裁剪,几何严格对齐下层圆点
+    // (略小 8%,圆点描边露出一圈作头像环;拾取/悬停仍走圆点层,
+    // 图片加载失败时圆点自然兜底)
     layers.push(
       new IconLayer({
         id: "ws-covers",
@@ -772,14 +790,14 @@ export class Scene {
         getIcon: (d: { key: number }) => ({
           url: coverUrl(d.key),
           id: String(d.key),
-          // 声明宽高比按类型近似(自动打包模式无法读真实尺寸):
-          // 作品是 5:7 海报,人物/角色近似 4:5 肖像
+          // 声明为正方形配合内切圆裁剪;非方图的轻微挤压在
+          // 节点尺寸(≤18px)下不可辨
           width: 100,
-          height: etype(d.key) === 1 ? 140 : 125,
+          height: 100,
         }),
         getPosition: (d: { rank: number }) =>
           this.posOf(d.rank) ?? [0, 0, 0],
-        getSize: (d: { i: number }) => (d.i === 0 ? 5.6 : 4.4),
+        getSize: 4.05, // 圆点直径 4.4 的 92%
         getColor: (d: { i: number }) => {
           // 级联淡入与圆点同步(mask=false 时 alpha 即不透明度)
           const k =
@@ -796,9 +814,10 @@ export class Scene {
         },
         updateTriggers: { getColor: t },
         sizeUnits: "common",
-        sizeMinPixels: 20,
-        sizeMaxPixels: 64,
+        sizeMinPixels: 5.5,
+        sizeMaxPixels: 16.5,
         billboard: true,
+        extensions: [new CircleCropExtension()],
         loadOptions: { image: { crossOrigin: "anonymous" } },
       }),
     );
