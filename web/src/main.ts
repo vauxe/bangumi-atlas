@@ -48,7 +48,7 @@ async function boot(): Promise<void> {
     geo,
     names: () => names,
     manifest,
-    walk: (rank) => void select(rank, true),
+    walk: (rank) => void select(rank, "fly"),
   });
 
   const tooltip = $("#tooltip");
@@ -101,7 +101,7 @@ async function boot(): Promise<void> {
     onPick: (rank) => {
       if (rank === null) {
         if (state.selection !== null) deselect(true);
-      } else void select(rank, false);
+      } else void select(rank, "center");
     },
     onHover: (rank, x, y) => {
       if (rank === null || rank >= geo.loaded) {
@@ -154,7 +154,7 @@ async function boot(): Promise<void> {
     if (pendingKey !== null && state.selection === null) {
       const r = rankOfKey(pendingKey);
       pendingKey = null;
-      if (r !== null) void select(r, true, false);
+      if (r !== null) void select(r, "fly", false);
     }
   });
 
@@ -166,9 +166,12 @@ async function boot(): Promise<void> {
   let pendingKey: number | null = null; // 深链 n= 未覆盖时的挂起落点
   let lastAdj: AdjEntry | null = null; // NSFW 开关重算邻居用
 
+  /** 相机语义:fly = 飞行聚焦(搜索/骰子/行走);center = 枢轴
+   * 滑移到节点、保持缩放(单击选中——此后滚轮推向它、右键绕它转);
+   * none = 不动相机(URL 还原,尊重链接机位)。 */
   async function select(
     rank: number,
-    fly: boolean,
+    cam: "fly" | "center" | "none",
     push = true,
   ): Promise<void> {
     stopAutoRotate();
@@ -183,7 +186,9 @@ async function boot(): Promise<void> {
         key = pt.key;
       }
     }
-    if (fly) scene.flyTo(rank);
+    if (cam === "fly") scene.flyTo(rank);
+    else if (cam === "center")
+      scene.flyTo(rank, scene.getViewState().zoom);
     const adj = await loadAdj(key, manifest.buckets);
     if (state.selection !== rank) return;
     lastAdj = adj;
@@ -226,7 +231,8 @@ async function boot(): Promise<void> {
             r = st.rank;
           }
         }
-        if (r !== null) await select(r, !st.view, false);
+        if (r !== null)
+          await select(r, st.view ? "none" : "fly", false);
         else if (st.key !== null) pendingKey = st.key; // 全量就绪后重试
       }
       notify();
@@ -237,7 +243,7 @@ async function boot(): Promise<void> {
   };
 
   // ---- 搜索(联想过滤 NSFW;命中 → flyTo + 选中 + 亮邻居)----
-  new Search($("#search"), $("#hits"), (rank) => void select(rank, true));
+  new Search($("#search"), $("#hits"), (rank) => void select(rank, "fly"));
 
   // ---- 骰子:随机传送(跳过隐藏节点;冷启动屏同款)----
   const rollDice = (): void => {
@@ -246,7 +252,7 @@ async function boot(): Promise<void> {
     for (let tries = 0; tries < 64; tries++) {
       const rank = Math.floor(Math.random() * cap);
       if (scene.isVisible(rank)) {
-        void select(rank, true);
+        void select(rank, "fly");
         return;
       }
     }
