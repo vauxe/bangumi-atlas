@@ -65,8 +65,9 @@ export class Drawer {
       }
       if (t.id === "drawer-close") this.hide();
       if (t.id === "expand-rel" || t.classList.contains("more"))
-        void this.expandRelations();
-      if (t.id === "expand-eps") void this.expandEpisodes();
+        void this.expandRelations(this.anchorOf(t));
+      if (t.id === "expand-eps")
+        void this.expandEpisodes(this.anchorOf(t));
       if (t.classList.contains("sum-toggle")) {
         this.el.querySelector(".sum")?.classList.toggle("expanded");
       }
@@ -130,7 +131,9 @@ export class Drawer {
   /** 展开全部:先放开各组 inline 上限,再按页拉取溢出条目(§6)。
    * 页偏移内嵌在条目里(pages.pack 的 [offset, len]);
    * 在途锁 + 页号先占位:双击不会重复加载或跳页。 */
-  private async expandRelations(): Promise<void> {
+  private async expandRelations(
+    anchor: { idx: number; top: number } | null,
+  ): Promise<void> {
     const cur = this.cur;
     if (!cur || !cur.adj || cur.loading) return;
     cur.expanded = true;
@@ -148,9 +151,12 @@ export class Drawer {
       }
     }
     this.rerender();
+    this.restoreAnchor(anchor);
   }
 
-  private async expandEpisodes(): Promise<void> {
+  private async expandEpisodes(
+    anchor: { idx: number; top: number } | null,
+  ): Promise<void> {
     const cur = this.cur;
     if (!cur || !cur.det || cur.loading) return;
     cur.epsExpanded = true;
@@ -168,11 +174,33 @@ export class Drawer {
       }
     }
     this.rerender();
+    this.restoreAnchor(anchor);
   }
 
   /** 过滤条件变化后按当前 store 重绘。 */
   refresh(): void {
     this.rerender();
+  }
+
+  /** 内容锚点:展开会让上方的组全部变长,单纯保留 scrollTop 会
+   * 让视口"漂"到前面的内容上(像素没动,内容动了)。记录被点
+   * 元素所在组的序号与视口位置,重绘后把该组拉回原位。 */
+  private anchorOf(
+    t: HTMLElement,
+  ): { idx: number; top: number } | null {
+    const groups = [...this.el.querySelectorAll(".group")];
+    const el = t.closest(".group") ?? groups[groups.length - 1];
+    if (!el) return null;
+    return { idx: groups.indexOf(el), top: el.getBoundingClientRect().top };
+  }
+
+  private restoreAnchor(
+    anchor: { idx: number; top: number } | null,
+  ): void {
+    if (!anchor || anchor.idx < 0) return;
+    const el = this.el.querySelectorAll(".group")[anchor.idx];
+    if (!el) return;
+    this.el.scrollTop += el.getBoundingClientRect().top - anchor.top;
   }
 
   private chipOf(rank: number): string {
