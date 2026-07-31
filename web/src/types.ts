@@ -33,7 +33,8 @@ export interface Geometry {
   key: Uint32Array;
   community: Uint16Array;
   size: Uint8Array;
-  /** bit0 nsfw、bit1 孤立外壳、bit2-4 媒介(1书籍…6三次元),余位 0。 */
+  /** bit0 nsfw(保留于数据,渲染不使用)、bit1 孤立外壳、
+   * bit2-4 媒介(1书籍…6三次元),余位 0。 */
   flags: Uint8Array;
   /** 已就绪的节点数(流式期间 < n)。 */
   loaded: number;
@@ -83,13 +84,7 @@ export interface Detail {
   eo?: [number, number][];
 }
 
-/** 搜索条目;第 4 位 = 1 表示 nsfw(默认过滤,§4 反模式)。 */
-export type SearchEntry = [
-  norm: string,
-  display: string,
-  rank: number,
-  nsfw?: number,
-];
+export type SearchEntry = [norm: string, display: string, rank: number];
 
 export const TYPE_NAMES = ["", "作品", "人物", "角色"] as const;
 // 萌系三色(天蓝/珊瑚/薄荷),暗紫底 #181226 上通过

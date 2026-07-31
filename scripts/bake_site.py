@@ -586,7 +586,6 @@ def main() -> None:  # noqa: PLR0915
     n_entries = 0
     for rank, k in enumerate(key_r):
         di = info[int(k)]
-        is_nsfw = 1 if di["nsfw"] else 0
         # name == name_cn 时只入一条,防联想下拉重复占位
         for text in dict.fromkeys(
             str(t) for t in (di["name"], di["cn"]) if t
@@ -594,10 +593,7 @@ def main() -> None:  # noqa: PLR0915
             nk = fold(text)
             if not nk:
                 continue
-            srec: list[Any] = [nk, text, rank]
-            if is_nsfw:
-                srec.append(1)
-            entries[nk[0]].append(srec)
+            entries[nk[0]].append([nk, text, rank])
             n_entries += 1
     # 一字一档打包:pack + {首字码点 hex: [offset, len]} 偏移索引
     search_pack = PackWriter()
@@ -626,7 +622,7 @@ def main() -> None:  # noqa: PLR0915
         f"热分片 {len(hot_shards)},折叠映射 {len(charmap):,} 字"
     )
 
-    # ---- 标签表(节点 nsfw 位由客户端 flags 过滤;社区标签避开 nsfw)----
+    # ---- 标签表(社区标签 = 社区内 top 节点名)----
     labels: list[list[Any]] = []
     for rank in range(min(LABELS_TOP, n)):
         dl = info[int(key_r[rank])]
@@ -634,18 +630,14 @@ def main() -> None:  # noqa: PLR0915
     comm_labels: dict[int, list[Any]] = {}
     for rank in range(n):
         c = int(comm_r[rank])
-        if c != 0xFFFF and c not in comm_labels and not nsfw_arr[rank]:
+        if c != 0xFFFF and c not in comm_labels:
             dl = info[int(key_r[rank])]
             comm_labels[c] = [
                 str(dl["cn"] or dl["name"]),
                 [round(float(v), 1) for v in coords_r[rank]],
             ]
     n_comm_total = len(np.unique(comm_r[comm_r != 0xFFFF]))
-    if len(comm_labels) < n_comm_total:
-        log(
-            f"  截断:{n_comm_total - len(comm_labels):,} 个社区无非 NSFW "
-            f"成员,不出标签(显式报出)"
-        )
+    reconcile("社区标签覆盖全部社区", n_comm_total, len(comm_labels))
     charset = sorted(
         {ch for _, t in labels for ch in str(t)}
         | {ch for cl in comm_labels.values() for ch in str(cl[0])}

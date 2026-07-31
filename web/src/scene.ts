@@ -3,7 +3,7 @@
  *
  * 性能架构:节点的颜色/亮度/可见性全部在 shader 里由静态实例属性
  * (style、yearComm)+ 少量 uniform 推导——年份滑块、媒介 chips、
- * NSFW 开关、聚光、图层切换都只改 uniform,零 CPU 循环、零属性重传
+ * 聚光、图层切换都只改 uniform,零 CPU 循环、零属性重传
  * (实测 CPU 路径 985k 节点 recolor 循环 61ms/次 + ~21MB 重传,已移除)。
  * 可见性用 fs discard 表达,被滤除节点连拾取/高亮一起消失(§4)。
  * 几何流式期间属性写入 GPU Buffer 增量区间,不整块重传。 */
@@ -44,7 +44,6 @@ const ATLAS_UNIFORM_BLOCK = `uniform atlasUniforms {
   float yearMin;
   float yearMax;
   float mediaMask;
-  float nsfwOn;
   float spotlight;
   float colorBy;
   float zoomRel;
@@ -61,7 +60,6 @@ const atlasShaderModule = {
     yearMin: "f32",
     yearMax: "f32",
     mediaMask: "f32",
-    nsfwOn: "f32",
     spotlight: "f32",
     colorBy: "f32",
     zoomRel: "f32",
@@ -75,7 +73,6 @@ export interface AtlasUniforms {
   yearMin: number;
   yearMax: number;
   mediaMask: number;
-  nsfwOn: number;
   spotlight: number;
   colorBy: number;
   zoomRel: number;
@@ -117,12 +114,10 @@ in float atlas_fogDepth;`,
   float f_size = atlas_style.z;
   float f_year = atlas_yc.x;
   float f_comm = atlas_yc.y;
-  bool a_nsfw = mod(f_flags, 2.0) >= 1.0;
   bool a_iso = mod(floor(f_flags / 2.0), 2.0) >= 1.0;
   int a_media = int(floor(f_flags / 4.0));
   bool isSubject = f_etype < 1.5; // 档位比较,规避浮点等值
   bool yearOn = atlas.yearMin > 0.5 || atlas.yearMax < 9998.5;
-  if (a_nsfw && atlas.nsfwOn < 0.5) discard;
   if (yearOn && isSubject && f_year > 0.5 &&
       (f_year < atlas.yearMin || f_year > atlas.yearMax)) discard;
   vec3 rgb = isSubject ? vec3(61.0, 142.0, 222.0)
@@ -364,8 +359,6 @@ export class Scene {
   /** 可见性(与 shader 判定逐条对齐):纯函数,无缓存数组。 */
   isVisible(rank: number): boolean {
     const f = state.filters;
-    const flags = this.geo.flags[rank] ?? 0;
-    if ((flags & 1) !== 0 && !f.nsfw) return false;
     const yearOn = f.yearMin > 0 || f.yearMax < 9999;
     if (yearOn && etype(this.geo.key[rank] ?? 0) === 1) {
       const y = this.geo.year[rank] ?? 0;
@@ -380,10 +373,10 @@ export class Scene {
       this.lastSelection = state.selection;
       this.startWorkingSetAnim();
     }
-    // 标签 data 只在影响其可见性的过滤(NSFW/年份)变化时重建;
+    // 标签 data 只在影响其可见性的过滤(年份)变化时重建;
     // 纯选中/图层切换不触发碰撞检测重算
     const f = state.filters;
-    const k = `${f.nsfw}|${f.yearMin}|${f.yearMax}`;
+    const k = `${f.yearMin}|${f.yearMax}`;
     if (k !== this.labelFilterKey) {
       this.labelFilterKey = k;
       this.styleVersion++;
@@ -526,8 +519,6 @@ export class Scene {
       const b = edges[e * 2 + 1] ?? 0;
       if (a >= geo.loaded || b >= geo.loaded) continue;
       // 可见性内联(与 isVisible 同判定):单端被滤除的边不进可见集
-      if (!f.nsfw && (((flags[a] ?? 0) | (flags[b] ?? 0)) & 1) !== 0)
-        continue;
       if (yearOn) {
         const ya = year[a] ?? 0;
         if (
@@ -622,16 +613,9 @@ export class Scene {
     if (!selPos) return [];
     const reduced = prefersReducedMotion();
     const t = performance.now() - this.wsAnimStart;
-    // 未流式覆盖且无 sparse 坐标的邻居先不画(位置未知,不能画到原点);
-    // NSFW 关时 NSFW 邻居不进工作集(§4 反模式:任何路径不复亮)
+    // 未流式覆盖且无 sparse 坐标的邻居先不画(位置未知,不能画到原点)
     const shown: { rank: number; label: number; pos: [number, number, number] }[] = [];
     state.neighbors.forEach((rk, i) => {
-      if (
-        !state.filters.nsfw &&
-        rk < this.geo.loaded &&
-        ((this.geo.flags[rk] ?? 0) & 1) !== 0
-      )
-        return;
       const p = this.posOf(rk);
       if (p) shown.push({ rank: rk, label: state.neighborLabels[i] ?? -1, pos: p });
     });
@@ -869,7 +853,6 @@ export class Scene {
       yearMin: f.yearMin,
       yearMax: f.yearMax,
       mediaMask: mask,
-      nsfwOn: f.nsfw ? 1 : 0,
       spotlight: state.selection !== null ? 1 : 0,
       colorBy: f.colorBy === "community" ? 1 : 0,
       zoomRel: this.camera.viewState.zoom - this.camera.fitZoom,
