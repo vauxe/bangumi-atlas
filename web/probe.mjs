@@ -33,22 +33,45 @@ page.on("requestfailed", (r) =>
 await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
 await pause(Number(waitMs));
 
-// 页面侧状态:hud 文案、canvas 像素统计(非背景像素占比)
+// 页面侧状态:hud 文案、canvas 实际合成像素统计。
 const state = await page.evaluate(() => {
   const hud = document.querySelector("#hud")?.textContent ?? "";
   const canvas = document.querySelector("#map canvas");
-  let lit = -1;
+  let canvasPixels = 0;
+  let paintedPixels = 0;
+  const paintedColors = new Set();
   if (canvas) {
-    const gl =
-      canvas.getContext("webgl2", { preserveDrawingBuffer: false }) ??
-      undefined;
-    // 用 2D 截读不可行(WebGL);退而求其次读 canvas 尺寸
-    lit = canvas.width * canvas.height;
+    canvasPixels = canvas.width * canvas.height;
+    const copy = document.createElement("canvas");
+    copy.width = canvas.width;
+    copy.height = canvas.height;
+    const context = copy.getContext("2d");
+    if (!context) throw new Error("could not create canvas pixel probe");
+    context.drawImage(canvas, 0, 0);
+    const pixels = context.getImageData(
+      0,
+      0,
+      copy.width,
+      copy.height,
+    ).data;
+    for (let offset = 0; offset < pixels.length; offset += 4) {
+      const red = pixels[offset] ?? 0;
+      const green = pixels[offset + 1] ?? 0;
+      const blue = pixels[offset + 2] ?? 0;
+      const alpha = pixels[offset + 3] ?? 0;
+      if (alpha > 0 && (red > 0 || green > 0 || blue > 0)) {
+        paintedPixels++;
+        paintedColors.add(`${red >> 5},${green >> 5},${blue >> 5}`);
+      }
+    }
   }
   return {
     hud,
     hasCanvas: !!canvas,
     canvasSize: canvas ? `${canvas.width}x${canvas.height}` : "none",
+    canvasPixels,
+    paintedPixels,
+    paintedColorBuckets: paintedColors.size,
   };
 });
 const focusOrder = [];
@@ -89,6 +112,20 @@ assert.equal(
   `browser errors:\n${logs.join("\n")}`,
 );
 assert.equal(state.hasCanvas, true, "map canvas was not created");
+const minimumPainted = Math.max(
+  1000,
+  Math.floor(state.canvasPixels * 0.005),
+);
+assert.ok(
+  state.paintedPixels >= minimumPainted,
+  `map canvas is blank: ${state.paintedPixels} painted pixels; ` +
+    `expected at least ${minimumPainted}`,
+);
+assert.ok(
+  state.paintedColorBuckets >= 2,
+  `map canvas lacks rendered color variation: ` +
+    `${state.paintedColorBuckets} painted color buckets`,
+);
 assert.doesNotMatch(state.hud, /失败/, `HUD reports failure: ${state.hud}`);
 assert.deepEqual(
   focusOrder,
