@@ -70,3 +70,19 @@ test("retains old rank-only URL compatibility", async () => {
     { key: 303, rank: 4, link: null, camera: "fly" },
   );
 });
+
+test("rechecks the stable key when streaming finishes during a hint read", async () => {
+  let geometryComplete = false;
+
+  const located = await locateStableTarget(
+    101,
+    7,
+    (key) => (geometryComplete && key === 101 ? 70 : null),
+    async () => {
+      geometryComplete = true;
+      return { key: 999 };
+    },
+  );
+
+  assert.deepEqual(located, { key: 101, rank: 70 });
+});

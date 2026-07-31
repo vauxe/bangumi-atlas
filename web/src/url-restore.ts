@@ -55,6 +55,14 @@ export async function locateStableTarget(
   }
   if (rankHint === null) return null;
   const point = await pointAtRank(rankHint);
-  if (!point || (key !== null && point.key !== key)) return null;
-  return { key: point.key, rank: rankHint };
+  if (point && (key === null || point.key === key))
+    return { key: point.key, rank: rankHint };
+
+  // Geometry may have advanced to (or reached) the stable key while the
+  // range hint was in flight. Recheck before declaring the URL unresolved.
+  if (key !== null) {
+    const loadedRank = rankOfKey(key);
+    if (loadedRank !== null) return { key, rank: loadedRank };
+  }
+  return null;
 }
