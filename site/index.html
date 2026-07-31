@@ -29,7 +29,7 @@ html, body { margin: 0; height: 100%; background: var(--surface);
   font-family: monospace; z-index: 5; pointer-events: none; }
 
 #searchwrap { position: relative; }
-#search { width: 100%; padding: 12px 16px; font-size: 16px;
+#search { width: 100%; padding: 12px 44px 12px 16px; font-size: 16px;
   background: var(--panel); color: var(--ink);
   border: 1px solid var(--line); border-radius: 20px; outline: none; }
 #search:focus { border-color: var(--pink);
@@ -43,11 +43,19 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 #hits .hit.active, #hits .hit:hover { background: var(--line); }
 
 #searchwrap-dock { position: fixed; top: 14px; left: 14px;
-  width: 300px; z-index: 6; }
-#results { display: none; position: fixed; top: 76px; left: 14px;
-  width: 300px; z-index: 5; background: var(--panel);
+  width: 320px; z-index: 6; }
+/* 搜索框内的随机传送按钮 */
+#dice { position: absolute; right: 6px; top: 6px; width: 36px;
+  height: 36px; border: 0; background: none; font-size: 18px;
+  cursor: pointer; border-radius: 50%; }
+#dice:hover { background: var(--line); }
+/* 左列:筛选面板 + 结果面板,停靠搜索框下方 */
+#leftcol { position: fixed; top: 76px; left: 14px; width: 320px;
+  z-index: 5; display: flex; flex-direction: column; gap: 10px;
+  max-height: calc(100vh - 116px); } /* 底部让出图例一行 */
+#results { display: none; background: var(--panel); min-height: 0;
   border: 1px solid var(--line); border-radius: 16px; padding: 10px 12px;
-  max-height: calc(100vh - 220px); overflow-y: auto; }
+  overflow-y: auto; }
 #results.open { display: block; }
 .rhead { font-size: 13px; margin-bottom: 6px; cursor: pointer;
   display: flex; align-items: center; }
@@ -111,21 +119,10 @@ button.more:hover { text-decoration: underline; }
 .ext { display: inline-block; margin-top: 16px; color: var(--miku); }
 .loading { color: var(--ink-2); }
 
-#toolbar { position: fixed; right: 14px; bottom: 40px; z-index: 6;
-  display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
-#toolbar .row { background: rgba(20,38,43,.88); border: 1px solid var(--line);
-  border-radius: 16px; padding: 6px 8px; backdrop-filter: blur(4px);
-  display: flex; align-items: center; gap: 6px; }
-#toolbar > .row .chip { margin: 0; min-height: 44px; min-width: 44px;
-  display: inline-flex; align-items: center; justify-content: center;
-  line-height: 1; }
 #filters .chip { margin: 0 6px 6px 0; min-height: 28px;
   display: inline-flex; align-items: center; }
-#toolbar label { display: inline-flex; align-items: center; gap: 4px;
-  min-height: 44px; }
-#toolbar button { cursor: pointer; }
 /* 筛选面板:四个过滤维度统一宽度收纳,可折叠,形状归一 */
-#filters { width: 320px; background: rgba(20,38,43,.88);
+#filters { flex: none; background: rgba(20,38,43,.88);
   border: 1px solid var(--line); border-radius: 16px;
   backdrop-filter: blur(4px); overflow: hidden; }
 #filters-head { display: flex; align-items: center; gap: 6px;
@@ -178,14 +175,11 @@ button.more:hover { text-decoration: underline; }
   <div id="searchwrap">
     <input id="search" placeholder="搜索作品 / 人物 / 角色 ✨"
            autocomplete="off">
+    <button id="dice" title="随机传送">🎲</button>
     <div id="hits"></div>
   </div>
 </div>
-<div id="results"></div>
-
-<div id="drawer"></div>
-
-<div id="toolbar">
+<div id="leftcol">
   <div id="filters" class="closed">
     <div id="filters-head" role="button" title="点击展开/收起">
       筛选<span id="filters-count" class="fbadge"></span>
@@ -214,18 +208,17 @@ button.more:hover { text-decoration: underline; }
       </div>
     </div>
   </div>
-  <div class="row">
-    <button id="layer-toggle" class="chip">社区着色</button>
-    <button id="top-toggle" class="chip" title="俯视(正交)">俯视</button>
-    <button id="dice" class="chip" title="随机传送">🎲</button>
-  </div>
+  <div id="results"></div>
 </div>
+
+<div id="drawer"></div>
+
 
 <div id="legend">
   <i style="background:var(--c-subject)"></i>作品
   <i style="background:var(--c-person)"></i>人物
   <i style="background:var(--c-character)"></i>角色
-  <span style="margin-left:10px">右键拖 旋转 · `T` 俯视 · `R` 复位 · `S` 搜索</span>
+  <span style="margin-left:10px">右键拖 旋转 · `T` 俯视 · `C` 着色 · `R` 复位 · `S` 搜索</span>
 </div>
 <div id="tooltip"></div>
 <div id="hud"></div>
