@@ -483,7 +483,7 @@ export class Scene {
   }
 
   setView(vs: Partial<OrbitState>): void {
-    this.camera.viewState = { ...this.camera.viewState, ...vs };
+    this.camera.absorb({ ...this.camera.viewState, ...vs });
     this.applyCamera();
   }
 

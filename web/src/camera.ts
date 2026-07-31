@@ -11,29 +11,39 @@ export interface OrbitState {
   [k: string]: unknown;
 }
 
+interface CameraViewState extends OrbitState {
+  maxZoom: number;
+}
+
 export function prefersReducedMotion(): boolean {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 const FLY_MS = 400; // §5:双击/行走聚焦飞行 400ms
+const MAX_ZOOM_REL = 7;
 
 export class Camera {
   /** 视口恰好装下全图的 zoom(由 bbox 自适应标定)。 */
   readonly fitZoom: number;
-  viewState: OrbitState;
+  readonly maxZoom: number;
+  viewState: CameraViewState;
   /** 俯视正交保底(§4/§7 四件套之一):true 时投影切正交。 */
   ortho = false;
-  private homeState: OrbitState;
+  private homeState: CameraViewState;
 
   constructor(worldSize: number) {
     this.fitZoom = Math.log2(
       Math.min(innerWidth, innerHeight) / Math.max(worldSize, 1),
     );
+    // OrbitView 的 zoom 就是推拉距离；maxZoom 只限定相机最近位置。
+    // fit+7 已比默认聚焦再放大 5.7 倍，足够观察局部结构。
+    this.maxZoom = this.fitZoom + MAX_ZOOM_REL;
     this.homeState = {
       target: [0, 0, 0],
       zoom: this.fitZoom - 0.2,
       rotationX: 25,
       rotationOrbit: 0,
+      maxZoom: this.maxZoom,
     };
     this.viewState = { ...this.homeState };
   }
@@ -56,7 +66,12 @@ export class Camera {
       transitionEasing: _e,
       ...clean
     } = vs;
-    this.viewState = clean as unknown as OrbitState;
+    const next = clean as unknown as OrbitState;
+    this.viewState = {
+      ...next,
+      zoom: Math.min(next.zoom, this.maxZoom),
+      maxZoom: this.maxZoom,
+    };
   }
 
   /** 聚焦飞行:返回带一次性过渡参数的状态供 deck 消费,
@@ -69,7 +84,11 @@ export class Camera {
     this.viewState = {
       ...this.viewState,
       target: pos,
-      zoom: zoom ?? Math.max(this.viewState.zoom, this.fitZoom + 4.5),
+      zoom: Math.min(
+        zoom ?? Math.max(this.viewState.zoom, this.fitZoom + 4.5),
+        this.maxZoom,
+      ),
+      maxZoom: this.maxZoom,
     };
     return {
       ...this.viewState,
