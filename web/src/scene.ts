@@ -2,8 +2,8 @@
  * GPU 拾取、雾。
  *
  * 性能架构:节点的颜色/亮度/可见性全部在 shader 里由静态实例属性
- * (style、yearComm)+ 少量 uniform 推导——年份滑块、媒介 chips、
- * 聚光、图层切换都只改 uniform,零 CPU 循环、零属性重传
+ * (style、year)+ 少量 uniform 推导——年份滑块、媒介 chips、
+ * 聚光都只改 uniform,零 CPU 循环、零属性重传
  * (实测 CPU 路径 985k 节点 recolor 循环 61ms/次 + ~21MB 重传,已移除)。
  * 可见性用 fs discard 表达,被滤除节点连拾取/高亮一起消失(§4)。
  * 几何流式期间属性写入 GPU Buffer 增量区间,不整块重传。 */
@@ -33,7 +33,7 @@ const PULSE_MS = 500; // §5:选中光环单脉冲
 
 // ---- 节点样式扩展:着色/过滤/雾一体,全在 GPU ----
 // 实例属性:instanceStyle = [flags, etype, sizeLog, 0](u8×4)、
-// instanceYearComm = [year, community](u16×2);其余全是 uniform。
+// instanceYear = year(u16);其余全是 uniform。
 // 注意:luma 的 uniform block 解析按行取首个声明,必须一行一字段;
 // 全用 float——int 成员的默认精度 vs(highp)/fs(mediump)不一致,
 // 会在链接期报 precision mismatch,掩码值 ≤126 用 float 无损
@@ -48,7 +48,6 @@ const ATLAS_UNIFORM_BLOCK = `uniform atlasUniforms {
   float tagLo;
   float tagHi;
   float spotlight;
-  float colorBy;
   float zoomRel;
 } atlas;`;
 
@@ -67,7 +66,6 @@ const atlasShaderModule = {
     tagLo: "f32",
     tagHi: "f32",
     spotlight: "f32",
-    colorBy: "f32",
     zoomRel: "f32",
   },
 } as const;
@@ -83,7 +81,6 @@ export interface AtlasUniforms {
   tagLo: number;
   tagHi: number;
   spotlight: number;
-  colorBy: number;
   zoomRel: number;
 }
 
@@ -96,15 +93,15 @@ class NodeStyleExtension extends LayerExtension {
       inject: {
         "vs:#decl": `
 in vec4 instanceStyle;
-in vec2 instanceYearComm;
+in float instanceYear;
 in vec2 instanceTags;
 out vec4 atlas_style;
-out vec2 atlas_yc;
+out float atlas_year;
 out vec2 atlas_tags;
 out float atlas_fogDepth;`,
         "vs:#main-end": `
 atlas_style = instanceStyle;
-atlas_yc = instanceYearComm;
+atlas_year = instanceYear;
 atlas_tags = instanceTags;
 atlas_fogDepth = distance(geometry.worldPosition.xyz, atlas.cameraPos);`,
         // 孤立外壳的缩小随缩放消退:远景压到亚像素防糊住本体(§7),
@@ -115,7 +112,7 @@ if (mod(floor(instanceStyle.x / 2.0), 2.0) >= 1.0)
   size *= mix(0.35, 1.0, smoothstep(1.5, 3.5, atlas.zoomRel));`,
         "fs:#decl": `
 in vec4 atlas_style;
-in vec2 atlas_yc;
+in float atlas_year;
 in vec2 atlas_tags;
 in float atlas_fogDepth;`,
         // 颜色/亮度/可见性推导(与设计 §4/§5 一一对应;
@@ -125,8 +122,7 @@ in float atlas_fogDepth;`,
   float f_flags = atlas_style.x;
   float f_etype = atlas_style.y;
   float f_size = atlas_style.z;
-  float f_year = atlas_yc.x;
-  float f_comm = atlas_yc.y;
+  float f_year = atlas_year;
   bool a_iso = mod(floor(f_flags / 2.0), 2.0) >= 1.0;
   int a_media = int(floor(f_flags / 4.0));
   bool isSubject = f_etype < 1.5; // 档位比较,规避浮点等值
@@ -149,17 +145,6 @@ in float atlas_fogDepth;`,
   vec3 rgb = isSubject ? vec3(61.0, 142.0, 222.0)
            : f_etype < 2.5 ? vec3(229.0, 106.0, 64.0)
            : vec3(39.0, 171.0, 124.0);
-  if (atlas.colorBy > 0.5 && f_comm < 65534.5) {
-    float h = mod(f_comm * 137.508, 360.0) / 60.0;
-    float x = 1.0 - abs(mod(h, 2.0) - 1.0);
-    vec3 c = h < 1.0 ? vec3(1.0, x, 0.0)
-           : h < 2.0 ? vec3(x, 1.0, 0.0)
-           : h < 3.0 ? vec3(0.0, 1.0, x)
-           : h < 4.0 ? vec3(0.0, x, 1.0)
-           : h < 5.0 ? vec3(x, 0.0, 1.0)
-           : vec3(1.0, 0.0, x);
-    rgb = 118.0 + c * 112.0; // 提底降幅:社区色更粉彩(§5 低饱和)
-  }
   // 孤立外壳 9.2 万点包裹星系,远景亮度稍高即叠成实心球(实测
   // 压到 ~14% 才不糊本体,§7);近景密度自然稀疏,压制随缩放
   // 消退,凑近的孤立节点恢复接近普通节点的亮度
@@ -192,11 +177,7 @@ in float atlas_fogDepth;`,
     };
     layer.getAttributeManager()?.addInstanced({
       instanceStyle: { size: 4, type: "uint8", accessor: "getStyle" },
-      instanceYearComm: {
-        size: 2,
-        type: "uint16",
-        accessor: "getYearComm",
-      },
+      instanceYear: { size: 1, type: "uint16", accessor: "getYear" },
       // u32 标签位图按两半 u16 直灌(f32 顶点属性 >2^24 会丢位)
       instanceTags: { size: 2, type: "uint16", accessor: "getTags" },
     });
@@ -291,7 +272,7 @@ export class Scene {
 
   // 静态实例属性(随几何流一次性填充,之后永不重算)
   private styleBuf: Uint8Array; // [flags, etype, sizeLog, 0] × n
-  private yearCommBuf: Uint16Array; // [year, community] × n
+  private yearBuf: Uint16Array; // year × n
   private styled = 0; // 已填充的节点数
 
   // GPU 常驻缓冲(设备就绪后接管;之前 render 退回 CPU 数组直灌)
@@ -299,7 +280,7 @@ export class Scene {
     positions: GrowingBuffer;
     radius: GrowingBuffer;
     style: GrowingBuffer;
-    yearComm: GrowingBuffer;
+    year: GrowingBuffer;
     tags: GrowingBuffer;
   } | null = null;
 
@@ -333,7 +314,7 @@ export class Scene {
     this.camera = new Camera(worldSize);
     const n = geo.key.length;
     this.styleBuf = new Uint8Array(n * 4);
-    this.yearCommBuf = new Uint16Array(n * 2);
+    this.yearBuf = new Uint16Array(n);
     this.deck = new Deck({
       parent,
       views: this.camera.view(),
@@ -350,9 +331,9 @@ export class Scene {
           ),
           radius: new GrowingBuffer(device, this.geo.size),
           style: new GrowingBuffer(device, this.styleBuf),
-          yearComm: new GrowingBuffer(
+          year: new GrowingBuffer(
             device,
-            new Uint8Array(this.yearCommBuf.buffer),
+            new Uint8Array(this.yearBuf.buffer),
           ),
           tags: new GrowingBuffer(
             device,
@@ -462,14 +443,13 @@ export class Scene {
 
   geometryGrew(): void {
     // 增量填充静态样式属性(每节点一生只算一次)
-    const { geo, styleBuf, yearCommBuf } = this;
+    const { geo, styleBuf, yearBuf } = this;
     for (let i = this.styled; i < geo.loaded; i++) {
       styleBuf[i * 4] = geo.flags[i] ?? 0;
       styleBuf[i * 4 + 1] = etype(geo.key[i] ?? 0);
       styleBuf[i * 4 + 2] = geo.size[i] ?? 0;
       styleBuf[i * 4 + 3] = geo.score[i] ?? 0; // 评分×10,属性过滤用
-      yearCommBuf[i * 2] = geo.year[i] ?? 0;
-      yearCommBuf[i * 2 + 1] = geo.community[i] ?? 0;
+      yearBuf[i] = geo.year[i] ?? 0;
     }
     this.styled = geo.loaded;
     this.syncGpu();
@@ -483,7 +463,7 @@ export class Scene {
     this.gpu.positions.sync(m * 12);
     this.gpu.radius.sync(m);
     this.gpu.style.sync(m * 4);
-    this.gpu.yearComm.sync(m * 4);
+    this.gpu.year.sync(m * 2);
     this.gpu.tags.sync(m * 4);
   }
 
@@ -937,7 +917,7 @@ export class Scene {
         length: this.styled,
         attributes:
           g?.positions.handle && g.radius.handle && g.style.handle &&
-          g.yearComm.handle
+          g.year.handle
             ? {
                 // 外部 buffer 必须显式 stride:deck 只在 {value}
                 // 分支按数组重算布局,{buffer} 分支沿用属性默认类型
@@ -960,11 +940,11 @@ export class Scene {
                   type: "uint8",
                   stride: 4,
                 },
-                getYearComm: {
-                  buffer: g.yearComm.handle,
-                  size: 2,
+                getYear: {
+                  buffer: g.year.handle,
+                  size: 1,
                   type: "uint16",
-                  stride: 4,
+                  stride: 2,
                 },
                 getTags: {
                   buffer: g.tags.handle,
@@ -985,9 +965,9 @@ export class Scene {
                   size: 4,
                   type: "uint8",
                 },
-                getYearComm: {
-                  value: this.yearCommBuf,
-                  size: 2,
+                getYear: {
+                  value: this.yearBuf,
+                  size: 1,
                   type: "uint16",
                 },
                 getTags: {
@@ -1019,7 +999,6 @@ export class Scene {
       tagLo: sel & 0xffff,
       tagHi: sel >>> 16,
       spotlight: state.selection !== null ? 1 : 0,
-      colorBy: f.colorBy === "community" ? 1 : 0,
       zoomRel: this.camera.viewState.zoom - this.camera.fitZoom,
     };
   }

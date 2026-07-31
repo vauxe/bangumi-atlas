@@ -246,12 +246,12 @@ def main() -> None:  # noqa: PLR0915
         )
     log("节点属性装载完成")
 
-    # ---- 几何 SoA(16B/节点,六文件,定长记录支持 Range 点查)----
+    # ---- 几何 SoA(19B/节点,七文件,定长记录支持 Range 点查)----
+    # (community 只服务社区标签,留在 labels.json,不再出列)
     q, lo, hi = quantize(coords_r.astype(np.float32))
     (SITE / "positions.bin").write_bytes(q.tobytes())
     (SITE / "year.bin").write_bytes(year_r.tobytes())
     (SITE / "key.bin").write_bytes(key_r.tobytes())
-    (SITE / "community.bin").write_bytes(comm_r.tobytes())
     size_raw = np.round(18 * np.log2(1 + collect_r))
     clamped = int((size_raw > 255).sum())
     if clamped:
@@ -301,7 +301,6 @@ def main() -> None:  # noqa: PLR0915
         ("positions.bin", 6),
         ("year.bin", 2),
         ("key.bin", 4),
-        ("community.bin", 2),
         ("size.bin", 1),
         ("flags.bin", 1),
         ("score.bin", 1),

@@ -33,7 +33,6 @@ export interface Geometry {
   positions: Float32Array;
   year: Uint16Array;
   key: Uint32Array;
-  community: Uint16Array;
   size: Uint8Array;
   /** bit0 nsfw(保留于数据,渲染不使用)、bit1 孤立外壳、
    * bit2-4 媒介(1书籍…6三次元),余位 0。 */

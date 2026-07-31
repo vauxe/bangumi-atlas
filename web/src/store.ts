@@ -9,7 +9,6 @@ export interface Filters {
   scoreMin: number;
   /** 选中的标签 bit 下标(AND 语义:作品须含全部所选标签)。 */
   tags: Set<number>;
-  colorBy: "type" | "community";
 }
 
 export interface State {
@@ -39,7 +38,6 @@ export const state: State = {
     media: new Set(),
     scoreMin: 0,
     tags: new Set(),
-    colorBy: "type",
   },
 };
 
