@@ -26,6 +26,7 @@ export async function loadManifest(): Promise<Manifest> {
   const res = await fetch(`${BASE}/manifest.json`, { cache: "no-cache" });
   const m = (await res.json()) as Manifest;
   version = m.version;
+  manifestRef = m;
   return m;
 }
 
@@ -209,27 +210,102 @@ export async function pointByRank(
   return { pos, key: new Uint32Array(keyBuf.slice(0, 4))[0] ?? 0 };
 }
 
+// ---- 分片打包读取:pack 文件 + 偏移索引 + Range 取片 + 逐片 gzip。
+// 分片数(2.2 万)不再等于文件数(个位数 pack);详情从裸 JSON 存储
+// 700MB 变为存储即压缩(~250MB),传输量与原 CDN gzip 持平 ----
+
+const packFull = new Map<string, Promise<ArrayBuffer>>();
+
+/** Range 取片;服务器不支持 Range(开发环境)时整包缓存一次,
+ * 后续切片全部本地完成。 */
+async function packSlice(
+  path: string,
+  off: number,
+  len: number,
+): Promise<ArrayBuffer> {
+  const cached = packFull.get(path);
+  if (cached) return (await cached).slice(off, off + len);
+  const res = await fetch(url(path), {
+    headers: { Range: `bytes=${off}-${off + len - 1}` },
+  });
+  if (res.status === 206) return res.arrayBuffer();
+  if (res.ok) {
+    const whole = res.arrayBuffer();
+    packFull.set(path, whole);
+    return (await whole).slice(off, off + len);
+  }
+  throw new Error(`${path}: ${res.status}`);
+}
+
+async function gunzipJson<T>(buf: ArrayBuffer): Promise<T> {
+  const body = new Response(buf).body;
+  if (!body) throw new Error("gunzip: empty body");
+  const stream = body.pipeThrough(new DecompressionStream("gzip"));
+  return (await new Response(stream).json()) as T;
+}
+
+const idxCache = new Map<string, Promise<Uint32Array>>();
+
+/** u32 累计偏移索引(buckets+1 项):桶 b 的片 = [idx[b], idx[b+1])。 */
+function loadIdx(path: string): Promise<Uint32Array> {
+  let p = idxCache.get(path);
+  if (!p) {
+    p = fetch(url(path))
+      .then((r) => {
+        if (!r.ok) throw new Error(`${path}: ${r.status}`);
+        return r.arrayBuffer();
+      })
+      .then((b) => new Uint32Array(b));
+    idxCache.set(path, p);
+  }
+  return p;
+}
+
 const adjCache = new Map<number, Record<string, AdjEntry>>();
 const detCache = new Map<number, Record<string, Detail>>();
 
 async function shard<T>(
   cache: Map<number, Record<string, T>>,
-  dir: string,
+  kind: "adj" | "det",
   bucket: number,
+  buckets: number,
+  detPacks: number,
 ): Promise<Record<string, T>> {
   const hit = cache.get(bucket);
   if (hit) return hit;
-  const res = await fetch(url(`${dir}/${bucket}.json`));
-  const data = (await res.json()) as Record<string, T>;
+  const idx = await loadIdx(`${kind}.idx`);
+  const off = idx[bucket] ?? 0;
+  const len = (idx[bucket + 1] ?? off) - off;
+  let path = "adj.pack";
+  let rel = off;
+  if (kind === "det") {
+    // det 均分多个 pack:索引存全局累计偏移,减去 pack 首桶偏移
+    const per = Math.floor(buckets / detPacks);
+    const p = Math.floor(bucket / per);
+    path = `det-${p}.pack`;
+    rel = off - (idx[p * per] ?? 0);
+  }
+  const data =
+    len > 0
+      ? await gunzipJson<Record<string, T>>(await packSlice(path, rel, len))
+      : ({} as Record<string, T>);
   cache.set(bucket, data);
   return data;
 }
+
+let manifestRef: Manifest | null = null;
 
 export async function loadAdj(
   key: number,
   buckets: number,
 ): Promise<AdjEntry | null> {
-  const s = await shard(adjCache, "adj", key % buckets);
+  const s = await shard<AdjEntry>(
+    adjCache,
+    "adj",
+    key % buckets,
+    buckets,
+    manifestRef?.det_packs ?? 4,
+  );
   return s[String(key)] ?? null;
 }
 
@@ -237,26 +313,22 @@ export async function loadDetail(
   key: number,
   buckets: number,
 ): Promise<Detail | null> {
-  const s = await shard(detCache, "det", key % buckets);
+  const s = await shard<Detail>(
+    detCache,
+    "det",
+    key % buckets,
+    buckets,
+    manifestRef?.det_packs ?? 4,
+  );
   return s[String(key)] ?? null;
 }
 
-/** 邻接溢出分页("展开全部 N 个"逐页加载)。 */
-export async function loadAdjPage(
-  key: number,
-  page: number,
-): Promise<AdjPage> {
-  const res = await fetch(url(`adj_over/${key}/${page}.json`));
-  return res.ok ? ((await res.json()) as AdjPage) : [];
-}
-
-/** 分集溢出分页(超 200 集)。 */
-export async function loadEpsPage(
-  key: number,
-  page: number,
-): Promise<EpisodeRow[]> {
-  const res = await fetch(url(`det_eps/${key}/${page}.json`));
-  return res.ok ? ((await res.json()) as EpisodeRow[]) : [];
+/** 溢出页(邻接"展开全部" / 分集分页):偏移内嵌在所属条目里。 */
+export async function loadPage<T extends AdjPage | EpisodeRow[]>(
+  off: number,
+  len: number,
+): Promise<T> {
+  return gunzipJson<T>(await packSlice("pages.pack", off, len));
 }
 
 /** 悬停预取:填充分片缓存,点击时大概率已热(对冲每周失效后的冷 CDN)。 */
@@ -287,14 +359,25 @@ export function fold(text: string): string {
   return out;
 }
 
+let searchIdxP: Promise<Record<string, [number, number]>> | null = null;
+
+function loadSearchIdx(): Promise<Record<string, [number, number]>> {
+  searchIdxP ??= fetch(url("search.idx.json")).then(
+    (r) => r.json() as Promise<Record<string, [number, number]>>,
+  );
+  return searchIdxP;
+}
+
 async function fetchShard(first: string): Promise<SearchEntry[]> {
   const hit = searchCache.get(first);
   if (hit) return hit;
   const cp = first.codePointAt(0);
   if (cp === undefined) return [];
-  const res = await fetch(url(`search/${cp.toString(16)}.json`));
-  const data: SearchEntry[] = res.ok
-    ? ((await res.json()) as SearchEntry[])
+  const loc = (await loadSearchIdx())[cp.toString(16)];
+  const data: SearchEntry[] = loc
+    ? await gunzipJson<SearchEntry[]>(
+        await packSlice("search.pack", loc[0], loc[1]),
+      )
     : [];
   searchCache.set(first, data);
   return data;

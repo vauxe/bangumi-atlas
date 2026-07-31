@@ -6,6 +6,8 @@ export interface Manifest {
   n_nodes: number;
   n_edges_skeleton: number;
   buckets: number;
+  /** 详情 pack 均分文件数(det-{p}.pack,p = bucket / (buckets/det_packs))。 */
+  det_packs: number;
   adj_inline: number;
   eps_inline: number;
   bbox: [number[], number[]];
@@ -17,10 +19,8 @@ export interface Manifest {
   hot_shards: string[];
   /** 布局报告(p95_shift_pct 等),跨周位移留观。 */
   layout: Record<string, unknown> | null;
-  /** 一等文件名 -> [bytes, sha256]。 */
+  /** 文件名 -> [bytes, sha256](分片已打包,产物全为顶层文件)。 */
   files: Record<string, [number, string]>;
-  /** 分片目录名 -> [n_files, bytes, 聚合 sha256]。 */
-  dirs: Record<string, [number, number, string]>;
   total_bytes: number;
   n_files: number;
 }
@@ -49,11 +49,11 @@ export interface Names {
 }
 
 /** 邻接分片条目:g = [labelId, 组总数, inline ranks][],n = 总数,
- * p = 溢出页数(adj_over/{key}/{page}.json)。 */
+ * op = 溢出页在 pages.pack 中的 [offset, len](逐片 gzip)。 */
 export interface AdjEntry {
   g: [number, number, number[]][];
   n: number;
-  p?: number;
+  op?: [number, number][];
 }
 
 /** 溢出页条目:[labelId, rank]。 */
@@ -79,6 +79,8 @@ export interface Detail {
   collects?: number;
   ne?: number;
   eps?: EpisodeRow[];
+  /** 分集溢出页在 pages.pack 中的 [offset, len]。 */
+  eo?: [number, number][];
 }
 
 /** 搜索条目;第 4 位 = 1 表示 nsfw(默认过滤,§4 反模式)。 */
