@@ -70,14 +70,18 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 #drawer.open { transform: none; }
 #drawer h2 { margin: 4px 24px 2px 0; font-size: 20px; }
 #drawer .cover { float: right; width: 96px; border-radius: 12px;
-  margin: 24px 0 10px 12px; }
+  margin: 8px 0 10px 12px; clear: right; }
 .chip-av { width: 20px; height: 20px; border-radius: 50%;
   object-fit: cover; flex: none; }
 #drawer .chips .chip { display: inline-flex; align-items: center;
   gap: 6px; }
 #drawer .subtitle { color: var(--ink-2); margin-bottom: 8px; }
-#drawer-close { position: absolute; top: 10px; right: 12px; border: 0;
-  background: none; color: var(--ink-2); font-size: 22px; cursor: pointer; }
+/* sticky:滚动时钉在视口顶部,任何深度都能关(absolute 会随内容滚走) */
+#drawer-close { position: sticky; top: 0; float: right; z-index: 2;
+  border: 0; width: 32px; height: 32px; border-radius: 50%;
+  background: rgba(20, 38, 43, .85); color: var(--ink-2);
+  font-size: 20px; line-height: 1; cursor: pointer; }
+#drawer-close:hover { color: var(--ink); }
 .badge { background: var(--line); border-radius: 8px; padding: 2px 8px;
   font-size: 12px; margin-right: 6px; }
 .tag { color: var(--ink-2); font-size: 12px; margin-right: 8px; }
