@@ -2,12 +2,11 @@
 
 Products: site/data/ 下 manifest.json、几何 SoA bins、names.ndjson(流式)、
 骨架边、邻接分片(top-200 + 组总数 + 溢出分页)、详情分片(分集分页)、
-搜索索引分片(简繁日折叠 + nsfw 位)、标签表、坐标快照;site/n/ 下分享卡片。
+搜索索引分片(简繁日折叠 + nsfw 位)、标签表、坐标快照。
 纪律:失败与截断显式报出、行级对账,对不上非零退出。
 """
 
 import hashlib
-import html
 import shutil
 import sys
 import time
@@ -32,7 +31,6 @@ LAYOUT = ROOT / "data" / "layout" / "coords.parquet"
 LAYOUT_REPORT = ROOT / "data" / "layout" / "report.json"
 DUMP_VERSION = ROOT / "data" / "dump" / "VERSION"
 SITE = ROOT / "site" / "data"
-CARDS = ROOT / "site" / "n"
 
 BUCKETS = 8192
 ADJ_INLINE = 200
@@ -40,7 +38,6 @@ EPS_INLINE = 200
 PAGE = 500
 SKELETON_TARGET = 500_000  # §2 预算;保底覆盖优先,超限显式报出
 LABELS_TOP = 20_000
-CARDS_TOP = 10_000
 HOT_SHARDS = 24  # 高频首字分片数,随首块预取(§1 冷分片对冲)
 SIZE_BUDGET = 1_000_000_000  # GH Pages 1GB 硬限
 FILE_BUDGET = 20_000  # CF Pages 迁移预案的文件数上限
@@ -198,9 +195,7 @@ def main() -> None:  # noqa: PLR0915
         log(f"WARNING: {DUMP_VERSION} 缺失,version 回退构建日期 {version}")
     # 清场重建:防止上次运行的产物残留(与 fetch_dump 同一纪律)
     shutil.rmtree(SITE, ignore_errors=True)
-    shutil.rmtree(CARDS, ignore_errors=True)
     SITE.mkdir(parents=True, exist_ok=True)
-    CARDS.mkdir(parents=True, exist_ok=True)
 
     lay = load_layout()
     n = len(lay["key"])
@@ -626,38 +621,6 @@ def main() -> None:  # noqa: PLR0915
     )
     log(f"标签表:节点 {len(labels):,} + 社区 {len(comm_labels):,}")
 
-    # ---- 分享卡片:top-N 非 NSFW 节点的 og:meta 静态 stub(site/n/)。
-    # 卡片是专给爬虫的"默认视图",NSFW 不烘(§4 反模式);链接仍可直达
-    n_cards = 0
-    cards_nsfw_skipped = 0
-    for rank in range(n):
-        if n_cards >= CARDS_TOP:
-            break
-        ki = int(key_r[rank])
-        d0 = info[ki]
-        if d0["nsfw"]:
-            cards_nsfw_skipped += 1
-            continue
-        title = html.escape(str(d0["cn"] or d0["name"]), quote=True)
-        bits = [str(d0["t"])]
-        if d0.get("score"):
-            bits.append(f"评分 {d0['score']}")
-        desc = html.escape(" · ".join(bits) + " | Bangumi 星图", quote=True)
-        (CARDS / f"{ki}.html").write_text(
-            "<!doctype html><meta charset=utf-8>"
-            f"<title>{title}</title>"
-            f'<meta property="og:title" content="{title}">'
-            f'<meta property="og:description" content="{desc}">'
-            f'<script>location.replace("../#n={ki}&r={rank}")</script>'
-        )
-        n_cards += 1
-    total_sfw = int((~nsfw_arr).sum())
-    reconcile("分享卡片数", min(CARDS_TOP, total_sfw), n_cards)
-    log(
-        f"分享卡片 {n_cards:,} 个写出(site/n/;"
-        f"跳过 NSFW {cards_nsfw_skipped:,})"
-    )
-
     # ---- 坐标快照:下周热启动 + 位置恒定的事实来源,纳入清单 ----
     shutil.copy(LAYOUT, SITE / "coords.parquet")
 
@@ -673,9 +636,7 @@ def main() -> None:  # noqa: PLR0915
             file_meta[p.name] = [p.stat().st_size, sha256_of(p)]
             total_bytes += p.stat().st_size
             n_files += 1
-    for dpath in sorted(
-        [p for p in SITE.iterdir() if p.is_dir()] + [CARDS]
-    ):
+    for dpath in sorted(p for p in SITE.iterdir() if p.is_dir()):
         files = sorted(p for p in dpath.rglob("*") if p.is_file())
         dbytes = sum(p.stat().st_size for p in files)
         agg = hashlib.sha256()
