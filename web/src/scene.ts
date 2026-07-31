@@ -1,14 +1,21 @@
 /** deck.gl 场景:语境层(点+近景视锥内骨架边)、工作集聚光/X-ray、
- * GPU 拾取、雾。可见性(NSFW/年份)走 GPU filter,被滤除节点连拾取
- * 一起消失;人物/角色在时间过滤下只降暗不隐藏(§4)。 */
+ * GPU 拾取、雾。
+ *
+ * 性能架构:节点的颜色/亮度/可见性全部在 shader 里由静态实例属性
+ * (style、yearComm)+ 少量 uniform 推导——年份滑块、媒介 chips、
+ * NSFW 开关、聚光、图层切换都只改 uniform,零 CPU 循环、零属性重传
+ * (实测 CPU 路径 985k 节点 recolor 循环 61ms/次 + ~21MB 重传,已移除)。
+ * 可见性用 fs discard 表达,被滤除节点连拾取/高亮一起消失(§4)。
+ * 几何流式期间属性写入 GPU Buffer 增量区间,不整块重传。 */
 
 import { Deck, LayerExtension, OrbitView } from "@deck.gl/core";
-import { DataFilterExtension } from "@deck.gl/extensions";
+import { Buffer as LumaBuffer } from "@luma.gl/core";
+import type { Device } from "@luma.gl/core";
 import { LineLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { Camera, prefersReducedMotion } from "./camera";
 import type { OrbitState } from "./camera";
 import { labelLayers } from "./labels";
-import type { LabelData } from "./labels";
+import type { LabelCache, LabelData } from "./labels";
 import { state } from "./store";
 import { TYPE_COLORS, etype } from "./types";
 import type { Geometry } from "./types";
@@ -24,45 +31,131 @@ const CASCADE_STEP_MS = 30; // §5:邻居 30ms 级联淡入
 const CASCADE_FADE_MS = 200;
 const PULSE_MS = 500; // §5:选中光环单脉冲
 
-// ---- 雾扩展:只挂语境层,按到相机距离衰减 alpha(§4 深度线索)----
-const fogShaderModule = {
-  name: "fog",
-  vs: `uniform fogUniforms { vec3 cameraPos; float start; float falloff; } fog;
-out float fog_depth;`,
-  fs: `uniform fogUniforms { vec3 cameraPos; float start; float falloff; } fog;
-in float fog_depth;`,
+// ---- 节点样式扩展:着色/过滤/雾一体,全在 GPU ----
+// 实例属性:instanceStyle = [flags, etype, sizeLog, 0](u8×4)、
+// instanceYearComm = [year, community](u16×2);其余全是 uniform。
+const atlasShaderModule = {
+  name: "atlas",
+  vs: `uniform atlasUniforms {
+  vec3 cameraPos; float fogStart; float fogFalloff;
+  float yearMin; float yearMax;
+  int mediaMask; int nsfwOn; int spotlight; int colorBy;
+} atlas;`,
+  fs: `uniform atlasUniforms {
+  vec3 cameraPos; float fogStart; float fogFalloff;
+  float yearMin; float yearMax;
+  int mediaMask; int nsfwOn; int spotlight; int colorBy;
+} atlas;`,
   uniformTypes: {
     cameraPos: "vec3<f32>",
-    start: "f32",
-    falloff: "f32",
+    fogStart: "f32",
+    fogFalloff: "f32",
+    yearMin: "f32",
+    yearMax: "f32",
+    mediaMask: "i32",
+    nsfwOn: "i32",
+    spotlight: "i32",
+    colorBy: "i32",
   },
 } as const;
 
-interface FogProps {
-  fogCamera: [number, number, number];
+export interface AtlasUniforms {
+  cameraPos: [number, number, number];
   fogStart: number;
   fogFalloff: number;
+  yearMin: number;
+  yearMax: number;
+  mediaMask: number;
+  nsfwOn: number;
+  spotlight: number;
+  colorBy: number;
 }
 
-class FogExtension extends LayerExtension {
-  static override extensionName = "FogExtension";
+class NodeStyleExtension extends LayerExtension {
+  static override extensionName = "NodeStyleExtension";
 
   override getShaders(): Record<string, unknown> {
     return {
-      modules: [fogShaderModule],
+      modules: [atlasShaderModule],
       inject: {
-        "vs:#main-end":
-          "fog_depth = distance(geometry.worldPosition.xyz, fog.cameraPos);",
+        "vs:#decl": `
+in vec4 instanceStyle;
+in vec2 instanceYearComm;
+out vec4 atlas_style;
+out vec2 atlas_yc;
+out float atlas_fogDepth;`,
+        "vs:#main-end": `
+atlas_style = instanceStyle;
+atlas_yc = instanceYearComm;
+atlas_fogDepth = distance(geometry.worldPosition.xyz, atlas.cameraPos);`,
+        "fs:#decl": `
+in vec4 atlas_style;
+in vec2 atlas_yc;
+in float atlas_fogDepth;`,
+        // 颜色/亮度/可见性推导(与设计 §4/§5 一一对应;
+        // discard 使被滤除节点同时移出拾取与 autoHighlight)
         "fs:DECKGL_FILTER_COLOR": `
-          color.a *= mix(0.25, 1.0,
-            exp(-max(fog_depth - fog.start, 0.0) * fog.falloff));`,
+{
+  float f_flags = atlas_style.x;
+  float f_etype = atlas_style.y;
+  float f_size = atlas_style.z;
+  float f_year = atlas_yc.x;
+  float f_comm = atlas_yc.y;
+  bool a_nsfw = mod(f_flags, 2.0) >= 1.0;
+  bool a_iso = mod(floor(f_flags / 2.0), 2.0) >= 1.0;
+  int a_media = int(floor(f_flags / 4.0));
+  bool isSubject = f_etype < 1.5; // 档位比较,规避浮点等值
+  bool yearOn = atlas.yearMin > 0.5 || atlas.yearMax < 9998.5;
+  if (a_nsfw && atlas.nsfwOn == 0) discard;
+  if (yearOn && isSubject && f_year > 0.5 &&
+      (f_year < atlas.yearMin || f_year > atlas.yearMax)) discard;
+  vec3 rgb = isSubject ? vec3(57.0, 135.0, 229.0)
+           : f_etype < 2.5 ? vec3(217.0, 89.0, 38.0)
+           : vec3(25.0, 158.0, 112.0);
+  if (atlas.colorBy == 1 && f_comm < 65534.5) {
+    float h = mod(f_comm * 137.508, 360.0) / 60.0;
+    float x = 1.0 - abs(mod(h, 2.0) - 1.0);
+    vec3 c = h < 1.0 ? vec3(1.0, x, 0.0)
+           : h < 2.0 ? vec3(x, 1.0, 0.0)
+           : h < 3.0 ? vec3(0.0, 1.0, x)
+           : h < 4.0 ? vec3(0.0, x, 1.0)
+           : h < 5.0 ? vec3(x, 0.0, 1.0)
+           : vec3(1.0, 0.0, x);
+    rgb = 90.0 + c * 140.0;
+  }
+  float a = a_iso ? 110.0 : 160.0 + min(50.0, floor(f_size / 4.0));
+  if (yearOn && (!isSubject || f_year < 0.5)) a = min(a, 90.0);
+  if (atlas.mediaMask != 0 && a_media > 0 &&
+      (atlas.mediaMask & (1 << a_media)) == 0) a = 40.0;
+  if (atlas.spotlight == 1) a = min(a, 38.0);
+  a *= mix(0.25, 1.0,
+    exp(-max(atlas_fogDepth - atlas.fogStart, 0.0) * atlas.fogFalloff));
+  // 入参 color.a 携带圆边平滑因子(SDF AA),必须保留
+  color = vec4(rgb / 255.0, (a / 255.0) * color.a);
+}`,
       },
     };
   }
 
+  override initializeState(this: unknown): void {
+    const layer = this as {
+      getAttributeManager(): {
+        addInstanced(defs: Record<string, unknown>): void;
+      } | null;
+    };
+    layer.getAttributeManager()?.addInstanced({
+      instanceStyle: { size: 4, type: "uint8", accessor: "getStyle" },
+      instanceYearComm: {
+        size: 2,
+        type: "uint16",
+        accessor: "getYearComm",
+      },
+    });
+  }
+
   override updateState(params: unknown): void {
-    const props = (params as { props: Partial<FogProps> }).props;
-    if (!props.fogCamera) return;
+    const props = (params as { props: { atlas?: AtlasUniforms } }).props;
+    if (!props.atlas) return;
     const models = (
       this as unknown as { getModels(): unknown[] }
     ).getModels();
@@ -72,28 +165,44 @@ class FogExtension extends LayerExtension {
           setProps?: (p: Record<string, unknown>) => void;
         };
       };
-      m.shaderInputs?.setProps?.({
-        fog: {
-          cameraPos: props.fogCamera,
-          start: props.fogStart ?? 0,
-          falloff: props.fogFalloff ?? 0,
-        },
-      });
+      m.shaderInputs?.setProps?.({ atlas: props.atlas });
     }
+  }
+}
+
+/** 大缓冲的 GPU 常驻镜像:流式期间只写增量区间,不整块重传。 */
+class GrowingBuffer {
+  private buf: LumaBuffer | null = null;
+  private written = 0;
+
+  constructor(
+    private device: Device,
+    private source: Uint8Array,
+  ) {}
+
+  /** 同步 CPU 源数组的 [written, upTo) 字节到 GPU。 */
+  sync(upTo: number): void {
+    this.buf ??= this.device.createBuffer({
+      byteLength: this.source.byteLength,
+      usage: LumaBuffer.VERTEX | LumaBuffer.COPY_DST,
+    });
+    if (upTo > this.written) {
+      this.buf.write(
+        this.source.subarray(this.written, upTo),
+        this.written,
+      );
+      this.written = upTo;
+    }
+  }
+
+  get handle(): LumaBuffer | null {
+    return this.buf;
   }
 }
 
 interface ContextData {
   length: number;
-  attributes: Record<
-    string,
-    {
-      value: Float32Array | Uint8Array;
-      size: number;
-      stride?: number;
-      offset?: number;
-    }
-  >;
+  attributes: Record<string, unknown>;
 }
 
 export interface SceneCallbacks {
@@ -109,14 +218,26 @@ export class Scene {
   private deck: Deck<OrbitView>;
   private geo: Geometry;
   private worldSize: number;
-  private colors: Uint8Array;
-  private visible: Float32Array;
   private labels: LabelData | null = null;
-  private labelVersion = 0;
+  private labelCache: LabelCache = {};
+  private styleVersion = 0; // 标签可见性相关过滤的变化计数(缓存键)
+  private labelFilterKey = "";
+
+  // 静态实例属性(随几何流一次性填充,之后永不重算)
+  private styleBuf: Uint8Array; // [flags, etype, sizeLog, 0] × n
+  private yearCommBuf: Uint16Array; // [year, community] × n
+  private styled = 0; // 已填充的节点数
+
+  // GPU 常驻缓冲(设备就绪后接管;之前 render 退回 CPU 数组直灌)
+  private gpu: {
+    positions: GrowingBuffer;
+    radius: GrowingBuffer;
+    style: GrowingBuffer;
+    yearComm: GrowingBuffer;
+  } | null = null;
 
   private contextData: ContextData | null = null;
-  private contextVersion = 0;
-  private builtVersion = -1;
+  private contextLength = -1;
 
   private edges: Uint32Array | null = null;
   private edgePos: Float32Array | null = null; // 预分配 EDGE_CAP*6
@@ -125,6 +246,8 @@ export class Scene {
   private edgeOpacity = 0;
   private edgeFadeRaf = 0;
   private edgeRebuildTimer = 0;
+  private edgeRebuildForce = false;
+  private edgeCamKey = ""; // 相机静止时跳过重建
 
   private wsAnimStart = 0;
   private wsRaf = 0;
@@ -141,8 +264,9 @@ export class Scene {
     this.geo = geo;
     this.worldSize = worldSize;
     this.camera = new Camera(worldSize);
-    this.colors = new Uint8Array(geo.key.length * 4);
-    this.visible = new Float32Array(geo.key.length);
+    const n = geo.key.length;
+    this.styleBuf = new Uint8Array(n * 4);
+    this.yearCommBuf = new Uint16Array(n * 2);
     this.deck = new Deck({
       parent,
       views: this.camera.view(),
@@ -151,6 +275,23 @@ export class Scene {
       controller: { inertia: 300, doubleClickZoom: false, dragMode: "pan" },
       initialViewState: this.camera.viewState,
       pickingRadius: 5,
+      onDeviceInitialized: (device: Device) => {
+        this.gpu = {
+          positions: new GrowingBuffer(
+            device,
+            new Uint8Array(this.geo.positions.buffer),
+          ),
+          radius: new GrowingBuffer(device, this.geo.size),
+          style: new GrowingBuffer(device, this.styleBuf),
+          yearComm: new GrowingBuffer(
+            device,
+            new Uint8Array(this.yearCommBuf.buffer),
+          ),
+        };
+        this.contextLength = -1; // 重建 contextData,切换到 GPU 缓冲
+        this.syncGpu();
+        this.render();
+      },
       onViewStateChange: ({ viewState }) => {
         this.camera.absorb(viewState as Record<string, unknown>);
         this.cb.onViewChange(this.camera.viewState);
@@ -179,7 +320,7 @@ export class Scene {
       const rank = picks[0]?.index;
       if (typeof rank === "number" && rank >= 0) this.flyTo(rank);
     });
-    this.recolor();
+    this.render();
   }
 
   posOf(rank: number): [number, number, number] | null {
@@ -194,97 +335,74 @@ export class Scene {
     return this.geo.sparse.get(rank) ?? null;
   }
 
+  /** 可见性(与 shader 判定逐条对齐):纯函数,无缓存数组。 */
   isVisible(rank: number): boolean {
-    return (this.visible[rank] ?? 0) > 0;
+    const f = state.filters;
+    const flags = this.geo.flags[rank] ?? 0;
+    if ((flags & 1) !== 0 && !f.nsfw) return false;
+    const yearOn = f.yearMin > 0 || f.yearMax < 9999;
+    if (yearOn && etype(this.geo.key[rank] ?? 0) === 1) {
+      const y = this.geo.year[rank] ?? 0;
+      if (y > 0 && (y < f.yearMin || y > f.yearMax)) return false;
+    }
+    return true;
   }
 
-  /** 全量重着色 + 可见性掩码:模式/过滤/聚光一次遍历完成。 */
+  /** 过滤/聚光/图层变化:现在只是 uniform 更新 + 边可见集重建。 */
   recolor(): void {
-    const { geo, colors, visible } = this;
-    const f = state.filters;
-    const inWorkingSet = new Set<number>(state.neighbors);
-    if (state.selection !== null) inWorkingSet.add(state.selection);
-    const spotlight = state.selection !== null;
-    const yearFiltered = f.yearMin > 0 || f.yearMax < 9999;
     if (state.selection !== this.lastSelection) {
       this.lastSelection = state.selection;
       this.startWorkingSetAnim();
     }
-    for (let i = 0; i < geo.loaded; i++) {
-      const flags = geo.flags[i] ?? 0;
-      const media = (flags >> 2) & 7;
-      const isolated = (flags & 2) !== 0;
-      const nsfw = (flags & 1) !== 0;
-      const t = etype(geo.key[i] ?? 0);
-      const year = geo.year[i] ?? 0;
-      // 可见性:NSFW 关则彻底消失(不可拾取);年份过滤只滤作品
-      let vis = 1;
-      if (nsfw && !f.nsfw) vis = 0;
-      else if (
-        yearFiltered &&
-        t === 1 &&
-        year > 0 &&
-        (year < f.yearMin || year > f.yearMax)
-      )
-        vis = 0;
-      visible[i] = vis;
-      let [r, g, b] = TYPE_COLORS[t] ?? [128, 128, 128];
-      if (f.colorBy === "community") {
-        // 社区色内联计算:流式期间 community 逐块就绪,缓存表会算死
-        const c = geo.community[i] ?? 0;
-        if (c !== 0xffff) {
-          const h = ((c * 137.508) % 360) / 60; // 黄金角散列,低饱和
-          const x = 1 - Math.abs((h % 2) - 1);
-          const rgb =
-            h < 1 ? [1, x, 0] : h < 2 ? [x, 1, 0] : h < 3 ? [0, 1, x]
-            : h < 4 ? [0, x, 1] : h < 5 ? [x, 0, 1] : [1, 0, x];
-          r = 90 + (rgb[0] ?? 0) * 140;
-          g = 90 + (rgb[1] ?? 0) * 140;
-          b = 90 + (rgb[2] ?? 0) * 140;
-        }
-      }
-      // 收藏度编码于钳制带内的尺寸序与亮度(§4):160–210 亮度带
-      let a = isolated
-        ? 110
-        : 160 + Math.min(50, (geo.size[i] ?? 0) >> 2);
-      // 人物/角色(以及无年份作品)随时间过滤降暗,不隐藏(§4)
-      if (yearFiltered && (t !== 1 || year === 0)) a = Math.min(a, PERSON_DIM);
-      if (f.media.size && media > 0 && !f.media.has(media)) a = 40;
-      if (spotlight && !inWorkingSet.has(i)) a = Math.min(a, DIM_ALPHA);
-      colors[i * 4] = r;
-      colors[i * 4 + 1] = g;
-      colors[i * 4 + 2] = b;
-      colors[i * 4 + 3] = a;
+    // 标签 data 只在影响其可见性的过滤(NSFW/年份)变化时重建;
+    // 纯选中/图层切换不触发碰撞检测重算
+    const f = state.filters;
+    const k = `${f.nsfw}|${f.yearMin}|${f.yearMax}`;
+    if (k !== this.labelFilterKey) {
+      this.labelFilterKey = k;
+      this.styleVersion++;
     }
-    this.contextVersion++;
-    this.rebuildEdgeSet();
+    this.rebuildEdgeSet(true);
     this.render();
-  }
-
-  /** 正交开关(URL 还原用;`2` 键走 topView)。 */
-  setOrtho(v: boolean): void {
-    if (this.camera.ortho === v) return;
-    this.camera.ortho = v;
-    this.applyCamera(true);
   }
 
   /** 骨架边(权重降序,客户端前缀优先)。 */
   setEdges(edges: Uint32Array): void {
     this.edges = edges;
     this.edgePos = new Float32Array(EDGE_CAP * 6);
-    this.rebuildEdgeSet();
+    this.rebuildEdgeSet(true);
     this.render();
   }
 
   setLabels(l: LabelData): void {
     this.labels = l;
-    this.labelVersion++;
+    this.labelCache = {};
     this.render();
   }
 
   geometryGrew(): void {
-    this.recolor();
-    this.scheduleEdgeRebuild();
+    // 增量填充静态样式属性(每节点一生只算一次)
+    const { geo, styleBuf, yearCommBuf } = this;
+    for (let i = this.styled; i < geo.loaded; i++) {
+      styleBuf[i * 4] = geo.flags[i] ?? 0;
+      styleBuf[i * 4 + 1] = etype(geo.key[i] ?? 0);
+      styleBuf[i * 4 + 2] = geo.size[i] ?? 0;
+      yearCommBuf[i * 2] = geo.year[i] ?? 0;
+      yearCommBuf[i * 2 + 1] = geo.community[i] ?? 0;
+    }
+    this.styled = geo.loaded;
+    this.syncGpu();
+    this.scheduleEdgeRebuild(true); // 新到几何可能解锁新边,不依赖相机动
+    this.render();
+  }
+
+  private syncGpu(): void {
+    if (!this.gpu) return;
+    const m = this.styled;
+    this.gpu.positions.sync(m * 12);
+    this.gpu.radius.sync(m);
+    this.gpu.style.sync(m * 4);
+    this.gpu.yearComm.sync(m * 4);
   }
 
   flyTo(rank: number, zoom?: number): void {
@@ -301,6 +419,13 @@ export class Scene {
   setView(vs: Partial<OrbitState>): void {
     this.camera.viewState = { ...this.camera.viewState, ...vs };
     this.applyCamera();
+  }
+
+  /** 正交开关(URL 还原用;`2` 键走 topView)。 */
+  setOrtho(v: boolean): void {
+    if (this.camera.ortho === v) return;
+    this.camera.ortho = v;
+    this.applyCamera(true);
   }
 
   topView(): void {
@@ -332,38 +457,67 @@ export class Scene {
     this.render();
   }
 
-  // ---- 骨架边可见集:CPU 毫秒级重建(§4;含单端被滤除的边)----
-  private scheduleEdgeRebuild(): void {
+  // ---- 骨架边可见集:CPU 毫秒级重建(实测 824k 边 3.5ms)----
+  private scheduleEdgeRebuild(force = false): void {
+    this.edgeRebuildForce ||= force;
     if (this.edgeRebuildTimer) return;
     this.edgeRebuildTimer = window.setTimeout(() => {
       this.edgeRebuildTimer = 0;
-      this.rebuildEdgeSet();
+      const f = this.edgeRebuildForce;
+      this.edgeRebuildForce = false;
+      this.rebuildEdgeSet(f);
       this.render();
     }, 120);
   }
 
-  private rebuildEdgeSet(): void {
-    const { edges, edgePos, geo, visible } = this;
+  private rebuildEdgeSet(force: boolean): void {
+    const { edges, edgePos, geo } = this;
     if (!edges || !edgePos) return;
-    const zoomRel = this.camera.viewState.zoom - this.camera.fitZoom;
+    const vs = this.camera.viewState;
+    const zoomRel = vs.zoom - this.camera.fitZoom;
     const wasOn = this.edgeCount > 0;
     if (zoomRel < EDGE_ZOOM) {
       this.edgeCount = 0;
       this.edgeData = null;
+      this.edgeCamKey = "";
       return;
     }
-    // 视锥近似:相机目标周围一个随 zoom 收缩的球;端点任一入球即取
-    const [tx, ty, tz] = this.camera.viewState.target;
+    // 相机静止(量化位姿相同)且非强制时跳过:悬停等高频 render 不重扫
+    const camKey = `${vs.target.map((v) => v.toFixed(1)).join()},${vs.zoom.toFixed(2)}`;
+    if (!force && camKey === this.edgeCamKey) return;
+    this.edgeCamKey = camKey;
+    const f = state.filters;
+    const yearOn = f.yearMin > 0 || f.yearMax < 9999;
+    const [tx, ty, tz] = vs.target;
     const radius = (this.worldSize / Math.pow(2, zoomRel)) * 1.5;
     const r2 = radius * radius;
     const pos = geo.positions;
+    const { flags, year, key } = geo;
     let cnt = 0;
     const n = edges.length / 2;
     for (let e = 0; e < n && cnt < EDGE_CAP; e++) {
       const a = edges[e * 2] ?? 0;
       const b = edges[e * 2 + 1] ?? 0;
       if (a >= geo.loaded || b >= geo.loaded) continue;
-      if (!visible[a] || !visible[b]) continue;
+      // 可见性内联(与 isVisible 同判定):单端被滤除的边不进可见集
+      if (!f.nsfw && (((flags[a] ?? 0) | (flags[b] ?? 0)) & 1) !== 0)
+        continue;
+      if (yearOn) {
+        const ya = year[a] ?? 0;
+        if (
+          (key[a] ?? 0) >>> 24 === 1 &&
+          ya > 0 &&
+          (ya < f.yearMin || ya > f.yearMax)
+        )
+          continue;
+        const yb = year[b] ?? 0;
+        if (
+          (key[b] ?? 0) >>> 24 === 1 &&
+          yb > 0 &&
+          (yb < f.yearMin || yb > f.yearMax)
+        )
+          continue;
+      }
       const ax = pos[a * 3] ?? 0;
       const ay = pos[a * 3 + 1] ?? 0;
       const az = pos[a * 3 + 2] ?? 0;
@@ -385,12 +539,13 @@ export class Scene {
       cnt++;
     }
     this.edgeCount = cnt;
-    // data 对象只在重建时更换:render 每帧复用同一引用,防重复上传
+    // 上传量 ∝ 可见数(subarray),data 引用只在重建时更换
+    const view = edgePos.subarray(0, cnt * 6);
     this.edgeData = {
       length: cnt,
       attributes: {
-        getSourcePosition: { value: edgePos, size: 3, stride: 24 },
-        getTargetPosition: { value: edgePos, size: 3, stride: 24, offset: 12 },
+        getSourcePosition: { value: view, size: 3, stride: 24 },
+        getTargetPosition: { value: view, size: 3, stride: 24, offset: 12 },
       },
     };
     if (!wasOn && cnt > 0) this.startEdgeFade();
@@ -457,10 +612,8 @@ export class Scene {
     const ranks = [sel, ...shown.map((s) => s.rank)];
     const pos = new Float32Array(ranks.length * 3);
     const col = new Uint8Array(ranks.length * 4);
-    const lineCol = new Uint8Array(ranks.length * 4);
     pos.set(selPos, 0);
     col.set([255, 255, 255, 255], 0);
-    lineCol.set([255, 255, 255, 255], 0);
     shown.forEach((s, i) => {
       pos.set(s.pos, (i + 1) * 3);
       const [r, g, b] = TYPE_COLORS[etype(this.geo.key[s.rank] ?? 0)] ?? [
@@ -474,7 +627,6 @@ export class Scene {
             Math.min(1, (t - i * CASCADE_STEP_MS) / CASCADE_FADE_MS),
           );
       col.set([r, g, b, Math.round(255 * k)], (i + 1) * 4);
-      lineCol.set([r, g, b, Math.round(255 * k)], (i + 1) * 4);
     });
     const linePos = new Float32Array(shown.length * 6);
     const lineAlpha = new Uint8Array(shown.length * 4);
@@ -614,24 +766,90 @@ export class Scene {
     return layers;
   }
 
+  /** 语境层数据:属性引用恒定(GPU Buffer 或 CPU 数组),
+   * 对象只在填充进度变化时更换 → deck 不做无谓重传。
+   * 长度用 styled 而非 geo.loaded:loaded 在流回调里实时推进,
+   * 而样式属性/GPU 同步以 250ms 节流跟进,超前的区间会以
+   * 原点零样式"幻影点"闪现。 */
   private buildContextData(): ContextData {
-    if (this.builtVersion !== this.contextVersion || !this.contextData) {
+    if (this.contextLength !== this.styled || !this.contextData) {
+      const g = this.gpu;
       this.contextData = {
-        length: this.geo.loaded,
-        attributes: {
-          getPosition: { value: this.geo.positions, size: 3 },
-          getFillColor: { value: this.colors, size: 4 },
-          getRadius: { value: this.geo.size, size: 1 },
-          getFilterValue: { value: this.visible, size: 1 },
-        },
+        length: this.styled,
+        attributes:
+          g?.positions.handle && g.radius.handle && g.style.handle &&
+          g.yearComm.handle
+            ? {
+                // 外部 buffer 必须显式 stride:deck 只在 {value}
+                // 分支按数组重算布局,{buffer} 分支沿用属性默认类型
+                // (instancePositions 默认 float64 → 步距 24 会错读)
+                getPosition: {
+                  buffer: g.positions.handle,
+                  size: 3,
+                  type: "float32",
+                  stride: 12,
+                },
+                getRadius: {
+                  buffer: g.radius.handle,
+                  size: 1,
+                  type: "uint8",
+                  stride: 1,
+                },
+                getStyle: {
+                  buffer: g.style.handle,
+                  size: 4,
+                  type: "uint8",
+                  stride: 4,
+                },
+                getYearComm: {
+                  buffer: g.yearComm.handle,
+                  size: 2,
+                  type: "uint16",
+                  stride: 4,
+                },
+              }
+            : {
+                getPosition: { value: this.geo.positions, size: 3 },
+                getRadius: {
+                  value: this.geo.size,
+                  size: 1,
+                  type: "uint8",
+                },
+                getStyle: {
+                  value: this.styleBuf,
+                  size: 4,
+                  type: "uint8",
+                },
+                getYearComm: {
+                  value: this.yearCommBuf,
+                  size: 2,
+                  type: "uint16",
+                },
+              },
       };
-      this.builtVersion = this.contextVersion;
+      this.contextLength = this.styled;
     }
     return this.contextData;
   }
 
+  private atlasUniforms(): AtlasUniforms {
+    const f = state.filters;
+    let mask = 0;
+    for (const m of f.media) mask |= 1 << m;
+    return {
+      cameraPos: this.cameraPosition(),
+      fogStart: this.cameraDistance() * 1.05,
+      fogFalloff: 1.6 / Math.max(this.worldSize, 1),
+      yearMin: f.yearMin,
+      yearMax: f.yearMax,
+      mediaMask: mask,
+      nsfwOn: f.nsfw ? 1 : 0,
+      spotlight: state.selection !== null ? 1 : 0,
+      colorBy: f.colorBy === "community" ? 1 : 0,
+    };
+  }
+
   render(): void {
-    const cameraPos = this.cameraPosition();
     const layers: unknown[] = [
       new ScatterplotLayer({
         id: "context",
@@ -644,15 +862,9 @@ export class Scene {
         pickable: true,
         autoHighlight: true,
         highlightColor: [255, 255, 255, 120],
-        extensions: [
-          new DataFilterExtension({ filterSize: 1 }),
-          new FogExtension(),
-        ],
-        filterRange: [0.5, 2],
-        // 雾参数(仅语境层):起点 = 目标后方,衰减随世界尺度标定
-        fogCamera: cameraPos,
-        fogStart: this.cameraDistance() * 1.05,
-        fogFalloff: 1.6 / Math.max(this.worldSize, 1),
+        getFillColor: [255, 255, 255, 255], // 实际颜色由 atlas 扩展推导
+        extensions: [new NodeStyleExtension()],
+        atlas: this.atlasUniforms(),
         onHover: (info: { index: number; x: number; y: number }) => {
           this.cb.onHover(
             info.index >= 0 ? info.index : null,
@@ -684,8 +896,9 @@ export class Scene {
           this.labels,
           this.geo,
           this.camera.viewState.zoom - this.camera.fitZoom,
-          this.visible,
-          this.labelVersion + this.contextVersion,
+          (rank) => this.isVisible(rank),
+          this.styleVersion,
+          this.labelCache,
         ),
       );
     layers.push(...this.workingSetLayers());
