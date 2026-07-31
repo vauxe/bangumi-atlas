@@ -75,7 +75,12 @@ html, body { margin: 0; height: 100%; background: var(--surface);
   appearance: none; -webkit-appearance: none; }
 .chip:hover { background: #5fd6cc; }
 .chip.on { background: var(--pink); color: #3a0b22; }
-.more, .note, .ep-date { color: var(--ink-2); font-size: 12px; }
+.note, .ep-date { color: var(--ink-2); font-size: 12px; }
+/* "还有 N 个"可点:静默态初音绿,与交互元素配色语义一致 */
+button.more { background: none; border: 0; padding: 4px 6px;
+  color: var(--miku); font-size: 12px; font-family: inherit;
+  cursor: pointer; appearance: none; -webkit-appearance: none; }
+button.more:hover { text-decoration: underline; }
 .ep { font-size: 13px; padding: 2px 0; }
 .ext { display: inline-block; margin-top: 16px; color: var(--miku); }
 .loading { color: var(--ink-2); }
