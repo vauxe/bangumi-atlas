@@ -922,14 +922,27 @@ export class Scene {
     this.deck.setProps({ layers: layers as never[] });
   }
 
-  /** OrbitView 相机世界坐标(雾用):目标点 + 距离沿视线反推。 */
+  /** 相机世界坐标(雾用):优先取 deck 视口的真实值——手推公式
+   * 曾把轨道角 X 分量符号写反,旋转后雾压暗的是朝向观者的半边。 */
   private cameraPosition(): [number, number, number] {
+    try {
+      // deck 初始化完成前 getViewports 会断言失败(构造期首帧)
+      const vp = this.deck.getViewports()[0] as
+        | { cameraPosition?: number[] }
+        | undefined;
+      const cp = vp?.cameraPosition;
+      if (cp && cp.length === 3)
+        return [cp[0] ?? 0, cp[1] ?? 0, cp[2] ?? 0];
+    } catch {
+      // 落入后备公式
+    }
+    // 首帧视口未就绪时的后备(已对 deck OrbitViewport 逐例核准)
     const { target, rotationX, rotationOrbit } = this.camera.viewState;
     const d = this.cameraDistance();
     const rx = (rotationX * Math.PI) / 180;
     const ro = (rotationOrbit * Math.PI) / 180;
     return [
-      target[0] + d * Math.cos(rx) * Math.sin(ro),
+      target[0] - d * Math.cos(rx) * Math.sin(ro),
       target[1] + d * Math.sin(rx),
       target[2] + d * Math.cos(rx) * Math.cos(ro),
     ];
