@@ -7,7 +7,6 @@ db/
 .ruff_cache/
 .DS_Store
 site/data/
-site/n/
 data/layout/
 web/node_modules/
 site/app.js
