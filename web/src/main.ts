@@ -4,7 +4,9 @@
  * replaceState;popstate 完整还原(每个操作可逆)。 */
 
 import { Drawer } from "./drawer";
+import { findCommon, findPath } from "./graph";
 import { esc } from "./html";
+import { Results } from "./results";
 import {
   loadAdj,
   loadCharmap,
@@ -48,6 +50,13 @@ async function boot(): Promise<void> {
     names: () => names,
     manifest,
     walk: (rank) => void select(rank, "fly"),
+    arm: (kind, from) => {
+      pendingLink = { kind, from };
+      hud.textContent =
+        kind === "common"
+          ? "已锁定起点——点击或搜索另一个节点,查看共同关联"
+          : "已锁定起点——点击或搜索另一个节点,查找最短路径";
+    },
   });
 
   const tooltip = $("#tooltip");
@@ -166,6 +175,54 @@ async function boot(): Promise<void> {
     return null;
   };
   let pendingKey: number | null = null; // 深链 n= 未覆盖时的挂起落点
+  let pendingLink: { kind: "common" | "path"; from: number } | null = null;
+
+  /** 连接查询:第二个节点选定后计算并呈现(§4 扩展)。 */
+  async function handleLink(
+    link: { kind: "common" | "path"; from: number },
+    bRank: number,
+  ): Promise<void> {
+    if (link.from >= geo.loaded || bRank >= geo.loaded) {
+      hud.textContent = "节点数据尚未加载完成,稍后再试";
+      return;
+    }
+    hud.textContent =
+      link.kind === "common" ? "计算共同关联…" : "搜索路径…";
+    if (link.kind === "common") {
+      const { items, direct } = await findCommon(
+        link.from,
+        bRank,
+        geo,
+        manifest.buckets,
+      );
+      state.selection = bRank;
+      state.compareWith = link.from;
+      state.path = [];
+      state.pathLabels = [];
+      const top = items.slice(0, 49);
+      state.neighbors = [link.from, ...top.map((i) => i.rank)];
+      state.neighborLabels = [-1, ...top.map((i) => i.lb)];
+      drawer.showCompare(link.from, bRank, items, direct);
+    } else {
+      const res = await findPath(link.from, bRank, geo, manifest.buckets);
+      if (!res) {
+        hud.textContent = "6 跳内未找到路径(受热度宽度上限约束)";
+        await select(bRank, "fly");
+        return;
+      }
+      state.selection = bRank;
+      state.compareWith = null;
+      state.path = res.ranks;
+      state.pathLabels = res.labels;
+      state.neighbors = res.ranks.filter((r) => r !== bRank);
+      state.neighborLabels = state.neighbors.map(() => -1);
+      drawer.showPath(res);
+      scene.flyTo(bRank);
+    }
+    notify();
+    pushUrl();
+    hud.textContent = "";
+  }
 
   /** 相机语义:fly = 飞行聚焦(搜索/骰子/行走);center = 枢轴
    * 滑移到节点、保持缩放(单击选中——此后滚轮推向它、右键绕它转);
@@ -176,6 +233,16 @@ async function boot(): Promise<void> {
     push = true,
   ): Promise<void> {
     stopAutoRotate();
+    const link = pendingLink;
+    pendingLink = null;
+    if (link && link.from !== rank) {
+      await handleLink(link, rank);
+      return;
+    }
+    // 普通选中即退出对比/路径视图
+    state.compareWith = null;
+    state.path = [];
+    state.pathLabels = [];
     state.selection = rank;
     // 落点未流式覆盖:一次 Range 点查同时解析坐标与 key(§6)
     let key = geo.key[rank] ?? 0;
@@ -204,12 +271,27 @@ async function boot(): Promise<void> {
     state.selection = null;
     state.neighbors = [];
     state.neighborLabels = [];
+    state.compareWith = null;
+    state.path = [];
+    state.pathLabels = [];
+    pendingLink = null;
     drawer.hide();
     notify();
     if (push) pushUrl();
   }
 
   subscribe(() => scene.recolor());
+
+  // ---- 结果面板:过滤谓词 + 枚举 = 完整查询 ----
+  const results = new Results($("#results"), {
+    geo,
+    names: () => names,
+    visible: (r) => scene.isVisible(r),
+    pick: (rank) => void select(rank, "fly"),
+  });
+  subscribe(() => results.refresh());
+  void namesDone.then(() => results.refresh()).catch(() => {});
+  void geoDone.then(() => results.refresh());
 
   // ---- URL 恢复(深链)与 popstate(浏览器后退 = 回上一视图)----
   const applyUrl = async (initial: boolean): Promise<void> => {
