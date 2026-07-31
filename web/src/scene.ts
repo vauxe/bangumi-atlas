@@ -44,6 +44,9 @@ const ATLAS_UNIFORM_BLOCK = `uniform atlasUniforms {
   float yearMin;
   float yearMax;
   float mediaMask;
+  float scoreMin;
+  float tagLo;
+  float tagHi;
   float spotlight;
   float colorBy;
   float zoomRel;
@@ -60,6 +63,9 @@ const atlasShaderModule = {
     yearMin: "f32",
     yearMax: "f32",
     mediaMask: "f32",
+    scoreMin: "f32",
+    tagLo: "f32",
+    tagHi: "f32",
     spotlight: "f32",
     colorBy: "f32",
     zoomRel: "f32",
@@ -73,6 +79,9 @@ export interface AtlasUniforms {
   yearMin: number;
   yearMax: number;
   mediaMask: number;
+  scoreMin: number;
+  tagLo: number;
+  tagHi: number;
   spotlight: number;
   colorBy: number;
   zoomRel: number;
@@ -88,12 +97,15 @@ class NodeStyleExtension extends LayerExtension {
         "vs:#decl": `
 in vec4 instanceStyle;
 in vec2 instanceYearComm;
+in vec2 instanceTags;
 out vec4 atlas_style;
 out vec2 atlas_yc;
+out vec2 atlas_tags;
 out float atlas_fogDepth;`,
         "vs:#main-end": `
 atlas_style = instanceStyle;
 atlas_yc = instanceYearComm;
+atlas_tags = instanceTags;
 atlas_fogDepth = distance(geometry.worldPosition.xyz, atlas.cameraPos);`,
         // 孤立外壳的缩小随缩放消退:远景压到亚像素防糊住本体(§7),
         // 近景恢复原尺寸——固定 0.35× 曾让贴近的节点时隐时现
@@ -104,6 +116,7 @@ if (mod(floor(instanceStyle.x / 2.0), 2.0) >= 1.0)
         "fs:#decl": `
 in vec4 atlas_style;
 in vec2 atlas_yc;
+in vec2 atlas_tags;
 in float atlas_fogDepth;`,
         // 颜色/亮度/可见性推导(与设计 §4/§5 一一对应;
         // discard 使被滤除节点同时移出拾取与 autoHighlight)
@@ -118,8 +131,21 @@ in float atlas_fogDepth;`,
   int a_media = int(floor(f_flags / 4.0));
   bool isSubject = f_etype < 1.5; // 档位比较,规避浮点等值
   bool yearOn = atlas.yearMin > 0.5 || atlas.yearMax < 9998.5;
-  if (yearOn && isSubject && f_year > 0.5 &&
-      (f_year < atlas.yearMin || f_year > atlas.yearMax)) discard;
+  bool scoreOn = atlas.scoreMin > 0.5;
+  bool tagsOn = atlas.tagLo > 0.5 || atlas.tagHi > 0.5;
+  if (isSubject) {
+    if (yearOn && f_year > 0.5 &&
+        (f_year < atlas.yearMin || f_year > atlas.yearMax)) discard;
+    // 评分过滤:无评分(0)在过滤激活时一并隐藏
+    if (scoreOn && atlas_style.w < atlas.scoreMin) discard;
+    if (tagsOn) { // AND 语义:须含全部所选标签(u32 拆两半 u16)
+      int tlo = int(atlas_tags.x + 0.5);
+      int thi = int(atlas_tags.y + 0.5);
+      int slo = int(atlas.tagLo + 0.5);
+      int shi = int(atlas.tagHi + 0.5);
+      if ((tlo & slo) != slo || (thi & shi) != shi) discard;
+    }
+  }
   vec3 rgb = isSubject ? vec3(61.0, 142.0, 222.0)
            : f_etype < 2.5 ? vec3(229.0, 106.0, 64.0)
            : vec3(39.0, 171.0, 124.0);
@@ -141,7 +167,10 @@ in float atlas_fogDepth;`,
   float a = a_iso
     ? mix(36.0, 150.0, isoT)
     : 160.0 + min(50.0, floor(f_size / 4.0));
-  if (yearOn && (!isSubject || f_year < 0.5)) a = min(a, 90.0);
+  // 作品属性过滤激活时,人物/角色(与无年份作品)随之降暗不隐藏
+  bool subjFilterOn = yearOn || scoreOn || tagsOn;
+  if ((subjFilterOn && !isSubject) ||
+      (yearOn && isSubject && f_year < 0.5)) a = min(a, 90.0);
   int mediaMask = int(atlas.mediaMask + 0.5);
   if (mediaMask != 0 && a_media > 0 &&
       (mediaMask & (1 << a_media)) == 0) a = 40.0;
@@ -168,6 +197,8 @@ in float atlas_fogDepth;`,
         type: "uint16",
         accessor: "getYearComm",
       },
+      // u32 标签位图按两半 u16 直灌(f32 顶点属性 >2^24 会丢位)
+      instanceTags: { size: 2, type: "uint16", accessor: "getTags" },
     });
   }
 
@@ -269,6 +300,7 @@ export class Scene {
     radius: GrowingBuffer;
     style: GrowingBuffer;
     yearComm: GrowingBuffer;
+    tags: GrowingBuffer;
   } | null = null;
 
   private contextData: ContextData | null = null;
@@ -321,6 +353,10 @@ export class Scene {
           yearComm: new GrowingBuffer(
             device,
             new Uint8Array(this.yearCommBuf.buffer),
+          ),
+          tags: new GrowingBuffer(
+            device,
+            new Uint8Array(this.geo.tags.buffer),
           ),
         };
         this.contextLength = -1; // 重建 contextData,切换到 GPU 缓冲
@@ -376,10 +412,18 @@ export class Scene {
   /** 可见性(与 shader 判定逐条对齐):纯函数,无缓存数组。 */
   isVisible(rank: number): boolean {
     const f = state.filters;
+    if (etype(this.geo.key[rank] ?? 0) !== 1) return true;
     const yearOn = f.yearMin > 0 || f.yearMax < 9999;
-    if (yearOn && etype(this.geo.key[rank] ?? 0) === 1) {
+    if (yearOn) {
       const y = this.geo.year[rank] ?? 0;
       if (y > 0 && (y < f.yearMin || y > f.yearMax)) return false;
+    }
+    if (f.scoreMin > 0 && (this.geo.score[rank] ?? 0) < f.scoreMin)
+      return false;
+    if (f.tags.size) {
+      let sel = 0;
+      for (const b of f.tags) sel = (sel | (1 << b)) >>> 0;
+      if (((this.geo.tags[rank] ?? 0) & sel) >>> 0 !== sel) return false;
     }
     return true;
   }
@@ -390,10 +434,10 @@ export class Scene {
       this.lastSelection = state.selection;
       this.startWorkingSetAnim();
     }
-    // 标签 data 只在影响其可见性的过滤(年份)变化时重建;
+    // 标签 data 只在影响其可见性的过滤变化时重建;
     // 纯选中/图层切换不触发碰撞检测重算
     const f = state.filters;
-    const k = `${f.yearMin}|${f.yearMax}`;
+    const k = `${f.yearMin}|${f.yearMax}|${f.scoreMin}|${[...f.tags].join()}`;
     if (k !== this.labelFilterKey) {
       this.labelFilterKey = k;
       this.styleVersion++;
@@ -423,6 +467,7 @@ export class Scene {
       styleBuf[i * 4] = geo.flags[i] ?? 0;
       styleBuf[i * 4 + 1] = etype(geo.key[i] ?? 0);
       styleBuf[i * 4 + 2] = geo.size[i] ?? 0;
+      styleBuf[i * 4 + 3] = geo.score[i] ?? 0; // 评分×10,属性过滤用
       yearCommBuf[i * 2] = geo.year[i] ?? 0;
       yearCommBuf[i * 2 + 1] = geo.community[i] ?? 0;
     }
@@ -439,6 +484,7 @@ export class Scene {
     this.gpu.radius.sync(m);
     this.gpu.style.sync(m * 4);
     this.gpu.yearComm.sync(m * 4);
+    this.gpu.tags.sync(m * 4);
   }
 
   flyTo(rank: number, zoom?: number): void {
@@ -523,35 +569,38 @@ export class Scene {
     if (!force && camKey === this.edgeCamKey) return;
     this.edgeCamKey = camKey;
     const f = state.filters;
-    const yearOn = f.yearMin > 0 || f.yearMax < 9999;
+    const yMin = f.yearMin;
+    const yMax = f.yearMax;
+    const sMin = f.scoreMin;
+    let sel = 0;
+    for (const bIdx of f.tags) sel = (sel | (1 << bIdx)) >>> 0;
+    const yearOn = yMin > 0 || yMax < 9999;
+    const subjFilterOn = yearOn || sMin > 0 || sel !== 0;
+    const { year, key, score, tags } = geo;
+    // 与 isVisible 同判定,掩码预计算后内联(164 万次调用的热路径)
+    const passes = (i: number): boolean => {
+      if ((key[i] ?? 0) >>> 24 !== 1) return true;
+      if (yearOn) {
+        const y = year[i] ?? 0;
+        if (y > 0 && (y < yMin || y > yMax)) return false;
+      }
+      if (sMin > 0 && (score[i] ?? 0) < sMin) return false;
+      if (sel !== 0 && (((tags[i] ?? 0) & sel) >>> 0) !== sel)
+        return false;
+      return true;
+    };
     const [tx, ty, tz] = vs.target;
     const radius = (this.worldSize / Math.pow(2, zoomRel)) * 1.5;
     const r2 = radius * radius;
     const pos = geo.positions;
-    const { flags, year, key } = geo;
     let cnt = 0;
     const n = edges.length / 2;
     for (let e = 0; e < n && cnt < EDGE_CAP; e++) {
       const a = edges[e * 2] ?? 0;
       const b = edges[e * 2 + 1] ?? 0;
       if (a >= geo.loaded || b >= geo.loaded) continue;
-      // 可见性内联(与 isVisible 同判定):单端被滤除的边不进可见集
-      if (yearOn) {
-        const ya = year[a] ?? 0;
-        if (
-          (key[a] ?? 0) >>> 24 === 1 &&
-          ya > 0 &&
-          (ya < f.yearMin || ya > f.yearMax)
-        )
-          continue;
-        const yb = year[b] ?? 0;
-        if (
-          (key[b] ?? 0) >>> 24 === 1 &&
-          yb > 0 &&
-          (yb < f.yearMin || yb > f.yearMax)
-        )
-          continue;
-      }
+      // 单端被滤除的边不进可见集
+      if (subjFilterOn && (!passes(a) || !passes(b))) continue;
       const ax = pos[a * 3] ?? 0;
       const ay = pos[a * 3 + 1] ?? 0;
       const az = pos[a * 3 + 2] ?? 0;
@@ -879,6 +928,12 @@ export class Scene {
                   type: "uint16",
                   stride: 4,
                 },
+                getTags: {
+                  buffer: g.tags.handle,
+                  size: 2,
+                  type: "uint16",
+                  stride: 4,
+                },
               }
             : {
                 getPosition: { value: this.geo.positions, size: 3 },
@@ -897,6 +952,11 @@ export class Scene {
                   size: 2,
                   type: "uint16",
                 },
+                getTags: {
+                  value: new Uint16Array(this.geo.tags.buffer),
+                  size: 2,
+                  type: "uint16",
+                },
               },
       };
       this.contextLength = this.styled;
@@ -908,6 +968,8 @@ export class Scene {
     const f = state.filters;
     let mask = 0;
     for (const m of f.media) mask |= 1 << m;
+    let sel = 0;
+    for (const b of f.tags) sel |= 1 << b;
     return {
       cameraPos: this.cameraPosition(),
       fogStart: this.cameraDistance() * 1.05,
@@ -915,6 +977,9 @@ export class Scene {
       yearMin: f.yearMin,
       yearMax: f.yearMax,
       mediaMask: mask,
+      scoreMin: f.scoreMin,
+      tagLo: sel & 0xffff,
+      tagHi: sel >>> 16,
       spotlight: state.selection !== null ? 1 : 0,
       colorBy: f.colorBy === "community" ? 1 : 0,
       zoomRel: this.camera.viewState.zoom - this.camera.fitZoom,

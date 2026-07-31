@@ -5,6 +5,10 @@ export interface Filters {
   yearMax: number;
   /** 空 = 不过滤;否则仅高亮所选媒介。 */
   media: Set<number>;
+  /** 评分下限 ×10(0 = 不过滤);无评分作品在过滤激活时隐藏。 */
+  scoreMin: number;
+  /** 选中的标签 bit 下标(AND 语义:作品须含全部所选标签)。 */
+  tags: Set<number>;
   colorBy: "type" | "community";
 }
 
@@ -24,6 +28,8 @@ export const state: State = {
     yearMin: 0,
     yearMax: 9999,
     media: new Set(),
+    scoreMin: 0,
+    tags: new Set(),
     colorBy: "type",
   },
 };

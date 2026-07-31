@@ -14,6 +14,8 @@ export interface Manifest {
   /** 时间滑块窗口:非零年份钳制到 [1900, 2035](上游有脏值);
    * 滑块拉满 = 不过滤,窗口外脏年份节点不受影响。 */
   year_range: [number, number];
+  /** top-32 元标签名,下标 = tags.bin 位图的 bit 序。 */
+  tags: string[];
   labels: string[];
   /** 高频首字搜索分片(hex 码点),随首块预取。 */
   hot_shards: string[];
@@ -36,6 +38,10 @@ export interface Geometry {
   /** bit0 nsfw(保留于数据,渲染不使用)、bit1 孤立外壳、
    * bit2-4 媒介(1书籍…6三次元),余位 0。 */
   flags: Uint8Array;
+  /** 评分×10(u8,无评分/非作品 = 0),属性过滤用。 */
+  score: Uint8Array;
+  /** top-32 元标签位图(u32,bit 序 = manifest.tags 下标)。 */
+  tags: Uint32Array;
   /** 已就绪的节点数(流式期间 < n)。 */
   loaded: number;
   /** Range 点查得到的零散坐标(深链/行走落点在流式未覆盖时)。 */
