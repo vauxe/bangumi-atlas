@@ -46,14 +46,6 @@ def load_layout() -> dict[str, np.ndarray]:
     return {c: np.asarray(t.column(c)) for c in t.column_names}
 
 
-def build_rank(lay: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    """Sort by collect desc -> rank order arrays."""
-    order = np.argsort(-lay["collect"], kind="stable")
-    out = {c: v[order] for c, v in lay.items()}
-    out["rank_of_key"] = np.empty(0)  # replaced below
-    return out
-
-
 def quantize(
     coords: np.ndarray,
 ) -> tuple[np.ndarray, list[float], list[float]]:
