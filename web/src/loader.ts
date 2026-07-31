@@ -68,6 +68,8 @@ export function openGeometry(manifest: Manifest): GeometryStream {
     community: new Uint8Array(n * 2),
     size: new Uint8Array(n),
     flags: new Uint8Array(n),
+    score: new Uint8Array(n),
+    tags: new Uint8Array(n * 4),
   };
   const stride: Record<keyof typeof raw, number> = {
     positions: 6,
@@ -76,6 +78,8 @@ export function openGeometry(manifest: Manifest): GeometryStream {
     community: 2,
     size: 1,
     flags: 1,
+    score: 1,
+    tags: 4,
   };
   const progress: Record<string, number> = {};
   const geo: Geometry = {
@@ -85,6 +89,8 @@ export function openGeometry(manifest: Manifest): GeometryStream {
     community: new Uint16Array(raw.community.buffer),
     size: raw.size,
     flags: raw.flags,
+    score: raw.score,
+    tags: new Uint32Array(raw.tags.buffer),
     loaded: 0,
     sparse: new Map(),
   };

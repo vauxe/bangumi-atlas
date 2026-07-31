@@ -79,7 +79,7 @@ async function boot(): Promise<void> {
     );
   };
   const replaceUrl = (): void => {
-    if (applyingHistory || rotating) return; // 自转不是可分享状态
+    if (applyingHistory) return;
     if (replaceTimer) return;
     replaceTimer = window.setTimeout(() => {
       replaceTimer = 0;
@@ -124,7 +124,10 @@ async function boot(): Promise<void> {
       }
       showTooltip(manifest.labels[labelId] ?? "关联", "关系", x, y);
     },
-    onViewChange: () => replaceUrl(),
+    // 自转的相机帧不写 URL(不是可分享状态);过滤器变更不受此限
+    onViewChange: () => {
+      if (!rotating) replaceUrl();
+    },
   });
   // ---- 几何流:场景已就绪,首块回调即渲(§2/§9-1)----
   const geoDone = gstream.start((loaded) => {
@@ -265,6 +268,37 @@ async function boot(): Promise<void> {
   $("#top-toggle").addEventListener("click", () => scene.topView());
 
   // ---- 媒介 chips:即时调暗 ----
+  // ---- 标签过滤 chips(AND 语义)+ 评分下限滑块 ----
+  const tagBox = $("#tag-chips");
+  tagBox.innerHTML = manifest.tags
+    .map(
+      (name, bit) =>
+        `<button class="chip" data-tag="${bit}">${esc(name)}</button>`,
+    )
+    .join("");
+  tagBox.addEventListener("click", (ev) => {
+    const b = (ev.target as HTMLElement).closest("[data-tag]");
+    if (!b) return;
+    const bit = Number(b.getAttribute("data-tag"));
+    if (state.filters.tags.has(bit)) state.filters.tags.delete(bit);
+    else state.filters.tags.add(bit);
+    b.classList.toggle("on");
+    notify();
+    replaceUrl();
+  });
+
+  const sMin = $("#score-min") as HTMLInputElement;
+  const scoreLabel = $("#score-label");
+  const applyScore = (): void => {
+    const v = Number(sMin.value);
+    state.filters.scoreMin = v;
+    scoreLabel.textContent =
+      v > 0 ? `评分 ≥ ${(v / 10).toFixed(1)}` : "评分不限";
+    notify();
+    replaceUrl();
+  };
+  sMin.addEventListener("input", applyScore);
+
   const mediaBox = $("#media-chips");
   mediaBox.innerHTML = Object.entries(MEDIA_NAMES)
     .map(
@@ -324,6 +358,14 @@ async function boot(): Promise<void> {
         "on",
         f.media.has(Number(b.getAttribute("data-media"))),
       );
+    for (const b of tagBox.querySelectorAll("[data-tag]"))
+      b.classList.toggle(
+        "on",
+        f.tags.has(Number(b.getAttribute("data-tag"))),
+      );
+    sMin.value = String(f.scoreMin);
+    scoreLabel.textContent =
+      f.scoreMin > 0 ? `评分 ≥ ${(f.scoreMin / 10).toFixed(1)}` : "评分不限";
     $("#layer-toggle").textContent =
       f.colorBy === "type" ? "社区着色" : "类型着色";
     const full = f.yearMin <= 0 && f.yearMax >= 9999;

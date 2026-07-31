@@ -30,6 +30,8 @@ export function encode(
   if (f.yearMin > 0 || f.yearMax < 9999)
     parts.push(`y=${f.yearMin}-${f.yearMax}`);
   if (f.media.size) parts.push(`m=${[...f.media].join(",")}`);
+  if (f.scoreMin > 0) parts.push(`s=${f.scoreMin}`);
+  if (f.tags.size) parts.push(`t=${[...f.tags].join(",")}`);
   if (f.colorBy !== "type") parts.push(`l=${f.colorBy}`);
   return "#" + parts.join("&");
 }
@@ -67,6 +69,12 @@ export function decode(hash: string): UrlState {
   const m = params.get("m");
   state.filters.media = m
     ? new Set(m.split(",").map(Number))
+    : new Set();
+  const s = params.get("s");
+  state.filters.scoreMin = s && /^\d+$/.test(s) ? Number(s) : 0;
+  const tg = params.get("t");
+  state.filters.tags = tg
+    ? new Set(tg.split(",").map(Number).filter((b) => b >= 0 && b < 32))
     : new Set();
   state.filters.colorBy =
     params.get("l") === "community" ? "community" : "type";

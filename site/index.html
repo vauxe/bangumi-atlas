@@ -103,6 +103,12 @@ button.more:hover { text-decoration: underline; }
   min-height: 44px; }
 #toolbar button { cursor: pointer; }
 #year-row { min-height: 44px; }
+#tag-chips { max-width: 380px; max-height: 108px; overflow-y: auto;
+  flex-wrap: wrap; justify-content: flex-end; }
+#score-row { min-height: 44px; }
+#score-label { font-size: 12px; color: var(--ink-2); min-width: 76px;
+  text-align: right; }
+#score-min { width: 170px; accent-color: var(--pink); }
 #year-label { font-size: 12px; color: var(--ink-2); min-width: 76px;
   text-align: right; }
 #year-slider { position: relative; width: 170px; height: 24px; }
@@ -148,6 +154,11 @@ button.more:hover { text-decoration: underline; }
 <div id="drawer"></div>
 
 <div id="toolbar">
+  <div class="row" id="tag-chips"></div>
+  <div class="row" id="score-row">
+    <span id="score-label">评分不限</span>
+    <input id="score-min" type="range" min="0" max="95" step="5" value="0">
+  </div>
   <div class="row" id="media-chips"></div>
   <div class="row" id="year-row">
     <span id="year-label">全部年代</span>

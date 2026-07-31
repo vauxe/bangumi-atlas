@@ -175,6 +175,7 @@ def load_info() -> dict[int, dict[str, Any]]:
                 for c in ("wish", "done", "doing", "on_hold", "dropped")
             ],
             "tags": sub["meta_tags"][i][:8],  # 截断,计数见下方 log
+            "mt": sub["meta_tags"][i],  # 全量,标签位图用,不进详情分片
             "sum": sub["summary"][i],
         }
     tags_truncated = sum(
@@ -269,6 +270,33 @@ def main() -> None:  # noqa: PLR0915
     assert media_vals.max() < 8, "media 超出 flags bit2-4 容量,契约需扩位"
     flags |= (media_vals.astype(np.uint8)) << 2
     (SITE / "flags.bin").write_bytes(flags.tobytes())
+    # 属性过滤列(§4 扩展):score u8 = 评分×10(无评分/非作品 = 0);
+    # tags u32 = top-32 元标签位图(bit 序 = manifest.tags 下标)
+    score_u8 = np.zeros(n, dtype=np.uint8)
+    for i, k in enumerate(key_r):
+        s = info[int(k)].get("score")
+        if s:
+            score_u8[i] = int(round(float(s) * 10))
+    (SITE / "score.bin").write_bytes(score_u8.tobytes())
+    tag_counts: Counter[str] = Counter()
+    for k in key_r:
+        tag_counts.update(info[int(k)].get("mt") or [])
+    top_tags = [t for t, _ in tag_counts.most_common(32)]
+    tag_bit = {t: i for i, t in enumerate(top_tags)}
+    tag_mask = np.zeros(n, dtype=np.uint32)
+    for i, k in enumerate(key_r):
+        m = 0
+        for tg in info[int(k)].get("mt") or []:
+            b = tag_bit.get(tg)
+            if b is not None:
+                m |= 1 << b
+        tag_mask[i] = m
+    (SITE / "tags.bin").write_bytes(tag_mask.tobytes())
+    log(
+        f"属性过滤列:有评分作品 {int((score_u8 > 0).sum()):,},"
+        f"标签位图 top-{len(top_tags)}(命中 "
+        f"{int((tag_mask > 0).sum()):,} 节点)"
+    )
     for fname, stride in (
         ("positions.bin", 6),
         ("year.bin", 2),
@@ -276,6 +304,8 @@ def main() -> None:  # noqa: PLR0915
         ("community.bin", 2),
         ("size.bin", 1),
         ("flags.bin", 1),
+        ("score.bin", 1),
+        ("tags.bin", 4),
     ):
         reconcile(f"{fname} 字节数", n * stride, (SITE / fname).stat().st_size)
     log("几何 SoA 写出完成")
@@ -516,6 +546,7 @@ def main() -> None:  # noqa: PLR0915
         det: dict[str, Any] = dict(info[ki])
         det.pop("nsfw")
         det.pop("media", None)
+        det.pop("mt", None)  # 全量标签只进位图,详情分片仍是 top-8
         det["r"] = rank
         if ki >> 24 == 1:
             elist = eps_by_subject.get(ki & 0xFFFFFF, [])
@@ -699,6 +730,7 @@ def main() -> None:  # noqa: PLR0915
         "eps_inline": EPS_INLINE,
         "bbox": [lo, hi],
         "year_range": [y_lo, y_hi],
+        "tags": top_tags,
         "labels": label_table,
         "hot_shards": hot_shards,
         "layout": layout_report,
