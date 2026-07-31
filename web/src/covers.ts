@@ -8,7 +8,9 @@ export type CoverSize = "small" | "grid" | "medium";
 type CoverContext = "map" | "chip" | "drawer";
 
 export const COVER_SIZES: Readonly<Record<CoverContext, CoverSize>> = {
-  map: "grid",
+  // WebGL texture uploads require CORS. Bangumi's resized `small` response
+  // provides it across entity types; direct person/character `grid` images do not.
+  map: "small",
   chip: "grid",
   drawer: "small",
 };
