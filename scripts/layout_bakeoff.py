@@ -1,4 +1,4 @@
-"""Layout bake-off on the RELATES_TO subgraph (EXPLORER.md §9-2).
+"""Layout bake-off on the RELATES_TO subgraph (EXPLORER_ARCHITECTURE.md §3).
 
 Candidates: igraph DRL-3D (force family) vs igraph UMAP-3D (embedding
 family). For each: runtime, edge-compactness, community separation, and

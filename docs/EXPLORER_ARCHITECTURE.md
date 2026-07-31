@@ -2,7 +2,7 @@
 
 本文描述 “Bangumi 星图” 的产品边界、运行架构、数据契约和关键设计决策。
 应用已实现，目标平台是配备近五年 GPU 的桌面浏览器。底层数据管道见
-[DESIGN.md](DESIGN.md)。
+[DATA_ARCHITECTURE.md](DATA_ARCHITECTURE.md)。
 
 | 项目 | 当前设计 |
 |---|---|

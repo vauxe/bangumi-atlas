@@ -1,4 +1,4 @@
-"""Production 3D layout for the star atlas (EXPLORER.md §6).
+"""Production 3D layout for the star atlas (EXPLORER_ARCHITECTURE.md §7.2).
 
 Reads map-scope edges from data/parquet/, lays out connected nodes with
 the chosen algorithm (bake-off winner), detects Leiden communities with
@@ -190,7 +190,7 @@ def shell_placement(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    # 默认 = 对决胜者 UMAP(EXPLORER.md §3 裁决);drl 仅留作对照
+    # 默认 = 对决胜者 UMAP(EXPLORER_ARCHITECTURE.md §3);drl 仅留作对照
     ap.add_argument("--algo", choices=["drl", "umap"], default="umap")
     ap.add_argument(
         "--warm-start",

@@ -2,7 +2,8 @@
 
 本文说明如何将 [bangumi/Archive](https://github.com/bangumi/Archive)
 的每周数据快照转换为可查询的 LadybugDB 图数据库。安装和查询方法见
-[README](../README.md)，探索应用架构见 [EXPLORER.md](EXPLORER.md)。
+[README](../README.md)，探索应用架构见
+[EXPLORER_ARCHITECTURE.md](EXPLORER_ARCHITECTURE.md)。
 
 | 项目 | 当前值 |
 |---|---|
