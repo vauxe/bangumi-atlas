@@ -60,6 +60,7 @@ def main() -> None:
             print()
         actual = sha256_of(ZIP_PATH)
         if actual != expected:
+            ZIP_PATH.unlink()  # 坏包不留盘,防下次误判"已就绪"
             sys.exit(f"SHA256 mismatch: expected {expected}, got {actual}")
         print("SHA256 verified")
 
@@ -67,7 +68,15 @@ def main() -> None:
     shutil.rmtree(DUMP_DIR, ignore_errors=True)
     print(f"extracting to {DUMP_DIR}")
     with zipfile.ZipFile(ZIP_PATH) as zf:
+        root = DUMP_DIR.resolve()
+        for m in zf.namelist():  # 路径消毒:拒绝越界成员
+            if not (root / m).resolve().is_relative_to(root):
+                sys.exit(f"zip member escapes extract dir: {m}")
         zf.extractall(DUMP_DIR)
+    # 数据版本落盘,烘焙 manifest 以此为缓存寻址依据
+    (DUMP_DIR / "VERSION").write_text(
+        Path(latest["name"]).stem + "\n"
+    )
     print("done; next: uv run python scripts/build_db.py")
 
 

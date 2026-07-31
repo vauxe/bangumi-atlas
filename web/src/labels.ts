@@ -1,4 +1,7 @@
-/** 标签层:节点标签(碰撞剔除)+ 社区标签(远景),分级淡入。 */
+/** 标签层:节点标签(碰撞剔除)+ 社区标签(远景),分级淡入。
+ * 节点标签随可见性掩码过滤(NSFW/年份过滤不泄漏名字);
+ * SDF 图集由 deck.gl 运行时生成,标签层整体延迟到首帧之后挂载,
+ * 不占首屏(§6 取舍,字符集仍由烘焙期离线给定)。 */
 
 import { CollisionFilterExtension } from "@deck.gl/extensions";
 import { TextLayer } from "@deck.gl/layers";
@@ -10,8 +13,8 @@ export interface LabelData {
   charset: string;
 }
 
-export async function loadLabels(): Promise<LabelData> {
-  const res = await fetch("data/labels.json");
+export async function loadLabels(v: string): Promise<LabelData> {
+  const res = await fetch(`data/labels.json?v=${encodeURIComponent(v)}`);
   return (await res.json()) as LabelData;
 }
 
@@ -19,6 +22,8 @@ export function labelLayers(
   labels: LabelData,
   geo: Geometry,
   zoom: number,
+  visible: Float32Array,
+  version: number,
 ): unknown[] {
   const chars = [...new Set(labels.charset + "0123456789…")].join("");
   const out: unknown[] = [];
@@ -48,16 +53,20 @@ export function labelLayers(
     );
   }
   if (zoom >= 1.2) {
-    // 节点标签:zoom 越深显示越多(按 rank 截断)
+    // 节点标签:zoom 越深显示越多(按 rank 截断);已加载且可见才出
     const cap = Math.min(
       labels.nodes.length,
       Math.floor(60 * Math.pow(4, Math.max(0, zoom - 1))),
     );
+    const shown = labels.nodes
+      .slice(0, cap)
+      .filter((d) => d[0] < geo.loaded && (visible[d[0]] ?? 0) > 0);
     out.push(
       new TextLayer({
         id: "labels-nodes",
-        data: labels.nodes.slice(0, cap),
+        data: shown,
         characterSet: chars,
+        updateTriggers: { getPosition: version, getText: version },
         getPosition: (d: [number, string]) => [
           geo.positions[d[0] * 3] ?? 0,
           geo.positions[d[0] * 3 + 1] ?? 0,

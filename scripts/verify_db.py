@@ -32,6 +32,12 @@ def check(label: str, expected: int, actual: int) -> None:
     )
 
 
+def check_true(label: str, ok: bool) -> None:
+    if not ok:
+        failures.append(label)
+    print(f"  {'ok' if ok else 'MISMATCH':8s} {label}")
+
+
 def ids_of(name: str) -> set[int]:
     return {r["id"] for r in rows(name)}
 
@@ -65,9 +71,18 @@ def main() -> None:
         len(character_ids),
         count("MATCH (n:Character) RETURN count(n)"),
     )
+    # Episode 与 build 同口径:主键去重后计数(上游重复 id 只入库一条)
+    episode_seen: set[int] = set()
+    episode_of_live = 0
+    for r in rows("episode"):
+        if r["id"] in episode_seen:
+            continue
+        episode_seen.add(r["id"])
+        if r["subject_id"] in subject_ids:
+            episode_of_live += 1
     check(
         "Episode",
-        sum(1 for _ in rows("episode")),
+        len(episode_seen),
         count("MATCH (n:Episode) RETURN count(n)"),
     )
 
@@ -89,7 +104,7 @@ def main() -> None:
 
     check(
         "EPISODE_OF",
-        live("episode", "subject_id"),
+        episode_of_live,
         count("MATCH ()-[e:EPISODE_OF]->() RETURN count(e)"),
     )
     check(
@@ -112,27 +127,58 @@ def main() -> None:
         live("person-characters", "person_id", "character_id"),
         count("MATCH ()-[e:VOICED]->() RETURN count(e)"),
     )
+    # person-relations 按 person_type 分池减悬空(build 同口径:
+    # prsn 走 Person 池,crt 走 Character 池,其余类型跳过并警告)
+    rel_live = {"prsn": 0, "crt": 0}
+    rel_skipped = 0
+    for r in rows("person-relations"):
+        kind = r["person_type"]
+        pool = {"prsn": person_ids, "crt": character_ids}.get(kind)
+        if pool is None:
+            rel_skipped += 1
+            continue
+        if r["person_id"] in pool and r["related_person_id"] in pool:
+            rel_live[kind] += 1
+    if rel_skipped:
+        print(
+            f"  WARNING  person-relations: {rel_skipped:,} rows with "
+            f"unhandled person_type (build skips them too)"
+        )
     check(
-        "PERSON_REL + CHARACTER_REL",
-        sum(1 for _ in rows("person-relations")),
-        count("MATCH ()-[e:PERSON_REL]->() RETURN count(e)")
-        + count("MATCH ()-[e:CHARACTER_REL]->() RETURN count(e)"),
+        "PERSON_REL",
+        rel_live["prsn"],
+        count("MATCH ()-[e:PERSON_REL]->() RETURN count(e)"),
+    )
+    check(
+        "CHARACTER_REL",
+        rel_live["crt"],
+        count("MATCH ()-[e:CHARACTER_REL]->() RETURN count(e)"),
     )
 
-    print("[3/3] smoke queries")
-    undecoded = count(
-        "MATCH ()-[r:RELATES_TO]->() WHERE r.relation = '' RETURN count(r)"
-    )
-    print(
-        f"  info     RELATES_TO with empty relation: {undecoded} "
-        f"(baseline 6; growth means stale mappings)"
-    )
+    print("[3/3] decode coverage + smoke queries")
+    # 全部 ★ 解码列的失配量;超基线 = 映射表陈旧,打 WARNING(§3)
+    baselines = {
+        ("RELATES_TO", "relation"): 6,  # 上游已删的历史码
+        ("WORKED_ON", "position_cn"): 0,
+        ("APPEARS_IN", "role_cn"): 0,
+        ("PERSON_REL", "relation"): 0,
+        ("CHARACTER_REL", "relation"): 0,
+    }
+    for (table, col), baseline in baselines.items():
+        undecoded = count(
+            f"MATCH ()-[r:{table}]->() WHERE r.{col} = '' RETURN count(r)"
+        )
+        level = "info" if undecoded <= baseline else "WARNING"
+        print(
+            f"  {level:8s} {table}.{col} undecoded: {undecoded:,} "
+            f"(baseline {baseline}; growth means stale mappings)"
+        )
     collab = count(
         "MATCH (:Person {name:'宮崎駿'})-[:WORKED_ON]->(s:Subject)"
         "<-[:WORKED_ON]-(:Person {name:'久石譲'}) "
         "RETURN count(DISTINCT s.id)"
     )
-    check("宮崎駿 x 久石譲 collaborations > 0", True, collab > 0)
+    check_true("宮崎駿 x 久石譲 collaborations > 0", collab > 0)
 
     conn.close()
     db.close()

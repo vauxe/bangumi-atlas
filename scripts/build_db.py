@@ -178,9 +178,10 @@ _field_drift_warned: set[tuple[str, str]] = set()
 def iter_jsonl(name: str) -> Iterator[dict[str, Any]]:
     expected = EXPECTED_FIELDS[name]
     with open(DUMP / f"{name}.jsonlines", "rb") as f:
-        for i, line in enumerate(f):
+        for line in f:
             r = orjson.loads(line)
-            if i % 500 == 0:
+            # 全行检查(超集判定极廉价):稀有新增字段抽样会漏检
+            if not expected.issuperset(r):
                 for k in r.keys() - expected:
                     if (name, k) not in _field_drift_warned:
                         _field_drift_warned.add((name, k))
@@ -239,7 +240,14 @@ def build_parquet() -> dict[str, int]:
             continue
         subject_type[sid] = stype
         fav = r.get("favorite") or {}
-        plat = (platforms.get(stype) or {}).get(r.get("platform")) or {}
+        # platform 解码:命名空间整体缺失(音乐 type 3)是上游事实,
+        # 不算失配;命名空间存在但码查不到才计入 unknown_codes
+        plat_ns = platforms.get(stype)
+        plat = (plat_ns or {}).get(r.get("platform")) or {}
+        if plat_ns is not None and r.get("platform") and not plat:
+            unknown_codes[("Subject.platform", stype, r["platform"])] += 1
+        if stype not in SUBJECT_TYPES:
+            unknown_codes[("Subject.type_name", stype, stype)] += 1
         cols["id"].append(sid)
         cols["type"].append(stype)
         cols["type_name"].append(SUBJECT_TYPES.get(stype, str(stype)))
@@ -540,12 +548,18 @@ def build_parquet() -> dict[str, int]:
         appears_in_rows(),
     )
 
+    # subject_id 是边属性而非端点,悬空不过滤但必须显式计数(§3 纪律)
+    voiced_dangling_subject = 0
+
     def voiced_rows() -> Iterator[tuple[Any, ...] | None]:
+        nonlocal voiced_dangling_subject
         for r in iter_jsonl("person-characters"):
             pid, cid = r["person_id"], r["character_id"]
             if pid not in person_ids or cid not in character_ids:
                 yield None
                 continue
+            if r["subject_id"] not in subject_type:
+                voiced_dangling_subject += 1
             yield (
                 pid,
                 cid,
@@ -563,6 +577,11 @@ def build_parquet() -> dict[str, int]:
         ],
         voiced_rows(),
     )
+    if voiced_dangling_subject:
+        print(
+            f"  VOICED: {voiced_dangling_subject:,} rows carry a dangling "
+            f"subject_id attribute (kept as-is, edge endpoints are valid)"
+        )
 
     def person_rel_rows(
         kind: str, ids: set[int]
@@ -579,9 +598,8 @@ def build_parquet() -> dict[str, int]:
             ) or {}
             name = rel.get("cn") or ""
             if not name:
-                unknown_codes[
-                    (f"{kind.upper()}_REL", kind, r["relation_type"])
-                ] += 1
+                table = "PERSON_REL" if kind == "prsn" else "CHARACTER_REL"
+                unknown_codes[(table, kind, r["relation_type"])] += 1
             yield (
                 src,
                 dst,
@@ -658,11 +676,13 @@ COPIES = [
 def build_db() -> None:
     import ladybug as lb
 
-    if DB_PATH.exists():
-        if DB_PATH.is_dir():
-            shutil.rmtree(DB_PATH)
-        else:
-            DB_PATH.unlink()
+    # 删旧库连同 sidecar(.wal 等):异常退出的残留会污染新库
+    if DB_PATH.parent.exists():
+        for p in DB_PATH.parent.glob(f"{DB_PATH.name}*"):
+            if p.is_dir():
+                shutil.rmtree(p)
+            else:
+                p.unlink()
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     db = lb.Database(str(DB_PATH))
     conn = lb.Connection(db)
@@ -719,14 +739,45 @@ if __name__ == "__main__":
     t0 = time.time()
     if not cli.skip_parquet:
         if cli.offline:
-            print("[1/3] mappings: --offline, using local snapshot")
+            missing = [
+                f"{name}.yml"
+                for name in MAPPING_FILES
+                if not (MAPPINGS / f"{name}.yml").exists()
+            ]
+            if missing:
+                sys.exit(
+                    f"--offline 需要本地映射快照,缺失:{missing};"
+                    f"先联网跑一次(不带 --offline)生成 data/mappings/"
+                )
+            print("[阶段 0] mappings: --offline, using local snapshot")
         else:
-            print("[1/3] refresh enum mappings from bangumi/common")
+            print("[阶段 0] refresh enum mappings from bangumi/common")
             fetch_mappings()
-        print("[2/3] jsonlines -> parquet")
+        print("[阶段 1] jsonlines -> parquet")
         for name, n in build_parquet().items():
             print(f"  {name}: {n:,} rows")
         report_unknown_codes()
-    print("[3/3] parquet -> ladybug db")
+        # parquet 记录来源 dump 版本,供 --skip-parquet 护栏比对
+        dump_ver = DUMP / "VERSION"
+        if dump_ver.exists():
+            (PARQUET / "VERSION").write_text(dump_ver.read_text())
+    else:
+        # 护栏:--skip-parquet 复用旧 parquet,版本与当前 dump 不一致
+        # 会建出口径漂移的库
+        dump_ver = DUMP / "VERSION"
+        pq_ver = PARQUET / "VERSION"
+        if dump_ver.exists() and pq_ver.exists():
+            if dump_ver.read_text() != pq_ver.read_text():
+                sys.exit(
+                    f"--skip-parquet 版本不匹配:dump="
+                    f"{dump_ver.read_text().strip()} vs parquet="
+                    f"{pq_ver.read_text().strip()};去掉 --skip-parquet 重建"
+                )
+        else:
+            print(
+                "  WARNING: 缺 VERSION 标记,无法核对 parquet 与 dump "
+                "是否同版本(继续,风险自担)"
+            )
+    print("[阶段 2] parquet -> ladybug db")
     build_db()
     print(f"done in {time.time() - t0:.0f}s -> {DB_PATH}")

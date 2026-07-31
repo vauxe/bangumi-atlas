@@ -32,11 +32,15 @@ character 21.7万(角色)、episode 167.6万(分集,含 subject_id 外键)。
 [bangumi/common](https://github.com/bangumi/common);`infobox` 是未解析的
 wiki 源码,原样入库。
 
-实测的坑:悬空引用(episode 1.5万、其余数千)指向已删除条目,无法建边;
-`episode.sort` 有 7 条天文数字脏值(源站列 float、无校验),且集数含小数,
-列用浮点;官方文档有遗漏——`person-characters` 的 `type` 字段未记载,
-`subject-characters` 的 type 除 1/2/3(主角/配角/客串)外还有
-4/5/6(闲角/旁白/声库,经公开 API 实测确认)。
+实测的坑:悬空引用指向已删除条目,无法建边(episode 1.5万、
+subject-relations 7,252、subject-persons 7,860、subject-characters
+834;person-characters 与 person-relations 当前为 0,但对账仍按
+"源行数 − 悬空"独立重算,防上游变化);`episode.sort` 有 7 条
+天文数字脏值(源站列 float、无校验),且集数含小数,列用浮点;
+音乐类条目(type 3)上游无 platform 命名空间,platform 恒为空
+(实测 9.9 万条,非解码失配);官方文档有遗漏——`person-characters`
+的 `type` 字段未记载,`subject-characters` 的 type 除 1/2/3
+(主角/配角/客串)外还有 4/5/6(闲角/旁白/声库,经公开 API 实测确认)。
 
 ## 2. 图模型
 
@@ -61,7 +65,7 @@ graph LR
 | `WORKED_ON` | Person→Subject | subject-persons | position、★position_cn(207 种:原画/作曲/出版社…)、appear_eps |
 | `VOICED` | Person→Character | person-characters | subject_id、type、summary |
 | `APPEARS_IN` | Character→Subject | subject-characters | type、★role_cn(6 种:主角/配角/客串/闲角/旁白/声库)、sort_order |
-| `RELATES_TO` | Subject→Subject | subject-relations | relation_type、★relation(31 种:系列/改编/续集…)、sort_order |
+| `RELATES_TO` | Subject→Subject | subject-relations | relation_type、★relation(30 种:系列/改编/续集…;另有基线 6 条历史码解码为空串)、sort_order |
 | `EPISODE_OF` | Episode→Subject | episode 的 subject_id | — |
 | `PERSON_REL` | Person→Person | person-relations(prsn) | relation_type、★relation(16 种:配偶/老师…)、spoiler、ended |
 | `CHARACTER_REL` | Character→Character | person-relations(crt) | relation_type、★relation(28 种:亲属/朋友…)、spoiler、ended |
@@ -84,9 +88,10 @@ graph LR
 - `order` → `sort_order`(保留字);主键去重;null 归一 `""`/`[]`
 
 节点关键字段——Subject:name/name_cn/type(5 类)/date/score/rank/
-nsfw/favorite 五档/tags/meta_tags/summary/infobox;Person 与
-Character:name/type 或 role/comments/collects/summary/infobox;
-Episode:name/name_cn/airdate/sort/type/subject_id/description。
+nsfw/favorite 五档/series/tags/meta_tags/summary/infobox;Person:
+name/type/career/comments/collects/summary/infobox;Character:
+name/role/comments/collects/summary/infobox;Episode:name/name_cn/
+airdate/sort/type/disc/duration/subject_id/description。
 完整 DDL 见 `scripts/build_db.py`。
 
 ## 3. 构建流程
@@ -103,8 +108,9 @@ Episode:name/name_cn/airdate/sort/type/subject_id/description。
 
 - **阶段 0**:刷新枚举映射表;下载失败回退本地快照并打印,无快照才终止
 - **阶段 1**:orjson 流式解析,执行 §2 变换。先读 subject 建 `id→类型` 字典
-  (解码与端点检查共用);悬空边跳过并计数,节点照常入库;解码失配汇总打
-  WARNING,基线 6 条(上游已删的历史码)
+  (解码与端点检查共用);悬空边跳过并计数,节点照常入库;解码失配
+  (含节点 type_name/platform)汇总打 WARNING——build 侧任何非零失配
+  都报,"基线"判定在 verify_db(当前基线 = 1 个已删历史码命中 6 条边)
 - **阶段 2**:删旧库 → DDL 建表 → 先节点后边 COPY → 逐表 count 回显
 
 取舍:**Parquet 中转**(COPY 比逐行插入快两个数量级,数组/结构体类型无损);
