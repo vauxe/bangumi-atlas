@@ -54,7 +54,8 @@ export class Drawer {
         return;
       }
       if (t.id === "drawer-close") this.hide();
-      if (t.id === "expand-rel") void this.expandRelations();
+      if (t.id === "expand-rel" || t.classList.contains("more"))
+        void this.expandRelations();
       if (t.id === "expand-eps") void this.expandEpisodes();
       if (t.classList.contains("sum-toggle")) {
         this.el.querySelector(".sum")?.classList.toggle("expanded");
@@ -200,6 +201,9 @@ export class Drawer {
       lst.push(r);
       extraByLid.set(lid, lst);
     }
+    // 溢出页全部加载后,组内"还有 N 个"只剩 NSFW 隐藏项,
+    // 再显示可点提示就是死按钮——此时不再出提示
+    const allLoaded = cur.pagesLoaded >= (adj?.op?.length ?? 0);
     const groups = (adj?.g ?? [])
       .map(([lid, total, ranks]) => {
         const label = this.deps.manifest.labels[lid] ?? "关联";
@@ -210,6 +214,12 @@ export class Drawer {
         const shown = cur.expanded
           ? members
           : members.slice(0, GROUP_CHIPS);
+        const more =
+          total > shown.length && !(cur.expanded && allLoaded)
+            ? html`<button class="more">
+                …还有 ${total - shown.length} 个
+              </button>`
+            : "";
         const chips = shown
           .map(
             (r) =>
@@ -218,10 +228,6 @@ export class Drawer {
               </button>`,
           )
           .join("");
-        const more =
-          total > shown.length
-            ? html`<span class="more">…还有 ${total - shown.length} 个</span>`
-            : "";
         return html`<div class="group">
           <div class="group-label">${label}(${total})</div>
           <div class="chips">${raw(chips)}${raw(more)}</div>
@@ -236,7 +242,7 @@ export class Drawer {
       return s + (cur.expanded ? members : Math.min(members, GROUP_CHIPS));
     }, 0);
     const expandBtn =
-      adj && adj.n > shownCount
+      adj && adj.n > shownCount && !(cur.expanded && allLoaded)
         ? html`<button id="expand-rel" class="chip expand">
             ${cur.expanded
               ? `继续加载(已示 ${shownCount} / 共 ${adj.n})`
