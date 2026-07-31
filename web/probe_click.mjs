@@ -18,7 +18,7 @@ page.on("pageerror", (e) => errs.push(`[pageerror] ${e.message}`));
 
 await page.goto(url, { waitUntil: "domcontentloaded" });
 await new Promise((r) => setTimeout(r, 9000)); // 等几何流就绪
-await page.click("#dice-cold");
+await page.click("#dice");
 await new Promise((r) => setTimeout(r, 3500)); // flyTo + 抽屉加载
 const state = await page.evaluate(() => ({
   drawerOpen: document.querySelector("#drawer")?.classList.contains("open"),
@@ -26,7 +26,6 @@ const state = await page.evaluate(() => ({
   groups: document.querySelectorAll("#drawer .group").length,
   chips: document.querySelectorAll("#drawer .chip").length,
   url: location.hash.slice(0, 80),
-  docked: document.body.classList.contains("docked"),
 }));
 console.log("STATE:", JSON.stringify(state, null, 1));
 console.log("ERRORS:", errs.length ? errs.slice(0, 10) : "none");

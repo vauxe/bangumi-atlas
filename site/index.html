@@ -23,17 +23,6 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 #hud { position: fixed; bottom: 12px; right: 12px; color: var(--ink-2);
   font-family: monospace; z-index: 5; pointer-events: none; }
 
-#cold { position: fixed; inset: 0; display: grid; place-items: center;
-  z-index: 4; pointer-events: none; transition: opacity .6s; }
-#cold .inner { pointer-events: auto; width: min(560px, 90vw);
-  text-align: center; }
-#cold h1 { font-weight: 600; letter-spacing: .1em; margin: 0 0 16px; }
-#cold.ready .hint { opacity: 1; }
-#cold .hint { color: var(--ink-2); opacity: 0; transition: opacity .6s;
-  margin-top: 12px; }
-#cold.away { opacity: 0; pointer-events: none; }
-#cold.away .inner { pointer-events: none; }
-
 #searchwrap { position: relative; }
 #search { width: 100%; padding: 12px 16px; font-size: 16px;
   background: var(--panel); color: var(--ink);
@@ -46,9 +35,7 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 #hits .hit { padding: 8px 16px; cursor: pointer; }
 #hits .hit.active, #hits .hit:hover { background: var(--line); }
 
-.docked #cold { display: none; }
-.docked #searchwrap-dock { display: block; }
-#searchwrap-dock { display: none; position: fixed; top: 14px; left: 14px;
+#searchwrap-dock { position: fixed; top: 14px; left: 14px;
   width: 300px; z-index: 6; }
 
 #drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 420px;
@@ -127,21 +114,13 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 <body>
 <div id="map"></div>
 
-<div id="cold">
-  <div class="inner">
-    <h1>Bangumi 星图</h1>
-    <div id="searchwrap">
-      <input id="search" placeholder="搜索作品 / 人物 / 角色…"
-             autocomplete="off">
-      <div id="hits"></div>
-    </div>
-    <div class="hint">回车飞往 · 拖动环视这片缓缓自转的宇宙</div>
-    <div class="hint">
-      <button id="dice-cold" class="chip">🎲 随机传送</button>
-    </div>
+<div id="searchwrap-dock">
+  <div id="searchwrap">
+    <input id="search" placeholder="搜索作品 / 人物 / 角色…"
+           autocomplete="off">
+    <div id="hits"></div>
   </div>
 </div>
-<div id="searchwrap-dock"></div>
 
 <div id="drawer"></div>
 
