@@ -9,5 +9,6 @@ db/
 site/data/
 data/layout/
 web/node_modules/
+web/.test-dist/
 site/app.js
 spike/*.bin

@@ -7,6 +7,7 @@
 
 import { CollisionFilterExtension } from "@deck.gl/extensions";
 import { TextLayer } from "@deck.gl/layers";
+import { loadPublishedJson } from "./loader";
 import type { Geometry } from "./types";
 
 export interface LabelData {
@@ -29,9 +30,8 @@ export interface LabelCache {
   chars?: string;
 }
 
-export async function loadLabels(v: string): Promise<LabelData> {
-  const res = await fetch(`data/labels.json?v=${encodeURIComponent(v)}`);
-  return (await res.json()) as LabelData;
+export function loadLabels(): Promise<LabelData> {
+  return loadPublishedJson<LabelData>("labels.json");
 }
 
 export function labelLayers(

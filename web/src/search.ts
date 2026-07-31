@@ -10,6 +10,7 @@ export class Search {
   private onPick: (rank: number) => void;
   private items: SearchEntry[] = [];
   private active = -1;
+  private updateEpoch = 0;
 
   constructor(
     box: HTMLInputElement,
@@ -19,7 +20,7 @@ export class Search {
     this.box = box;
     this.list = list;
     this.onPick = onPick;
-    box.addEventListener("input", () => void this.update());
+    box.addEventListener("input", () => this.runUpdate());
     box.addEventListener("keydown", (ev) => this.onKey(ev));
     list.addEventListener("mousedown", (ev) => {
       const t = (ev.target as HTMLElement).closest("[data-rank]");
@@ -41,12 +42,26 @@ export class Search {
     });
   }
 
-  private async update(): Promise<void> {
+  private runUpdate(): void {
+    const epoch = ++this.updateEpoch;
+    void this.update(epoch).catch((error: unknown) => {
+      if (epoch !== this.updateEpoch) return;
+      console.error("search update failed", error);
+      this.items = [];
+      this.active = -1;
+      this.list.textContent = "搜索索引加载失败,请重试";
+    });
+  }
+
+  private async update(epoch: number): Promise<void> {
     await loadCharmap(); // 折叠表就绪后才归一(幂等,首次后零开销)
+    if (epoch !== this.updateEpoch) return;
     const q = fold(this.box.value);
     if (q.length === 0) {
       this.list.innerHTML = "";
       this.items = [];
+      this.box.setAttribute("aria-expanded", "false");
+      this.box.removeAttribute("aria-activedescendant");
       return;
     }
     // 首字按码点取(q[0] 是 UTF-16 code unit,增补平面会拿到半个代理)
@@ -54,7 +69,7 @@ export class Search {
     const entries = await searchShard(
       cp === undefined ? "" : String.fromCodePoint(cp),
     );
-    if (fold(this.box.value) !== q) return; // 已过期
+    if (epoch !== this.updateEpoch || fold(this.box.value) !== q) return;
     this.items = entries.filter((e) => e[0].startsWith(q)).slice(0, 12);
     this.active = this.items.length ? 0 : -1;
     this.renderList();
@@ -65,13 +80,20 @@ export class Search {
       .map(
         (e, i) =>
           html`<div
+            id="search-hit-${i}"
             class="hit ${i === this.active ? "active" : ""}"
             data-rank="${e[2]}"
+            role="option"
+            aria-selected="${i === this.active ? "true" : "false"}"
           >
             ${e[1]}
           </div>`,
       )
       .join("");
+    this.box.setAttribute("aria-expanded", String(this.items.length > 0));
+    if (this.active >= 0)
+      this.box.setAttribute("aria-activedescendant", `search-hit-${this.active}`);
+    else this.box.removeAttribute("aria-activedescendant");
   }
 
   private onKey(ev: KeyboardEvent): void {
@@ -88,12 +110,16 @@ export class Search {
       if (hit) this.pick(hit[2]);
     } else if (ev.key === "Escape") {
       this.list.innerHTML = "";
+      this.box.setAttribute("aria-expanded", "false");
+      this.box.removeAttribute("aria-activedescendant");
       this.box.blur();
     }
   }
 
   private pick(rank: number): void {
     this.list.innerHTML = "";
+    this.box.setAttribute("aria-expanded", "false");
+    this.box.removeAttribute("aria-activedescendant");
     this.box.blur();
     this.onPick(rank);
   }

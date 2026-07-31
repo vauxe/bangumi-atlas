@@ -34,6 +34,8 @@ html, body { margin: 0; height: 100%; background: var(--surface);
   border: 1px solid var(--line); border-radius: 20px; outline: none; }
 #search:focus { border-color: var(--pink);
   box-shadow: 0 0 0 3px rgba(242, 91, 166, .22); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--pink);
+  outline-offset: 2px; }
 #hits { position: absolute; top: 100%; left: 0; right: 0; z-index: 9;
   background: var(--panel); border: 1px solid var(--line);
   border-radius: 0 0 16px 16px; text-align: left; max-height: 320px;
@@ -57,11 +59,13 @@ html, body { margin: 0; height: 100%; background: var(--surface);
   border: 1px solid var(--line); border-radius: 16px; padding: 10px 12px;
   overflow-y: auto; }
 #results.open { display: block; }
-.rhead { font-size: 13px; margin-bottom: 6px; cursor: pointer;
-  display: flex; align-items: center; }
+.rhead { width: 100%; border: 0; padding: 0; color: inherit;
+  background: none; font: inherit; font-size: 13px; margin-bottom: 6px;
+  cursor: pointer; display: flex; align-items: center; }
 .rchev { margin-left: auto; color: var(--ink-2); }
-.rrow { padding: 3px 4px; cursor: pointer; border-radius: 8px;
-  font-size: 13px; }
+.rrow { display: block; width: 100%; padding: 3px 4px; border: 0;
+  background: none; color: inherit; text-align: left; font: inherit;
+  cursor: pointer; border-radius: 8px; font-size: 13px; }
 .rrow:hover { background: var(--line); }
 .rn { color: var(--ink-2); font-size: 11px; }
 .rmeta { color: var(--ink-2); font-size: 11px; margin-left: 6px; }
@@ -77,10 +81,11 @@ html, body { margin: 0; height: 100%; background: var(--surface);
   box-shadow: -8px 0 24px rgba(242, 91, 166, .12); }
 #drawer.open { transform: none; }
 #drawer h2 { margin: 4px 24px 2px 0; font-size: 20px; }
-#drawer .cover { float: right; width: 96px; border-radius: 12px;
-  margin: 8px 0 10px 12px; clear: right; }
-.chip-av { width: 20px; height: 20px; border-radius: 50%;
-  object-fit: cover; flex: none; }
+.chip-mark { width: 9px; height: 9px; border-radius: 50%; flex: none;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .35); }
+.chip-mark.type-1 { background: var(--c-subject); }
+.chip-mark.type-2 { background: var(--c-person); }
+.chip-mark.type-3 { background: var(--c-character); }
 #drawer .chips .chip { display: inline-flex; align-items: center;
   gap: 6px; }
 #drawer .subtitle { color: var(--ink-2); margin-bottom: 8px; }
@@ -125,8 +130,9 @@ button.more:hover { text-decoration: underline; }
 #filters { flex: none; background: rgba(20,38,43,.88);
   border: 1px solid var(--line); border-radius: 16px;
   backdrop-filter: blur(4px); overflow: hidden; }
-#filters-head { display: flex; align-items: center; gap: 6px;
-  padding: 0 14px; min-height: 44px; cursor: pointer; font-size: 13px; }
+#filters-head { width: 100%; display: flex; align-items: center; gap: 6px;
+  padding: 0 14px; min-height: 44px; border: 0; background: none;
+  color: inherit; font: inherit; cursor: pointer; font-size: 13px; }
 #filters.closed #filters-body { display: none; }
 #filters-body { padding: 0 14px 12px; display: flex;
   flex-direction: column; gap: 12px; }
@@ -174,17 +180,20 @@ button.more:hover { text-decoration: underline; }
 <div id="searchwrap-dock">
   <div id="searchwrap">
     <input id="search" placeholder="搜索作品 / 人物 / 角色 ✨"
-           autocomplete="off">
-    <button id="dice" title="随机传送">🎲</button>
-    <div id="hits"></div>
+           autocomplete="off" role="combobox" aria-label="搜索作品、人物或角色"
+           aria-autocomplete="list" aria-controls="hits" aria-expanded="false">
+    <button id="dice" type="button" title="随机传送"
+            aria-label="随机传送">🎲</button>
+    <div id="hits" role="listbox" aria-label="搜索建议"></div>
   </div>
 </div>
 <div id="leftcol">
   <div id="filters" class="closed">
-    <div id="filters-head" role="button" title="点击展开/收起">
+    <button id="filters-head" type="button" title="点击展开/收起"
+            aria-expanded="false" aria-controls="filters-body">
       筛选<span id="filters-count" class="fbadge"></span>
       <span class="rchev">▸</span>
-    </div>
+    </button>
     <div id="filters-body">
       <div class="fsec">
         <div class="fsec-label">标签<span>可多选,须同时满足</span></div>
@@ -193,7 +202,7 @@ button.more:hover { text-decoration: underline; }
       <div class="fsec">
         <div class="fsec-label">评分<span id="score-label">不限</span></div>
         <input id="score-min" type="range" min="0" max="95" step="5"
-               value="0">
+               value="0" aria-label="最低评分">
       </div>
       <div class="fsec">
         <div class="fsec-label">媒介<span>选中高亮,其余调暗</span></div>
@@ -202,16 +211,16 @@ button.more:hover { text-decoration: underline; }
       <div class="fsec">
         <div class="fsec-label">年代<span id="year-label">全部</span></div>
         <div id="year-slider">
-          <input id="year-min" type="range" step="1">
-          <input id="year-max" type="range" step="1">
+          <input id="year-min" type="range" step="1" aria-label="最早年份">
+          <input id="year-max" type="range" step="1" aria-label="最晚年份">
         </div>
       </div>
     </div>
   </div>
-  <div id="results"></div>
+  <div id="results" aria-live="polite"></div>
 </div>
 
-<div id="drawer"></div>
+<aside id="drawer" aria-label="节点详情" aria-live="polite"></aside>
 
 
 <div id="legend">
@@ -220,8 +229,8 @@ button.more:hover { text-decoration: underline; }
   <i style="background:var(--c-character)"></i>角色
   <span style="margin-left:10px">右键拖 旋转 · `T` 俯视 · `R` 复位 · `S` 搜索</span>
 </div>
-<div id="tooltip"></div>
-<div id="hud"></div>
+<div id="tooltip" role="tooltip"></div>
+<div id="hud" role="status" aria-live="polite"></div>
 
 <script src="app.js"></script>
 </body>

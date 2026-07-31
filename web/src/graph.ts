@@ -7,6 +7,7 @@
  * 明确报"未找到",绝不静默扫全图。 */
 
 import { loadAdj } from "./loader";
+import { uniqueNeighbors } from "./neighbors";
 import type { AdjEntry, Geometry } from "./types";
 
 const WIDTH = 48; // 每层前沿与每节点扩展的宽度上限
@@ -14,12 +15,8 @@ const MAX_HOPS = 6;
 
 /** [rank, labelId] 扁平化,按 rank 升序(= 热度降序)截前 WIDTH。 */
 function flat(adj: AdjEntry | null): [number, number][] {
-  if (!adj) return [];
-  const out: [number, number][] = [];
-  for (const [lid, , ranks] of adj.g)
-    for (const r of ranks) out.push([r, lid]);
-  out.sort((a, b) => a[0] - b[0]);
-  return out.slice(0, WIDTH);
+  const { ranks, labels } = uniqueNeighbors(adj, WIDTH);
+  return ranks.map((rank, i) => [rank, labels[i] ?? -1]);
 }
 
 export interface CommonItem {
