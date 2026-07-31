@@ -60,7 +60,8 @@ export class Camera {
   }
 
   /** 聚焦飞行:返回带一次性过渡参数的状态供 deck 消费,
-   * 自身只保留干净状态。 */
+   * 自身只保留干净状态。缺省缩放只进不退——已比默认聚焦层级
+   * 更近时保持当前缩放,双击/行走不会把相机拽回远处。 */
   flyTo(
     pos: [number, number, number],
     zoom?: number,
@@ -68,7 +69,7 @@ export class Camera {
     this.viewState = {
       ...this.viewState,
       target: pos,
-      zoom: zoom ?? this.fitZoom + 4.5,
+      zoom: zoom ?? Math.max(this.viewState.zoom, this.fitZoom + 4.5),
     };
     return {
       ...this.viewState,
