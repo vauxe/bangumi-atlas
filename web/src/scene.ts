@@ -11,14 +11,24 @@
 import { Deck, LayerExtension, OrbitView } from "@deck.gl/core";
 import { Buffer as LumaBuffer } from "@luma.gl/core";
 import type { Device } from "@luma.gl/core";
-import { LineLayer, ScatterplotLayer } from "@deck.gl/layers";
+import { IconLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { Camera, prefersReducedMotion } from "./camera";
 import type { OrbitState } from "./camera";
 import { labelLayers } from "./labels";
 import type { LabelCache, LabelData } from "./labels";
 import { state } from "./store";
-import { TYPE_COLORS, etype } from "./types";
+import { TYPE_COLORS, eid, etype } from "./types";
 import type { Geometry } from "./types";
+
+/** 工作集缩略图:bgm.tv 官方 API 的封面重定向端点(实测全链路
+ * CORS 通过、302 带 1h 缓存)。dump 不含图片字段,只能实时取,
+ * 因此仅工作集(≤51 张/次)用封面,语境层 98.5 万点维持圆点。 */
+function coverUrl(key: number): string {
+  const kind = ["", "subjects", "persons", "characters"][etype(key)];
+  // type=small 必经 /r/100/ 缩放代理(带 CORS);grid/large 会落到
+  // 无 CORS 头的原图路径,WebGL 纹理会被浏览器拦截(实测)
+  return `https://api.bgm.tv/v0/${kind}/${eid(key)}/image?type=small`;
+}
 
 export type { OrbitState } from "./camera";
 
@@ -749,6 +759,49 @@ export class Scene {
         },
       }),
     ];
+    // 封面缩略图:叠在圆点之上,不可拾取(拾取/悬停仍走圆点层);
+    // 加载失败时该图不画,下层圆点自然兜底
+    layers.push(
+      new IconLayer({
+        id: "ws-covers",
+        data: ranks.map((rk, i) => ({
+          rank: rk,
+          key: this.geo.key[rk] ?? 0,
+          i,
+        })),
+        getIcon: (d: { key: number }) => ({
+          url: coverUrl(d.key),
+          id: String(d.key),
+          // 声明宽高比按类型近似(自动打包模式无法读真实尺寸):
+          // 作品是 5:7 海报,人物/角色近似 4:5 肖像
+          width: 100,
+          height: etype(d.key) === 1 ? 140 : 125,
+        }),
+        getPosition: (d: { rank: number }) =>
+          this.posOf(d.rank) ?? [0, 0, 0],
+        getSize: (d: { i: number }) => (d.i === 0 ? 5.6 : 4.4),
+        getColor: (d: { i: number }) => {
+          // 级联淡入与圆点同步(mask=false 时 alpha 即不透明度)
+          const k =
+            reduced || d.i === 0
+              ? 1
+              : Math.max(
+                  0,
+                  Math.min(
+                    1,
+                    (t - (d.i - 1) * CASCADE_STEP_MS) / CASCADE_FADE_MS,
+                  ),
+                );
+          return [255, 255, 255, Math.round(255 * k)];
+        },
+        updateTriggers: { getColor: t },
+        sizeUnits: "common",
+        sizeMinPixels: 20,
+        sizeMaxPixels: 64,
+        billboard: true,
+        loadOptions: { image: { crossOrigin: "anonymous" } },
+      }),
+    );
     // 光环单脉冲:选中后 500ms 一次扩散(§5)
     if (!reduced && t < PULSE_MS) {
       const k = t / PULSE_MS;
