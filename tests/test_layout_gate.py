@@ -6,8 +6,17 @@ from scripts.check_layout_report import enforce_shift_limit
 
 
 class LayoutGateTests(unittest.TestCase):
-    def test_accepts_cold_start_and_values_at_the_limit(self) -> None:
-        enforce_shift_limit({"p95_shift_pct": None})
+    def test_rejects_unmeasured_layout_unless_bootstrap_is_explicit(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "no warm-start baseline"):
+            enforce_shift_limit({"p95_shift_pct": None})
+        enforce_shift_limit(
+            {"p95_shift_pct": None},
+            allow_cold_start=True,
+        )
+
+    def test_accepts_values_at_the_limit(self) -> None:
         enforce_shift_limit({"p95_shift_pct": 3.0})
 
     def test_rejects_publish_when_shift_exceeds_limit(self) -> None:
