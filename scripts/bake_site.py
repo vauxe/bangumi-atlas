@@ -124,15 +124,6 @@ def load_layout() -> dict[str, np.ndarray]:
     return {c: np.asarray(t.column(c)) for c in t.column_names}
 
 
-def quantize(
-    coords: np.ndarray,
-) -> tuple[np.ndarray, list[float], list[float]]:
-    lo = coords.min(0)
-    hi = coords.max(0)
-    q = ((coords - lo) / (hi - lo) * 65535).astype(np.uint16)
-    return q, [float(v) for v in lo], [float(v) for v in hi]
-
-
 def load_info() -> dict[int, dict[str, Any]]:
     """节点 key -> 名字 / nsfw / 详情所需短属性(infobox 刻意不上站)。"""
     sub = pq.read_table(
@@ -248,10 +239,12 @@ def main() -> None:  # noqa: PLR0915
         )
     log("节点属性装载完成")
 
-    # ---- 几何 SoA(19B/节点,七文件,定长记录支持 Range 点查)----
+    # ---- 几何 SoA(21B/节点,七文件,定长记录支持 Range 点查)----
     # (community 只服务社区标签,留在 labels.json,不再出列)
-    q, lo, hi = quantize(coords_r.astype(np.float32))
-    (SITE / "positions.bin").write_bytes(q.tobytes())
+    coords_f32 = coords_r.astype("<f4")
+    lo = [float(v) for v in coords_f32.min(0)]
+    hi = [float(v) for v in coords_f32.max(0)]
+    (SITE / "positions.bin").write_bytes(coords_f32[:, (0, 2)].tobytes())
     (SITE / "year.bin").write_bytes(year_r.tobytes())
     (SITE / "key.bin").write_bytes(key_r.tobytes())
     size_raw = np.round(18 * np.log2(1 + collect_r))
@@ -300,7 +293,7 @@ def main() -> None:  # noqa: PLR0915
         f"{int((tag_mask > 0).sum()):,} 节点)"
     )
     for fname, stride in (
-        ("positions.bin", 6),
+        ("positions.bin", 8),
         ("year.bin", 2),
         ("key.bin", 4),
         ("size.bin", 1),

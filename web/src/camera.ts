@@ -17,8 +17,8 @@ export function prefersReducedMotion(): boolean {
 
 const FLY_MS = 400;
 // OrbitView 在 zoom=0 时以一世界单位对应一像素；聚焦采用稳定的局部
-// 空间尺度，不随全图 bbox 改变。
-const FOCUS_ZOOM = 3.2;
+// 空间尺度。zoom=6.2 时 0.25 世界间距略大于高亮节点的 18 px 直径。
+const FOCUS_ZOOM = 6.2;
 
 export class Camera {
   viewState: OrbitState;

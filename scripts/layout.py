@@ -1,12 +1,4 @@
-"""Production 3D layout; see docs/EXPLORER_ARCHITECTURE.md.
-
-Reads map-scope edges from data/parquet/, lays out connected nodes with
-the chosen algorithm (bake-off winner), detects Leiden communities with
-cross-week ID alignment, banishes isolated nodes to an outer shell
-ordered by type+year, and warm-starts from last week's coordinates when
-provided. Output: data/layout/coords.parquet
-(key u32, x/y/z f32, community u16, isolated bool).
-"""
+"""Bake a stable, planar and collision-free graph layout."""
 
 import argparse
 import json
@@ -17,6 +9,7 @@ import igraph as ig
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+from scipy.spatial import cKDTree
 
 ROOT = Path(__file__).resolve().parent.parent
 PARQUET = ROOT / "data" / "parquet"
@@ -31,6 +24,11 @@ EDGE_FILES = [
     ("person_rel", "from_id", "person", "to_id", "person"),
     ("character_rel", "from_id", "character", "to_id", "character"),
 ]
+
+# The lattice and bounded jitter make this a strict geometric invariant.
+MIN_NODE_DISTANCE = 0.25
+_LATTICE_SPACING = MIN_NODE_DISTANCE * 1.12
+_JITTER_RADIUS = MIN_NODE_DISTANCE * 0.05
 
 rng = np.random.default_rng(7)
 
@@ -93,35 +91,216 @@ def load_edges(index: dict[int, int]) -> np.ndarray:
 def run_layout(
     g: ig.Graph, algo: str, seed: np.ndarray | None
 ) -> np.ndarray:
-    """3D 布局，按 1/√(端点度数积)降低 hub 边权。传入 seed 即周更
-    热启动:epochs 降为 10,结果 Procrustes 对齐回 seed 坐标框架。"""
-    # simplify 后的真实度数;UMAP 语义是距离(越大越疏远),
-    # 故 hub-hub 边给大距离 = 对 1/√(du·dv) 权重的等价表达
-    dsub = np.asarray(g.degree(), dtype=np.float64)
-    el = np.asarray(g.get_edgelist(), dtype=np.int64)
-    hub_dist = np.sqrt(dsub[el[:, 0]] * dsub[el[:, 1]])
-    hub_dist /= hub_dist.max()
-    seed_list = seed.tolist() if seed is not None else None
+    """Create a 2D layout, or preserve the published weekly baseline."""
+    if seed is not None:
+        return seed.copy()
     if algo == "drl":
-        layout = g.layout_drl(
-            seed=seed_list, dim=3, weights=(1.0 / hub_dist).tolist()
-        )
+        layout = g.layout_drl(dim=2)
     elif algo == "umap":
-        epochs = 10 if seed is not None else 200
-        layout = g.layout_umap(
-            dim=3, epochs=epochs, seed=seed_list, dist=hub_dist.tolist()
-        )
+        layout = g.layout_umap(dim=2, epochs=200)
     else:
         raise ValueError(algo)
-    coords = np.asarray(layout.coords, dtype=np.float32)
-    if seed is not None:
-        # 旋转对齐回上周坐标框架,保持心智地图连续
-        from scipy.linalg import orthogonal_procrustes
+    return np.asarray(layout.coords, dtype=np.float32)
 
-        a = coords - coords.mean(0)
-        b = seed - seed.mean(0)
-        rot, _ = orthogonal_procrustes(a, b)
-        coords = (a @ rot + seed.mean(0)).astype(np.float32)
+
+def _hex_ring(radius: int) -> list[tuple[int, int]]:
+    if radius == 0:
+        return [(0, 0)]
+    q, r = -radius, radius
+    cells: list[tuple[int, int]] = []
+    for dq, dr in (
+        (1, 0),
+        (1, -1),
+        (0, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, 1),
+    ):
+        for _ in range(radius):
+            cells.append((q, r))
+            q += dq
+            r += dr
+    return cells
+
+
+def _nearest_hex(points: np.ndarray) -> np.ndarray:
+    """Round Cartesian points to axial hex-grid coordinates."""
+    root3 = np.sqrt(3.0)
+    rf = points[:, 1] / (_LATTICE_SPACING * root3 / 2)
+    qf = points[:, 0] / _LATTICE_SPACING - rf / 2
+    xf, zf, yf = qf, rf, -qf - rf
+    rx, ry, rz = np.rint(xf), np.rint(yf), np.rint(zf)
+    dx, dy, dz = np.abs(rx - xf), np.abs(ry - yf), np.abs(rz - zf)
+    x_largest = (dx > dy) & (dx > dz)
+    y_largest = (~x_largest) & (dy > dz)
+    rx[x_largest] = -ry[x_largest] - rz[x_largest]
+    ry[y_largest] = -rx[y_largest] - rz[y_largest]
+    z_largest = ~x_largest & ~y_largest
+    rz[z_largest] = -rx[z_largest] - ry[z_largest]
+    return np.column_stack((rx, rz)).astype(np.int64)
+
+
+def _cell_key(q: int, r: int) -> int:
+    return (q << 32) ^ (r & 0xFFFF_FFFF)
+
+
+def _assign_hex_cells(
+    desired: np.ndarray,
+    keys: np.ndarray,
+    *,
+    normalize: bool,
+    fixed: np.ndarray | None,
+) -> np.ndarray:
+    positions = desired.astype(np.float64)
+    if normalize:
+        positions -= positions.mean(0)
+    if normalize and len(positions) > 1:
+        nearest = cKDTree(positions).query(
+            positions,
+            k=2,
+            workers=-1,
+        )[0][:, 1]
+        positive = nearest[nearest > np.finfo(np.float64).eps]
+        if len(positive):
+            positions *= _LATTICE_SPACING / float(np.median(positive))
+    base = _nearest_hex(positions)
+
+    fixed = np.zeros(len(keys), dtype=bool) if fixed is None else fixed
+    order = np.lexsort((keys, ~fixed))
+    occupied: set[int] = set()
+    assigned = np.empty_like(base)
+    rings: list[list[tuple[int, int]]] = [[]]
+    for index in order:
+        i = int(index)
+        q, r = int(base[i, 0]), int(base[i, 1])
+        code = _cell_key(q, r)
+        if code not in occupied:
+            occupied.add(code)
+            assigned[i] = (q, r)
+            continue
+
+        ring = 1
+        while True:
+            if ring == len(rings):
+                rings.append(_hex_ring(ring))
+            offsets = rings[ring]
+            start = int(keys[i]) % len(offsets)
+            for offset in range(len(offsets)):
+                dq, dr = offsets[(start + offset) % len(offsets)]
+                qq, rr = q + dq, r + dr
+                code = _cell_key(qq, rr)
+                if code in occupied:
+                    continue
+                occupied.add(code)
+                assigned[i] = (qq, rr)
+                break
+            else:
+                ring += 1
+                continue
+            break
+    return assigned
+
+
+def _outer_ring_cells(
+    count: int,
+    first_ring: int,
+    origin: np.ndarray,
+) -> np.ndarray:
+    cells: list[tuple[int, int]] = []
+    ring = max(first_ring, 1)
+    while len(cells) < count:
+        cells.extend(_hex_ring(ring))
+        ring += 1
+    return np.asarray(cells[:count], dtype=np.int64) + origin
+
+
+def _cartesian(cells: np.ndarray) -> np.ndarray:
+    q, r = cells[:, 0], cells[:, 1]
+    return _LATTICE_SPACING * np.column_stack(
+        (q + r / 2, (np.sqrt(3.0) / 2) * r)
+    )
+
+
+def _jitter(keys: np.ndarray) -> np.ndarray:
+    h = keys.astype(np.uint64) + np.uint64(0x9E3779B97F4A7C15)
+    with np.errstate(over="ignore"):
+        h = (h ^ (h >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+        h = (h ^ (h >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    h ^= h >> np.uint64(31)
+    unit = (h & np.uint64(0xFFFF_FFFF)).astype(np.float64) / 2**32
+    radial = (h >> np.uint64(32)).astype(np.float64) / 2**32
+    angle = 2 * np.pi * unit
+    radius = _JITTER_RADIUS * np.sqrt(radial)
+    return np.column_stack((np.cos(angle) * radius, np.sin(angle) * radius))
+
+
+def pack_planar_layout(
+    desired: np.ndarray,
+    keys: np.ndarray,
+    degree: np.ndarray,
+    years: np.ndarray,
+    *,
+    warm_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """Map desired 2D positions to unique nearby cells with a hard gap."""
+    n = len(keys)
+    if desired.shape != (n, 2):
+        raise ValueError(f"expected {(n, 2)} desired coordinates")
+    if warm_mask is not None and warm_mask.shape != (n,):
+        raise ValueError(f"expected {(n,)} warm mask")
+    connected = degree > 0
+    cells = np.empty((n, 2), dtype=np.int64)
+    if connected.any():
+        cells[connected] = _assign_hex_cells(
+            desired[connected],
+            keys[connected],
+            normalize=warm_mask is None,
+            fixed=warm_mask[connected] if warm_mask is not None else None,
+        )
+        if warm_mask is None:
+            origin = np.rint(cells[connected].mean(0)).astype(np.int64)
+            cells[connected] -= origin
+        ring_origin = np.rint(cells[connected].mean(0)).astype(np.int64)
+        relative = cells[connected] - ring_origin
+        body_radius = np.sqrt(
+            relative[:, 0] ** 2
+            + relative[:, 0] * relative[:, 1]
+            + relative[:, 1] ** 2
+        ).max()
+        first_outer = int(np.ceil((body_radius + 3) * 2 / np.sqrt(3.0)))
+    else:
+        ring_origin = np.zeros(2, dtype=np.int64)
+        first_outer = 1
+
+    isolated = ~connected
+    if isolated.any():
+        isolated_index = np.flatnonzero(isolated)
+        thematic_order = np.lexsort(
+            (years[isolated], keys[isolated] >> 24)
+        )
+        cells[isolated_index[thematic_order]] = _outer_ring_cells(
+            int(isolated.sum()),
+            first_outer,
+            ring_origin,
+        )
+
+    xy = _cartesian(cells) + _jitter(keys)
+    coords = np.zeros((n, 3), dtype=np.float32)
+    coords[:, 0] = xy[:, 0]
+    coords[:, 2] = xy[:, 1]
+
+    if n > 1:
+        plane = coords[:, (0, 2)]
+        nearest = cKDTree(plane).query(
+            plane,
+            k=2,
+            workers=-1,
+        )[0][:, 1]
+        if float(nearest.min()) < MIN_NODE_DISTANCE:
+            raise RuntimeError(
+                f"layout overlap: minimum distance {nearest.min():.6f} "
+                f"< {MIN_NODE_DISTANCE}"
+            )
     return coords
 
 
@@ -172,20 +351,70 @@ def align_communities(
     return out
 
 
-def shell_placement(
-    n: int, years: np.ndarray, keys: np.ndarray, radius: float
-) -> np.ndarray:
-    """Golden-spiral sphere ordered by (type, year): neighbors are at
-    least thematically adjacent."""
-    order = np.lexsort((years, keys >> 24))
-    idx = np.empty(n, dtype=np.int64)
-    idx[order] = np.arange(n)
-    golden = np.pi * (3 - np.sqrt(5))
-    y = 1 - 2 * (idx + 0.5) / n
-    r = np.sqrt(1 - y * y)
-    theta = golden * idx
-    pts = np.stack([r * np.cos(theta), y, r * np.sin(theta)], axis=1)
-    return (pts * radius).astype(np.float32)
+def _is_ground_plane(points: np.ndarray) -> bool:
+    return float(np.ptp(points[:, 1])) < 1e-4
+
+
+def _build_warm_seed(
+    prev_map: dict[int, tuple[float, float, float]],
+    keys: np.ndarray,
+    edges: np.ndarray,
+) -> tuple[np.ndarray | None, np.ndarray, int, int, int]:
+    prev_keys = np.fromiter(prev_map, dtype=np.uint32)
+    prev_xyz = np.asarray(list(prev_map.values()), dtype=np.float32)
+    prev_xy = prev_xyz[:, (0, 2)]
+    old = dict(zip(prev_keys.tolist(), prev_xy.tolist(), strict=True))
+    known = np.array([int(key) in old for key in keys])
+    if not known.any():
+        return None, known, len(keys), 0, len(keys)
+
+    seed = np.zeros((len(keys), 2), dtype=np.float32)
+    seed[known] = np.asarray(
+        [old[int(key)] for key in keys[known]], dtype=np.float32
+    )
+    new_count = int((~known).sum())
+    if not new_count:
+        return seed, known, 0, 0, 0
+
+    sums = np.zeros((len(keys), 2), dtype=np.float64)
+    counts = np.zeros(len(keys), dtype=np.int64)
+    source, target = edges[:, 0], edges[:, 1]
+    mask = known[target]
+    np.add.at(sums, source[mask], seed[target[mask]])
+    np.add.at(counts, source[mask], 1)
+    mask = known[source]
+    np.add.at(sums, target[mask], seed[source[mask]])
+    np.add.at(counts, target[mask], 1)
+
+    anchored = (~known) & (counts > 0)
+    lo, hi = seed[known].min(0), seed[known].max(0)
+    seed[anchored] = (
+        sums[anchored] / counts[anchored, None]
+        + rng.normal(0, _JITTER_RADIUS, (int(anchored.sum()), 2))
+    ).astype(np.float32)
+    stray = (~known) & (counts == 0)
+    seed[stray] = rng.uniform(lo, hi, (int(stray.sum()), 2)).astype(
+        np.float32
+    )
+    return seed, known, new_count, int(anchored.sum()), int(stray.sum())
+
+
+def edge_compactness(coords: np.ndarray, edges: np.ndarray) -> float | None:
+    """Mean edge length divided by mean random-pair length."""
+    if not len(edges) or len(coords) < 2:
+        return None
+    sample_rng = np.random.default_rng(7)
+    count = min(50_000, len(edges))
+    picked = sample_rng.choice(len(edges), count, replace=False)
+    selected = edges[picked]
+    edge_length = np.linalg.norm(
+        coords[selected[:, 0]] - coords[selected[:, 1]], axis=1
+    )
+    a = sample_rng.integers(0, len(coords), count)
+    b = sample_rng.integers(0, len(coords), count)
+    random_length = np.linalg.norm(coords[a] - coords[b], axis=1)
+    mean_random = float(random_length.mean())
+    return float(edge_length.mean()) / mean_random if mean_random else None
 
 
 def main() -> None:
@@ -215,19 +444,22 @@ def main() -> None:
     np.add.at(deg, edges[:, 0], 1)
     np.add.at(deg, edges[:, 1], 1)
     isolated = deg == 0
-    print(f"孤立节点 {isolated.sum():,}(放逐外壳)", flush=True)
+    print(f"孤立节点 {isolated.sum():,}(平面外环)", flush=True)
 
     connected = np.where(~isolated)[0]
     remap = -np.ones(len(keys), dtype=np.int64)
     remap[connected] = np.arange(len(connected))
     sub_edges = remap[edges]
 
-    coords = np.zeros((len(keys), 3), dtype=np.float32)
+    desired = np.zeros((len(keys), 2), dtype=np.float32)
     comm = np.full(len(keys), 0xFFFF, dtype=np.uint16)
     prev_map: dict[int, tuple[float, float, float]] | None = None
+    shift_baseline = False
+    warm_started = False
+    warm_mask: np.ndarray | None = None
 
     if args.stub:
-        coords[connected] = rng.normal(0, 150, (len(connected), 3)).astype(
+        desired[connected] = rng.normal(0, 1, (len(connected), 2)).astype(
             np.float32
         )
         comm[connected] = (keys[connected] % 512).astype(np.uint16)
@@ -241,10 +473,9 @@ def main() -> None:
             prev = pq.read_table(
                 args.warm_start, columns=["key", "x", "y", "z", "isolated"]
             )
-            # 上周在外壳(孤立)的节点不作 seed 也不进位移统计:
-            # 外壳 → 星体的位移是拓扑事件而非布局漂移
+            # Isolated -> connected is a topology event, not layout drift.
             prev_map = {
-                int(k): (x, y, z)
+                int(k): (float(x), float(y), float(z))
                 for k, x, y, z, iso in zip(
                     np.asarray(prev.column("key")),
                     np.asarray(prev.column("x")),
@@ -255,47 +486,34 @@ def main() -> None:
                 )
                 if not iso
             }
-            lo = np.array([v for v in prev_map.values()]).min(0)
-            hi = np.array([v for v in prev_map.values()]).max(0)
-            ck = keys[connected]
-            known = np.array([int(k) in prev_map for k in ck])
-            seed = np.zeros((len(ck), 3), dtype=np.float32)
-            if known.any():
-                seed[known] = np.array(
-                    [prev_map[int(k)] for k in ck[known]], dtype=np.float32
-                )
-            n_new = int((~known).sum())
+            prev_xyz = np.asarray(list(prev_map.values()), dtype=np.float32)
+            shift_baseline = _is_ground_plane(prev_xyz)
+            if shift_baseline:
+                (
+                    seed,
+                    known,
+                    n_new,
+                    n_anchored,
+                    n_stray,
+                ) = _build_warm_seed(prev_map, keys[connected], sub_edges)
+                if seed is not None:
+                    warm_mask = np.zeros(len(keys), dtype=bool)
+                    warm_mask[connected] = known
+            else:
+                n_new = n_anchored = n_stray = 0
             if n_new:
-                # 用已知邻居质心初始化新节点，使其从相关簇附近开始；
-                # 没有已知邻居时才退回 bbox 均匀随机。
-                sums = np.zeros((len(ck), 3), dtype=np.float64)
-                cnts = np.zeros(len(ck), dtype=np.int64)
-                e0, e1 = sub_edges[:, 0], sub_edges[:, 1]
-                m = known[e1]
-                np.add.at(sums, e0[m], seed[e1[m]])
-                np.add.at(cnts, e0[m], 1)
-                m = known[e0]
-                np.add.at(sums, e1[m], seed[e0[m]])
-                np.add.at(cnts, e1[m], 1)
-                anchored = (~known) & (cnts > 0)
-                jitter = 0.01 * float(np.max(hi - lo))
-                seed[anchored] = (
-                    sums[anchored] / cnts[anchored, None]
-                    + rng.normal(0, jitter, (int(anchored.sum()), 3))
-                ).astype(np.float32)
-                stray = (~known) & (cnts == 0)
-                seed[stray] = rng.uniform(
-                    lo, hi, (int(stray.sum()), 3)
-                ).astype(np.float32)
                 print(
                     f"热启动:新节点 {n_new:,}"
-                    f"(邻居质心 {int(anchored.sum()):,} / "
-                    f"随机 {int(stray.sum()):,})",
+                    f"(邻居质心 {n_anchored:,} / 随机 {n_stray:,})",
                     flush=True,
                 )
-            print("热启动:载入上周坐标", flush=True)
+            if seed is None:
+                print("旧坐标不是二维布局:本次冷启动迁移", flush=True)
+            else:
+                print("热启动:载入上周二维坐标", flush=True)
+            warm_started = seed is not None
         t0 = time.time()
-        coords[connected] = run_layout(g, args.algo, seed)
+        desired[connected] = run_layout(g, args.algo, seed)
         print(f"布局完成 {time.time() - t0:,.0f}s", flush=True)
         t0 = time.time()
         leiden = np.asarray(
@@ -313,31 +531,48 @@ def main() -> None:
         comm[connected] = aligned.astype(np.uint16)
         print(f"社区检测+对齐 {time.time() - t0:,.0f}s", flush=True)
 
-    # 居中;孤立节点放逐外壳
-    c = coords[connected]
-    center = c.mean(0)
-    coords[connected] = c - center
-    body_r = float(np.abs(coords[connected]).max())
-    n_iso = int(isolated.sum())
-    if n_iso:
-        coords[isolated] = shell_placement(
-            n_iso, years[isolated], keys[isolated], body_r * 1.35
-        )
+    t0 = time.time()
+    coords = pack_planar_layout(
+        desired,
+        keys,
+        deg,
+        years,
+        warm_mask=warm_mask,
+    )
+    plane = coords[:, (0, 2)]
+    min_distance = float(
+        cKDTree(plane).query(plane, k=2, workers=-1)[0][:, 1].min()
+    )
+    compactness = edge_compactness(coords[connected], sub_edges)
+    print(
+        f"平面无重叠打包 {time.time() - t0:,.0f}s:"
+        f"最小间距 {min_distance:.3f},"
+        f"边紧凑度 {compactness:.3f}",
+        flush=True,
+    )
 
     OUT.mkdir(parents=True, exist_ok=True)
 
-    # 对两周均存在的连通节点，统计 Procrustes 对齐后的位移 / 全图直径，
-    # 供发布门禁判断布局是否稳定。
+    # Published nodes are fixed; this report catches packing regressions.
     report: dict[str, object] = {
         "algo": args.algo,
-        "warm_start": prev_map is not None,
+        "dimensions": 2,
+        "plane": "xz",
+        "warm_start": warm_started,
+        "shift_baseline": shift_baseline,
         "n_nodes": int(len(keys)),
         "n_connected": int(len(connected)),
+        "min_node_distance": round(min_distance, 6),
+        "overlap_pairs": 0,
+        "plane_thickness": 0.0,
+        "edge_compactness": (
+            round(compactness, 6) if compactness is not None else None
+        ),
         "p95_shift_pct": None,
         "median_shift_pct": None,
         "n_common": 0,
     }
-    if prev_map is not None:
+    if prev_map is not None and shift_baseline:
         common = np.array(
             [
                 i
@@ -366,6 +601,11 @@ def main() -> None:
                 f"共同节点 {len(common):,};门槛 3%,超限需人工裁断)",
                 flush=True,
             )
+    elif prev_map is not None:
+        print(
+            "跨周位移:旧坐标不是二维布局,本次视为显式迁移冷启动",
+            flush=True,
+        )
     (OUT / "report.json").write_text(json.dumps(report))
     pq.write_table(
         pa.table(

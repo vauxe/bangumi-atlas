@@ -110,7 +110,7 @@ export interface GeometryStream {
 export function openGeometry(manifest: Manifest): GeometryStream {
   const n = manifest.n_nodes;
   const raw = {
-    positions: new Uint8Array(n * 6),
+    positions: new Uint8Array(n * 8),
     year: new Uint8Array(n * 2),
     key: new Uint8Array(n * 4),
     size: new Uint8Array(n),
@@ -119,7 +119,7 @@ export function openGeometry(manifest: Manifest): GeometryStream {
     tags: new Uint8Array(n * 4),
   };
   const stride: Record<keyof typeof raw, number> = {
-    positions: 6,
+    positions: 8,
     year: 2,
     key: 4,
     size: 1,
@@ -139,12 +139,8 @@ export function openGeometry(manifest: Manifest): GeometryStream {
     loaded: 0,
     sparse: new Map(),
   };
-  const [lo, hi] = manifest.bbox;
-  const scale = [0, 1, 2].map(
-    (i) => ((hi[i] ?? 1) - (lo[i] ?? 0)) / 65535,
-  ) as [number, number, number];
-  const qpos = new Uint16Array(raw.positions.buffer);
-  let dequantized = 0;
+  const planar = new Float32Array(raw.positions.buffer);
+  let expanded = 0;
   let lastEmit = 0;
 
   const start = (onChunk: (loaded: number) => void): Promise<void> => {
@@ -157,12 +153,9 @@ export function openGeometry(manifest: Manifest): GeometryStream {
           );
         }),
       );
-      for (; dequantized < loaded; dequantized++) {
-        for (let a = 0; a < 3; a++) {
-          geo.positions[dequantized * 3 + a] =
-            (qpos[dequantized * 3 + a] ?? 0) * (scale[a] ?? 1) +
-            (lo[a] ?? 0);
-        }
+      for (; expanded < loaded; expanded++) {
+        geo.positions[expanded * 3] = planar[expanded * 2] ?? 0;
+        geo.positions[expanded * 3 + 2] = planar[expanded * 2 + 1] ?? 0;
       }
       geo.loaded = loaded;
       const now = performance.now();
@@ -280,17 +273,13 @@ export async function pointByRank(
     return bytes.buffer.slice(start, start + len);
   };
   const [posBuf, keyBuf] = await Promise.all([
-    range("positions.bin", rank * 6, 6),
+    range("positions.bin", rank * 8, 8),
     range("key.bin", rank * 4, 4),
   ]);
-  if (!posBuf || !keyBuf || posBuf.byteLength < 6 || keyBuf.byteLength < 4)
+  if (!posBuf || !keyBuf || posBuf.byteLength < 8 || keyBuf.byteLength < 4)
     return null;
-  const q = new Uint16Array(posBuf.slice(0, 6));
-  const [lo, hi] = manifest.bbox;
-  const pos = [0, 1, 2].map(
-    (i) =>
-      ((q[i] ?? 0) * ((hi[i] ?? 1) - (lo[i] ?? 0))) / 65535 + (lo[i] ?? 0),
-  ) as [number, number, number];
+  const xy = new Float32Array(posBuf.slice(0, 8));
+  const pos: [number, number, number] = [xy[0] ?? 0, 0, xy[1] ?? 0];
   return { pos, key: new Uint32Array(keyBuf.slice(0, 4))[0] ?? 0 };
 }
 

@@ -50,8 +50,8 @@ test("keeps focus and explicit zoom independent of full-graph fit", () => {
 
   const smallFocus = smallWorld.flyTo([1, 2, 3]).zoom;
   const largeFocus = largeWorld.flyTo([1, 2, 3]).zoom;
-  assert.equal(smallFocus, 3.2);
-  assert.equal(largeFocus, 3.2);
+  assert.equal(smallFocus, 6.2);
+  assert.equal(largeFocus, 6.2);
 
   const explicitZoom = largeWorld.flyTo([4, 5, 6], 12);
   assert.equal(explicitZoom.zoom, 12);

@@ -31,12 +31,12 @@ export interface Manifest {
 
 /** 几何 SoA(rank 有序)。 */
 export interface Geometry {
-  /** 反量化后的世界坐标,长度 3n(流式填充)。 */
+  /** 扩展为 xyz 的世界坐标,长度 3n(流式填充)。 */
   positions: Float32Array;
   year: Uint16Array;
   key: Uint32Array;
   size: Uint8Array;
-  /** bit0 nsfw(保留于数据,渲染不使用)、bit1 孤立外壳、
+  /** bit0 nsfw(保留于数据,渲染不使用)、bit1 孤立外环、
    * bit2-4 媒介(1书籍…6三次元),余位 0。 */
   flags: Uint8Array;
   /** 评分×10(u8,无评分/非作品 = 0),属性过滤用。 */
