@@ -696,8 +696,10 @@ def build_db() -> None:
     for table, _ in COPIES:
         pattern = f"()-[r:{table}]->()" if table.isupper() else f"(n:{table})"
         var = "r" if table.isupper() else "n"
-        res = conn.execute(f"MATCH {pattern} RETURN count({var})")
-        assert isinstance(res, lb.QueryResult)
+        res = cast(
+            "lb.QueryResult",
+            conn.execute(f"MATCH {pattern} RETURN count({var})"),
+        )
         # stub says get_next() yields a dict; at runtime it is a list
         row = cast("list[Any]", res.get_next())
         print(f"  {table}: {row[0]:,}")

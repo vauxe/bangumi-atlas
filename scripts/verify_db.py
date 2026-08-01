@@ -81,8 +81,7 @@ def parquet_fingerprint(name: str) -> RowFingerprint:
 
 
 def query_fingerprint(conn: lb.Connection, query: str) -> RowFingerprint:
-    result = conn.execute(query)
-    assert isinstance(result, lb.QueryResult)
+    result = cast(lb.QueryResult, conn.execute(query))
     fingerprint = RowFingerprint()
     while result.has_next():
         # stub says get_next() yields a dict; at runtime it is a list
@@ -118,8 +117,7 @@ def main() -> None:
     conn = lb.Connection(db)
 
     def count(query: str) -> int:
-        res = conn.execute(query)
-        assert isinstance(res, lb.QueryResult)
+        res = cast(lb.QueryResult, conn.execute(query))
         # stub says get_next() yields a dict; at runtime it is a list
         return cast("list[Any]", res.get_next())[0]
 
