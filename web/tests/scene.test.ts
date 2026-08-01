@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { NodeStyleExtension } from "../src/scene";
+import { EDGE_WIDTHS, NodeStyleExtension } from "../src/scene";
+
+test("keeps node connections visually subordinate to nodes", () => {
+  assert.ok(EDGE_WIDTHS.context <= 0.5);
+  assert.ok(EDGE_WIDTHS.relation <= 1);
+  assert.ok(EDGE_WIDTHS.path <= 1.5);
+  assert.ok(EDGE_WIDTHS.context < EDGE_WIDTHS.relation);
+  assert.ok(EDGE_WIDTHS.relation < EDGE_WIDTHS.path);
+});
 
 test("clamps the final context-node radius in screen pixels", () => {
   const shaders = new NodeStyleExtension().getShaders() as {

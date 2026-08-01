@@ -29,6 +29,11 @@ const PERSON_DIM = 90; // 时间过滤不适用于人物/角色，只降低其�
 const EDGE_ZOOM = 1.2;
 const EDGE_CAP = 120_000; // 可见边上限(spike:边是填充率杀手)
 const EDGE_FADE_MS = 250;
+export const EDGE_WIDTHS = {
+  context: 0.5,
+  relation: 1,
+  path: 1.5,
+} as const;
 const CASCADE_STEP_MS = 30;
 const CASCADE_FADE_MS = 200;
 const PULSE_MS = 500;
@@ -761,7 +766,7 @@ export class Scene {
             getColor: { value: lineAlpha, size: 4, normalized: true },
           },
         },
-        getWidth: chain ? 2.4 : 1.6,
+        getWidth: chain ? EDGE_WIDTHS.path : EDGE_WIDTHS.relation,
         widthUnits: "pixels",
         pickable: true, // 悬停工作集边时显示解码后的关系名
         onHover: (info: { index: number; x: number; y: number }) => {
@@ -1051,7 +1056,7 @@ export class Scene {
           data: this.edgeData as never,
           getColor: [255, 255, 255, 16],
           opacity: this.edgeOpacity,
-          getWidth: 1,
+          getWidth: EDGE_WIDTHS.context,
           widthUnits: "pixels",
         }),
       );
