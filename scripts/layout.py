@@ -1,4 +1,4 @@
-"""Production 3D layout for the star atlas (EXPLORER_ARCHITECTURE.md §7.2).
+"""Production 3D layout; see docs/EXPLORER_ARCHITECTURE.md.
 
 Reads map-scope edges from data/parquet/, lays out connected nodes with
 the chosen algorithm (bake-off winner), detects Leiden communities with
@@ -93,7 +93,7 @@ def load_edges(index: dict[int, int]) -> np.ndarray:
 def run_layout(
     g: ig.Graph, algo: str, seed: np.ndarray | None
 ) -> np.ndarray:
-    """3D 布局,hub 降权(§6:边权 ∝ 1/√度数积)。传入 seed 即周更
+    """3D 布局，按 1/√(端点度数积)降低 hub 边权。传入 seed 即周更
     热启动:epochs 降为 10,结果 Procrustes 对齐回 seed 坐标框架。"""
     # simplify 后的真实度数;UMAP 语义是距离(越大越疏远),
     # 故 hub-hub 边给大距离 = 对 1/√(du·dv) 权重的等价表达
@@ -190,7 +190,7 @@ def shell_placement(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    # 默认 = 对决胜者 UMAP(EXPLORER_ARCHITECTURE.md §3);drl 仅留作对照
+    # UMAP 是布局对决胜者；DRL 仅保留用于复现实验。
     ap.add_argument("--algo", choices=["drl", "umap"], default="umap")
     ap.add_argument(
         "--warm-start",
@@ -266,8 +266,8 @@ def main() -> None:
                 )
             n_new = int((~known).sum())
             if n_new:
-                # 新节点 seed = 已知邻居质心(§7 论据"新节点长在簇
-                # 边缘"的落实);无已知邻居才退回 bbox 均匀随机
+                # 用已知邻居质心初始化新节点，使其从相关簇附近开始；
+                # 没有已知邻居时才退回 bbox 均匀随机。
                 sums = np.zeros((len(ck), 3), dtype=np.float64)
                 cnts = np.zeros(len(ck), dtype=np.int64)
                 e0, e1 = sub_edges[:, 0], sub_edges[:, 1]
@@ -326,8 +326,8 @@ def main() -> None:
 
     OUT.mkdir(parents=True, exist_ok=True)
 
-    # 跨周位移测量(§7 "位移留观" 的落地):对上周也在图中的
-    # 连通节点,统计 Procrustes 对齐后的位移 / 全图直径
+    # 对两周均存在的连通节点，统计 Procrustes 对齐后的位移 / 全图直径，
+    # 供发布门禁判断布局是否稳定。
     report: dict[str, object] = {
         "algo": args.algo,
         "warm_start": prev_map is not None,

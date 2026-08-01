@@ -5,7 +5,7 @@
  * (style、year)+ 少量 uniform 推导——年份滑块、媒介 chips、
  * 聚光都只改 uniform,零 CPU 循环、零属性重传
  * (实测 CPU 路径 985k 节点 recolor 循环 61ms/次 + ~21MB 重传,已移除)。
- * 可见性用 fs discard 表达,被滤除节点连拾取/高亮一起消失(§4)。
+ * 可见性用 fs discard 表达，被滤除节点连拾取和高亮一起消失。
  * 几何流式期间属性写入 GPU Buffer 增量区间,不整块重传。 */
 
 import { Deck, LayerExtension, OrbitView } from "@deck.gl/core";
@@ -25,13 +25,13 @@ import type { Geometry } from "./types";
 export type { OrbitState } from "./camera";
 
 const DIM_ALPHA = 38; // 聚光时语境层 ~15% 亮度
-const PERSON_DIM = 90; // 时间过滤:人物/角色降暗(不隐藏,§4)
+const PERSON_DIM = 90; // 时间过滤不适用于人物/角色，只降低其亮度
 const EDGE_ZOOM = 2.5; // fitZoom + 2.5 起近景淡入骨架边
 const EDGE_CAP = 120_000; // 可见边上限(spike:边是填充率杀手)
 const EDGE_FADE_MS = 250;
-const CASCADE_STEP_MS = 30; // §5:邻居 30ms 级联淡入
+const CASCADE_STEP_MS = 30;
 const CASCADE_FADE_MS = 200;
-const PULSE_MS = 500; // §5:选中光环单脉冲
+const PULSE_MS = 500;
 
 /** Crop dynamically packed cover textures to the circular node silhouette. */
 class CircleCropExtension extends LayerExtension {
@@ -122,7 +122,7 @@ atlas_style = instanceStyle;
 atlas_year = instanceYear;
 atlas_tags = instanceTags;
 atlas_fogDepth = distance(geometry.worldPosition.xyz, atlas.cameraPos);`,
-        // 孤立外壳的缩小随缩放消退:远景压到亚像素防糊住本体(§7),
+        // 孤立外壳的缩小随缩放消退：远景压到亚像素防糊住本体，
         // 近景恢复原尺寸——固定 0.35× 曾让贴近的节点时隐时现
         // (该钩子作用于像素钳制之后,能真正压到亚像素)
         "vs:DECKGL_FILTER_SIZE": `
@@ -133,8 +133,8 @@ in vec4 atlas_style;
 in float atlas_year;
 in vec2 atlas_tags;
 in float atlas_fogDepth;`,
-        // 颜色/亮度/可见性推导(与设计 §4/§5 一一对应;
-        // discard 使被滤除节点同时移出拾取与 autoHighlight)
+        // 颜色、亮度和可见性统一在 shader 中推导；
+        // discard 使被滤除节点同时移出拾取与 autoHighlight。
         "fs:DECKGL_FILTER_COLOR": `
 {
   float f_flags = atlas_style.x;
@@ -164,7 +164,7 @@ in float atlas_fogDepth;`,
            : f_etype < 2.5 ? vec3(229.0, 106.0, 64.0)
            : vec3(39.0, 171.0, 124.0);
   // 孤立外壳 9.2 万点包裹星系,远景亮度稍高即叠成实心球(实测
-  // 压到 ~14% 才不糊本体,§7);近景密度自然稀疏,压制随缩放
+  // 压到约 14% 才不糊住主体；近景密度自然稀疏，压制随缩放
   // 消退,凑近的孤立节点恢复接近普通节点的亮度
   float isoT = smoothstep(1.5, 3.5, atlas.zoomRel);
   float a = a_iso
@@ -320,7 +320,7 @@ export class Scene {
       parent,
       views: this.camera.view(),
       useDevicePixels: Math.min(devicePixelRatio, 1.5),
-      // §5:左键拖 = 平移,右键拖 = 轨道旋转(deck 默认相反)
+      // 交互约定与 deck 默认相反：左键平移，右键轨道旋转。
       controller: { inertia: 300, doubleClickZoom: false, dragMode: "pan" },
       initialViewState: this.camera.viewState,
       pickingRadius: 5,
@@ -364,8 +364,7 @@ export class Scene {
     const canvas = parent.querySelector("canvas");
     canvas?.setAttribute("role", "application");
     canvas?.setAttribute("aria-label", "Bangumi 三维关系星图");
-    // 右键负责轨道旋转(§5):拦掉浏览器右键菜单,否则每次
-    // 旋转松手都会弹菜单打断操作
+    // 右键负责轨道旋转；拦掉浏览器菜单，避免松手时打断操作。
     parent.addEventListener("contextmenu", (ev) => ev.preventDefault());
     // 双击 = 聚焦飞行(controller 的 doubleClickZoom 已让位)
     parent.addEventListener("dblclick", (ev) => {
@@ -618,7 +617,7 @@ export class Scene {
     if (!wasOn && cnt > 0) this.startEdgeFade();
   }
 
-  /** 骨架边淡入(§2/§4;prefers-reduced-motion 直接到位)。 */
+  /** 骨架边淡入；prefers-reduced-motion 时直接到位。 */
   private startEdgeFade(): void {
     if (prefersReducedMotion()) {
       this.edgeOpacity = 1;
@@ -639,7 +638,7 @@ export class Scene {
     this.edgeFadeRaf = requestAnimationFrame(tick);
   }
 
-  // ---- 工作集动效:级联淡入 + 光环单脉冲(动效仅三,§5)----
+  // ---- 工作集动效：级联淡入 + 光环单脉冲 ----
   private startWorkingSetAnim(): void {
     this.wsAnimStart = performance.now();
     cancelAnimationFrame(this.wsRaf);
@@ -757,7 +756,7 @@ export class Scene {
         },
         getWidth: chain ? 2.4 : 1.6,
         widthUnits: "pixels",
-        pickable: true, // §5:悬停工作集边 → 解码关系名 tooltip
+        pickable: true, // 悬停工作集边时显示解码后的关系名
         onHover: (info: { index: number; x: number; y: number }) => {
           const lbl =
             info.index >= 0 ? (edgeSegs[info.index]?.label ?? null) : null;
@@ -769,7 +768,7 @@ export class Scene {
         },
         parameters: { depthCompare: "always", depthWriteEnabled: false },
       }),
-      // 辉光:选中点脚下的柔和粉色光晕(§9-8 打磨,萌系点缀)
+      // 选中节点脚下使用柔和粉色辉光，与类别色分离。
       new ScatterplotLayer({
         id: "ws-glow",
         data: { length: 1, attributes: { getPosition: { value: pos, size: 3 } } },
@@ -781,7 +780,7 @@ export class Scene {
         billboard: true,
         parameters: { depthCompare: "always", depthWriteEnabled: false },
       }),
-      // X-ray 通道:深度失败 = 被挡,画低亮描边剪影(§4)
+      // X-ray 通道：深度失败表示被遮挡，此时绘制低亮描边剪影。
       new ScatterplotLayer({
         id: "ws-xray",
         data: {
@@ -878,7 +877,7 @@ export class Scene {
         }),
       );
     }
-    // 光环单脉冲:选中后 500ms 一次扩散(§5)
+    // 选中后只播放一次 500ms 扩散，避免持续动画干扰浏览。
     if (!reduced && t < PULSE_MS) {
       const k = t / PULSE_MS;
       layers.push(

@@ -11,7 +11,7 @@ export interface UrlState {
   rank: number | null;
   /** 共同关联/路径模式及其稳定起点。旧 URL 缺省为 null。 */
   link: LinkState | null;
-  /** 俯视正交开关(相机位姿的一部分,§5"每个状态可分享")。 */
+  /** 俯视正交开关是可分享相机状态的一部分。 */
   ortho: boolean;
 }
 

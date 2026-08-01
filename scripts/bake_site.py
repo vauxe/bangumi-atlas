@@ -1,6 +1,6 @@
 """Bake all static site data from parquet + layout.
 
-See EXPLORER_ARCHITECTURE.md §6 for the data contract.
+See docs/EXPLORER_ARCHITECTURE.md for the browser data contract.
 
 Products: site/data/ 下 manifest.json、几何 SoA bins、names.ndjson(流式)、
 骨架边、邻接分片(top-200 + 组总数 + 溢出分页)、详情分片(分集分页)、
@@ -64,15 +64,15 @@ ADJ_INLINE = 200
 EPS_INLINE = 200
 PAGE = 500
 DET_SPLIT = 4  # 详情 pack 按桶均分 4 个文件,单文件压缩后 <100MB
-SKELETON_TARGET = 500_000  # §2 预算;保底覆盖优先,超限显式报出
+SKELETON_TARGET = 500_000  # 传输目标；连通节点覆盖优先，超限显式报出
 LABELS_TOP = 20_000
-HOT_SHARDS = 24  # 高频首字分片数,随首块预取(§1 冷分片对冲)
+HOT_SHARDS = 24  # 随首块预取高频首字分片，保护冷搜索延迟
 SIZE_BUDGET = 1_000_000_000  # GH Pages 1GB 硬限
 FILE_BUDGET = 20_000  # CF Pages 迁移预案的文件数上限
 
 ETYPE = {"subject": 1, "person": 2, "character": 3}
 
-# 归一链:日文新字体 → 繁体(jp2t)→ 简体(t2s),再小写(§6 变体折叠)。
+# 归一链：日文新字体 → 繁体(jp2t) → 简体(t2s)，再小写。
 # 契约:索引键与客户端查询都从同一张单字映射表逐字折叠——OpenCC 整串
 # 转换有短语级上下文(編集→编辑),与客户端逐字 charmap 必然分歧,
 # 实测会让数千条目击不中,所以烘焙侧也只允许逐字。
@@ -272,7 +272,7 @@ def main() -> None:  # noqa: PLR0915
     assert media_vals.max() < 8, "media 超出 flags bit2-4 容量,契约需扩位"
     flags |= (media_vals.astype(np.uint8)) << 2
     (SITE / "flags.bin").write_bytes(flags.tobytes())
-    # 属性过滤列(§4 扩展):score u8 = 评分×10(无评分/非作品 = 0);
+    # 属性过滤列：score u8 = 评分×10(无评分/非作品 = 0)；
     # tags u32 = top-32 元标签位图(bit 序 = manifest.tags 下标)
     score_u8 = np.zeros(n, dtype=np.uint8)
     for i, k in enumerate(key_r):
@@ -423,7 +423,7 @@ def main() -> None:  # noqa: PLR0915
     shards: list[dict[str, Any]] = [dict() for _ in range(BUCKETS)]
     pages_pack = PackWriter()  # 邻接溢出页与分集溢出页共用
     for k, lst in adj.items():
-        # rank 即全库收藏度序:升序排序 = 按收藏度降序(§4 预排序)
+        # rank 按收藏度降序分配，因此升序排序就是热度降序。
         lst.sort()
         deduped: list[tuple[int, int]] = []
         for e in lst:
@@ -516,7 +516,7 @@ def main() -> None:  # noqa: PLR0915
     skel = er[order_w[kept]].astype(np.uint32)
     if len(skel) > SKELETON_TARGET:
         log(
-            f"WARNING: 骨架边 {len(skel):,} 条超出 §2 预算 "
+            f"WARNING: 骨架边 {len(skel):,} 条超出目标 "
             f"{SKELETON_TARGET:,}(保底覆盖 {len(baseline):,} 条边优先);"
             f"传输 {len(skel) * 8 / 1e6:.1f}MB,近景由客户端可见集上限兜底"
         )
@@ -748,16 +748,16 @@ def main() -> None:  # noqa: PLR0915
     }
     (SITE / "manifest.json").write_bytes(jdump(manifest))
     if total_bytes > SIZE_BUDGET:
-        # 硬门禁(§2/§10 双重门禁的烘焙半边):超限即构建失败
+        # Pages 体积是发布硬门禁，烘焙阶段直接失败。
         failures.append("站点体积超 GH Pages 1GB 硬限")
         log(
             f"MISMATCH: 站点 {total_bytes / 1e6:,.0f}MB 超 GH Pages 1GB "
-            f"硬限,构建失败 → §8 R2 迁移预案"
+            f"硬限,构建失败 → 迁移到 R2"
         )
     if n_files > FILE_BUDGET:
         log(
             f"WARNING: 文件数 {n_files:,} 超 CF Pages 2 万限,"
-            f"迁移走 R2(§8 既定路径)"
+            f"迁移到 R2"
         )
     log(
         f"manifest 写出;站点 raw 合计 {total_bytes / 1e6:,.0f} MB,"

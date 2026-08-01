@@ -221,7 +221,7 @@ def main() -> None:
     )
 
     print("[3/4] decode coverage + smoke queries")
-    # 全部 ★ 解码列的失配量;超基线 = 映射表陈旧,打 WARNING(§3)
+    # 全部解码列的失配量；超过显式基线说明映射表可能陈旧。
     baselines = {
         ("RELATES_TO", "relation"): 6,  # 上游已删的历史码
         ("WORKED_ON", "position_cn"): 0,

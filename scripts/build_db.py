@@ -548,7 +548,7 @@ def build_parquet() -> dict[str, int]:
         appears_in_rows(),
     )
 
-    # subject_id 是边属性而非端点,悬空不过滤但必须显式计数(§3 纪律)
+    # subject_id 是 VOICED 的作品上下文属性而非端点；悬空值保留但显式计数。
     voiced_dangling_subject = 0
 
     def voiced_rows() -> Iterator[tuple[Any, ...] | None]:
