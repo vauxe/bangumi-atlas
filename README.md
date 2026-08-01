@@ -1,7 +1,7 @@
 # bangumi-atlas
 
 将 [bangumi/Archive](https://github.com/bangumi/Archive) 的每周快照构建为
-LadybugDB 图数据库和可静态部署的三维关系星图。
+LadybugDB 图数据库和可静态部署的关系星图。
 
 ## 快速开始
 

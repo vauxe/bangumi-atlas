@@ -173,7 +173,7 @@ in float atlas_fogDepth;`,
   vec3 rgb = isSubject ? vec3(61.0, 142.0, 222.0)
            : f_etype < 2.5 ? vec3(229.0, 106.0, 64.0)
            : vec3(39.0, 171.0, 124.0);
-  // 孤立外壳 9.2 万点包裹星系,远景亮度稍高即叠成实心球(实测
+  // 孤立外环 9.2 万点包裹主体,远景亮度稍高即叠成实心带(实测
   // 压到约 14% 才不糊住主体；近景密度自然稀疏，压制随缩放
   // 消退,凑近的孤立节点恢复接近普通节点的亮度
   float isoT = smoothstep(0.2, 2.2, atlas.zoom);
@@ -373,7 +373,7 @@ export class Scene {
     });
     const canvas = parent.querySelector("canvas");
     canvas?.setAttribute("role", "application");
-    canvas?.setAttribute("aria-label", "Bangumi 三维关系星图");
+    canvas?.setAttribute("aria-label", "Bangumi 关系星图");
     // 右键负责轨道旋转；拦掉浏览器菜单，避免松手时打断操作。
     parent.addEventListener("contextmenu", (ev) => ev.preventDefault());
     // 双击 = 聚焦飞行(controller 的 doubleClickZoom 已让位)

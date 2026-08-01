@@ -1,6 +1,6 @@
-"""Layout bake-off for the choice in docs/EXPLORER_ARCHITECTURE.md.
+"""Historical layout bake-off for docs/EXPLORER_ARCHITECTURE.md.
 
-Candidates: igraph DRL-3D (force family) vs igraph UMAP-3D (embedding
+Candidates: igraph DRL-2D (force family) vs igraph UMAP-2D (embedding
 family). For each: runtime, edge-compactness, community separation, and
 the warm-start stability gate (p95 displacement of unperturbed nodes
 must stay under 1% of the layout diameter). Winner's coordinates are
@@ -47,9 +47,9 @@ def load_graph() -> tuple[ig.Graph, np.ndarray]:
 
 def run_layout(g: ig.Graph, candidate: str, seed: Any = None) -> np.ndarray:
     if candidate == "drl":
-        layout = g.layout_drl(seed=seed, dim=3)
+        layout = g.layout_drl(seed=seed, dim=2)
     elif candidate == "umap":
-        layout = g.layout_umap(dim=3, epochs=200, seed=seed)
+        layout = g.layout_umap(dim=2, epochs=200, seed=seed)
     else:
         raise ValueError(candidate)
     return np.asarray(layout.coords, dtype=np.float32)
@@ -103,10 +103,10 @@ def stability_gate(
     seed = coords.copy()
     touched = rng.choice(n, size=max(1, n // 100), replace=False)
     lo, hi = coords.min(0), coords.max(0)
-    seed[touched] = rng.uniform(lo, hi, (len(touched), 3)).astype(np.float32)
+    seed[touched] = rng.uniform(lo, hi, (len(touched), 2)).astype(np.float32)
     coords2 = run_layout(g, candidate, seed=seed.tolist())
     untouched = np.setdiff1d(np.arange(n), touched)
-    # 生产管线每周会做正交 Procrustes 对齐,门槛按对齐后位移评判
+    # Compare candidates after removing their arbitrary global rotation.
     from scipy.linalg import orthogonal_procrustes
 
     a = coords2[untouched] - coords2[untouched].mean(0)
@@ -127,7 +127,10 @@ def export_preview(coords: np.ndarray, g: ig.Graph, name: str) -> None:
     )
     c = coords - coords.mean(0)
     c *= 400 / np.abs(c).max()
-    (OUT / f"coords_{name}.bin").write_bytes(c.astype(np.float32).tobytes())
+    xyz = np.column_stack(
+        (c[:, 0], np.zeros(len(c), dtype=np.float32), c[:, 1])
+    )
+    (OUT / f"coords_{name}.bin").write_bytes(xyz.astype(np.float32).tobytes())
     (OUT / f"comm_{name}.bin").write_bytes(comm.tobytes())
     print(f"  preview 数据已导出:spike/coords_{name}.bin")
 
