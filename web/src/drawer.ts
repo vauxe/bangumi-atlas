@@ -43,6 +43,41 @@ interface Current {
   epsExpanded: boolean;
 }
 
+export function drawerTopActions(key?: number): string {
+  const external =
+    key === undefined
+      ? ""
+      : html`<a
+          class="drawer-action drawer-external"
+          href="${bgmUrl(key)}"
+          target="_blank"
+          rel="noopener"
+          title="在 bgm.tv 查看"
+          aria-label="在 bgm.tv 查看"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <path d="M14 5h5v5"></path>
+            <path d="M10 14 19 5"></path>
+            <path d="M19 13v6H5V5h6"></path>
+          </svg>
+        </a>`;
+  return html`<div class="drawer-actions">
+    ${raw(external)}
+    <button
+      id="drawer-close"
+      class="drawer-action"
+      type="button"
+      aria-label="关闭"
+    >
+      ×
+    </button>
+  </div>`;
+}
+
 export class Drawer {
   private el: HTMLElement;
   private deps: DrawerDeps;
@@ -236,7 +271,7 @@ export class Drawer {
       )
       .join("");
     this.el.innerHTML = html`
-      <button id="drawer-close" aria-label="关闭">×</button>
+      ${raw(drawerTopActions())}
       <h2>⚭ 共同关联</h2>
       <div class="chips">
         ${raw(this.chipOf(aRank))} × ${raw(this.chipOf(bRank))}
@@ -267,7 +302,7 @@ export class Drawer {
       })
       .join("");
     this.el.innerHTML = html`
-      <button id="drawer-close" aria-label="关闭">×</button>
+      ${raw(drawerTopActions())}
       <h2>🧭 最短路径(${res.ranks.length - 1} 跳)</h2>
       ${raw(rows)}
       <div class="note">
@@ -379,7 +414,7 @@ export class Drawer {
       : "";
 
     return html`
-      <button id="drawer-close" aria-label="关闭">×</button>
+      ${raw(drawerTopActions(key))}
       ${raw(drawerCover(key))}
       <h2>${title}</h2>
       ${raw(sub ? html`<div class="subtitle">${sub}</div>` : "")}
@@ -405,13 +440,6 @@ export class Drawer {
           : "",
       )}
       ${raw(groups)} ${raw(expandBtn)} ${raw(eps)}
-      <a
-        class="ext"
-        href="${bgmUrl(key)}"
-        target="_blank"
-        rel="noopener"
-        >在 bgm.tv 查看 →</a
-      >
     `;
   }
 }

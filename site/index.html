@@ -34,7 +34,8 @@ html, body { margin: 0; height: 100%; background: var(--surface);
   border: 1px solid var(--line); border-radius: 20px; outline: none; }
 #search:focus { border-color: var(--pink);
   box-shadow: 0 0 0 3px rgba(242, 91, 166, .22); }
-button:focus-visible, input:focus-visible { outline: 2px solid var(--pink);
+button:focus-visible, input:focus-visible, a:focus-visible {
+  outline: 2px solid var(--pink);
   outline-offset: 2px; }
 #hits { position: absolute; top: 100%; left: 0; right: 0; z-index: 9;
   background: var(--panel); border: 1px solid var(--line);
@@ -80,7 +81,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--pink);
   border-left: 2px solid var(--pink);
   box-shadow: -8px 0 24px rgba(242, 91, 166, .12); }
 #drawer.open { transform: none; }
-#drawer h2 { margin: 4px 24px 2px 0; font-size: 20px; }
+#drawer h2 { margin: 4px 72px 2px 0; font-size: 20px; }
 .chip-media { position: relative; width: 20px; height: 20px; flex: none;
   display: inline-grid; place-items: center; border-radius: 50%;
   overflow: hidden; }
@@ -96,12 +97,18 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--pink);
   object-fit: cover; border-radius: 12px; margin: 8px 0 10px 12px;
   clear: right; background: var(--line); }
 #drawer .subtitle { color: var(--ink-2); margin-bottom: 8px; }
-/* sticky:滚动时钉在视口顶部,任何深度都能关(absolute 会随内容滚走) */
-#drawer-close { position: sticky; top: 0; float: right; z-index: 2;
-  border: 0; width: 32px; height: 32px; border-radius: 50%;
+/* 顶部操作随抽屉滚动保持可用。 */
+.drawer-actions { position: sticky; top: 0; float: right; z-index: 2;
+  display: flex; gap: 4px; }
+.drawer-action { display: grid; place-items: center; border: 0;
+  width: 32px; height: 32px; border-radius: 50%; text-decoration: none;
   background: rgba(20, 38, 43, .85); color: var(--ink-2);
-  font-size: 20px; line-height: 1; cursor: pointer; }
-#drawer-close:hover { color: var(--ink); }
+  cursor: pointer; }
+.drawer-action:hover { color: var(--ink); background: var(--line); }
+.drawer-external svg { width: 17px; height: 17px; fill: none;
+  stroke: currentColor; stroke-width: 2; stroke-linecap: round;
+  stroke-linejoin: round; }
+#drawer-close { font-family: inherit; font-size: 20px; line-height: 1; }
 .badge { background: var(--line); border-radius: 8px; padding: 2px 8px;
   font-size: 12px; margin-right: 6px; }
 .tag { color: var(--ink-2); font-size: 12px; margin-right: 8px; }
@@ -128,7 +135,6 @@ button.more { background: none; border: 0; padding: 4px 6px;
   cursor: pointer; appearance: none; -webkit-appearance: none; }
 button.more:hover { text-decoration: underline; }
 .ep { font-size: 13px; padding: 2px 0; }
-.ext { display: inline-block; margin-top: 16px; color: var(--miku); }
 .loading { color: var(--ink-2); }
 
 #filters .chip { margin: 0 6px 6px 0; min-height: 28px;
