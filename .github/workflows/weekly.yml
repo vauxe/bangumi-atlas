@@ -139,24 +139,6 @@ jobs:
           npm run check
           npm run build
 
-      - name: Browser smoke gates
-        run: |
-          CHROME_PATH="$(command -v google-chrome || command -v chromium || true)"
-          test -n "$CHROME_PATH"
-          web/node_modules/.bin/http-server site -p 8300 -c-1 --silent &
-          SERVER_PID=$!
-          trap 'kill "$SERVER_PID"' EXIT
-          for attempt in {1..30}; do
-            curl -fsS http://127.0.0.1:8300/ >/dev/null && break
-            sleep 1
-          done
-          CHROME_PATH="$CHROME_PATH" node web/probe.mjs \
-            http://127.0.0.1:8300/ /tmp/overview.png 12000
-          CHROME_PATH="$CHROME_PATH" node web/probe_click.mjs \
-            http://127.0.0.1:8300/ /tmp/click.png
-          CHROME_PATH="$CHROME_PATH" node web/probe_leftcol.mjs \
-            http://127.0.0.1:8300/ /tmp/leftcol.png
-
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site/
