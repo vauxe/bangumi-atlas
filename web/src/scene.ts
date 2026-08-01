@@ -26,7 +26,7 @@ export type { OrbitState } from "./camera";
 
 const DIM_ALPHA = 38; // 聚光时语境层 ~15% 亮度
 const PERSON_DIM = 90; // 时间过滤不适用于人物/角色，只降低其亮度
-const EDGE_ZOOM = 2.5; // fitZoom + 2.5 起近景淡入骨架边
+const EDGE_ZOOM = 1.2;
 const EDGE_CAP = 120_000; // 可见边上限(spike:边是填充率杀手)
 const EDGE_FADE_MS = 250;
 const CASCADE_STEP_MS = 30;
@@ -66,7 +66,7 @@ const ATLAS_UNIFORM_BLOCK = `uniform atlasUniforms {
   float tagLo;
   float tagHi;
   float spotlight;
-  float zoomRel;
+  float zoom;
 } atlas;`;
 
 const atlasShaderModule = {
@@ -84,7 +84,7 @@ const atlasShaderModule = {
     tagLo: "f32",
     tagHi: "f32",
     spotlight: "f32",
-    zoomRel: "f32",
+    zoom: "f32",
   },
 } as const;
 
@@ -99,10 +99,10 @@ export interface AtlasUniforms {
   tagLo: number;
   tagHi: number;
   spotlight: number;
-  zoomRel: number;
+  zoom: number;
 }
 
-class NodeStyleExtension extends LayerExtension {
+export class NodeStyleExtension extends LayerExtension {
   static override extensionName = "NodeStyleExtension";
 
   override getShaders(): Record<string, unknown> {
@@ -122,12 +122,17 @@ atlas_style = instanceStyle;
 atlas_year = instanceYear;
 atlas_tags = instanceTags;
 atlas_fogDepth = distance(geometry.worldPosition.xyz, atlas.cameraPos);`,
-        // 孤立外壳的缩小随缩放消退：远景压到亚像素防糊住本体，
-        // 近景恢复原尺寸——固定 0.35× 曾让贴近的节点时隐时现
-        // (该钩子作用于像素钳制之后,能真正压到亚像素)
+        // deck 先钳制再做透视；这里在最终屏幕空间补上同一上下限。
         "vs:DECKGL_FILTER_SIZE": `
+if (gl_Position.w > 0.0) {
+  float radius = abs(size.x) -
+    (scatterplot.antialiasing ? SMOOTH_EDGE_RADIUS : 0.0);
+  float screenRadius = radius * project.focalDistance / gl_Position.w;
+  size.xy *= clamp(screenRadius, scatterplot.radiusMinPixels,
+    scatterplot.radiusMaxPixels) / screenRadius;
+}
 if (mod(floor(instanceStyle.x / 2.0), 2.0) >= 1.0)
-  size *= mix(0.35, 1.0, smoothstep(1.5, 3.5, atlas.zoomRel));`,
+  size.xy *= mix(0.35, 1.0, smoothstep(0.2, 2.2, atlas.zoom));`,
         "fs:#decl": `
 in vec4 atlas_style;
 in float atlas_year;
@@ -166,7 +171,7 @@ in float atlas_fogDepth;`,
   // 孤立外壳 9.2 万点包裹星系,远景亮度稍高即叠成实心球(实测
   // 压到约 14% 才不糊住主体；近景密度自然稀疏，压制随缩放
   // 消退,凑近的孤立节点恢复接近普通节点的亮度
-  float isoT = smoothstep(1.5, 3.5, atlas.zoomRel);
+  float isoT = smoothstep(0.2, 2.2, atlas.zoom);
   float a = a_iso
     ? mix(36.0, 150.0, isoT)
     : 160.0 + min(50.0, floor(f_size / 4.0));
@@ -539,9 +544,8 @@ export class Scene {
     const { edges, edgePos, geo } = this;
     if (!edges || !edgePos) return;
     const vs = this.camera.viewState;
-    const zoomRel = vs.zoom - this.camera.fitZoom;
     const wasOn = this.edgeCount > 0;
-    if (zoomRel < EDGE_ZOOM) {
+    if (vs.zoom < EDGE_ZOOM) {
       this.edgeCount = 0;
       this.edgeData = null;
       this.edgeCamKey = "";
@@ -573,7 +577,10 @@ export class Scene {
       return true;
     };
     const [tx, ty, tz] = vs.target;
-    const radius = (this.worldSize / Math.pow(2, zoomRel)) * 1.5;
+    // OrbitView 的 zoom=0 对应一世界单位/像素；直接由视口反推
+    // 当前可见世界范围，边搜索不再依赖全图 bbox。
+    const radius =
+      (Math.min(innerWidth, innerHeight) / Math.pow(2, vs.zoom)) * 1.5;
     const r2 = radius * radius;
     const pos = geo.positions;
     let cnt = 0;
@@ -1004,7 +1011,7 @@ export class Scene {
       tagLo: sel & 0xffff,
       tagHi: sel >>> 16,
       spotlight: state.selection !== null ? 1 : 0,
-      zoomRel: this.camera.viewState.zoom - this.camera.fitZoom,
+      zoom: this.camera.viewState.zoom,
     };
   }
 
@@ -1054,7 +1061,7 @@ export class Scene {
         ...labelLayers(
           this.labels,
           this.geo,
-          this.camera.viewState.zoom - this.camera.fitZoom,
+          this.camera.viewState.zoom,
           (rank) => this.isVisible(rank),
           this.styleVersion,
           this.labelCache,

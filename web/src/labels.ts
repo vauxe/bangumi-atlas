@@ -19,6 +19,8 @@ export interface LabelData {
 // 圆体优先(macOS 圆体 / Windows 幼圆);canvas font 字符串不能含
 // ui-rounded 这类新 CSS 泛型,否则整串被忽略
 const LABEL_FONT = '"Yuanti SC", "YouYuan", "PingFang SC", sans-serif';
+const COMMUNITY_LABEL_MAX_ZOOM = 1.9;
+const NODE_LABEL_MIN_ZOOM = -0.1;
 
 /** 由 Scene 持有的缓存槽。 */
 export interface LabelCache {
@@ -45,7 +47,7 @@ export function labelLayers(
   cache.chars ??= [...new Set(labels.charset + "0123456789…")].join("");
   cache.commData ??= Object.values(labels.comm);
   const out: unknown[] = [];
-  if (zoom < 3.2) {
+  if (zoom < COMMUNITY_LABEL_MAX_ZOOM) {
     out.push(
       new TextLayer({
         id: "labels-comm",
@@ -73,10 +75,10 @@ export function labelLayers(
       }),
     );
   }
-  if (zoom >= 1.2) {
+  if (zoom >= NODE_LABEL_MIN_ZOOM) {
     // 节点标签:zoom 越深显示越多;cap 量化到 2 的幂档位,
     // 同档 + 同过滤版本 + 同加载进度时复用 data 引用
-    const rawCap = Math.floor(60 * Math.pow(4, Math.max(0, zoom - 1)));
+    const rawCap = Math.floor(90 * Math.pow(4, Math.max(0, zoom)));
     const capBucket = Math.min(
       labels.nodes.length,
       Math.pow(2, Math.ceil(Math.log2(Math.max(rawCap, 60)))),
