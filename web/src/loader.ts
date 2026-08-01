@@ -22,7 +22,7 @@ const BASE = "data";
 let version = "";
 let manifestRef: Manifest | null = null;
 
-/** manifest 之后的一切数据请求都以数据版本寻址(§6 防缓存错配)。 */
+/** manifest 之后的一切数据请求都以数据版本寻址，避免跨发布缓存错配。 */
 function url(path: string): string {
   return version
     ? `${BASE}/${path}?v=${encodeURIComponent(version)}`
@@ -244,7 +244,7 @@ export async function loadEdges(): Promise<Uint32Array> {
   return new Uint32Array(buf.buffer);
 }
 
-/** Range 点查:深链/行走落点在流式未覆盖时先取坐标(§6 定长记录)。
+/** Range 点查：深链或行走落点未被流式覆盖时，先读取定长坐标记录。
  * 开发环境等不支持 Range 的服务器会回整文件,这里做兼容切片。 */
 export async function pointByRank(
   manifest: Manifest,
@@ -515,7 +515,7 @@ async function fetchShard(first: string): Promise<SearchEntry[]> {
 
 export const searchShard = fetchShard;
 
-/** 高频首字分片随首块预取(§1:冷分片 p95 对冲)。 */
+/** 高频首字分片随首块预取，降低首次搜索命中冷分片的概率。 */
 export function prefetchHotShards(manifest: Manifest): void {
   for (const hex of manifest.hot_shards) {
     const cp = Number.parseInt(hex, 16);

@@ -120,8 +120,8 @@ export class Drawer {
   }
 
 
-  /** 工作集邻居 = 全局收藏度 top-N。rank 即全库收藏度序,inline
-   * 各组组内已按 rank 升序,扁平后取最小的 N 个即全局 top-N(§4)。 */
+  /** 工作集邻居 = 全局收藏度 top-N。rank 即全库收藏度序，inline
+   * 各组组内已按 rank 升序，扁平后取最小的 N 个即全局 top-N。 */
   neighborsOf(
     adj: AdjEntry | null,
     cap = 50,
@@ -129,7 +129,7 @@ export class Drawer {
     return relationNeighbors(adj, cap);
   }
 
-  /** 展开全部:先放开各组 inline 上限,再按页拉取溢出条目(§6)。
+  /** 展开全部：先放开各组 inline 上限，再按页拉取溢出条目。
    * 页偏移内嵌在条目里(pages.pack 的 [offset, len]);
    * 在途锁 + 页号先占位:双击不会重复加载或跳页。 */
   private async expandRelations(

@@ -1,4 +1,4 @@
-/** 启动序列与交互接线(EXPLORER_ARCHITECTURE.md §3-§5)。
+/** 启动序列与交互接线；整体契约见 docs/EXPLORER_ARCHITECTURE.md。
  * 关键次序:场景先于几何流建立 → 首块即渲;名字表并行流式;
  * 边/标签/热分片后台补齐。历史栈:离散导航 pushState,相机/过滤
  * replaceState;popstate 完整还原(每个操作可逆)。 */
@@ -108,7 +108,7 @@ async function boot(): Promise<void> {
     history.pushState(null, "", currentUrl());
   };
 
-  // ---- 场景:先建,首块到达即渲(§2/§9-1)----
+  // ---- 场景先建，确保首块几何到达即可渲染 ----
   const [blo, bhi] = manifest.bbox;
   const worldSize = Math.max(
     ...[0, 1, 2].map((i) => (bhi[i] ?? 1) - (blo[i] ?? 0)),
@@ -146,7 +146,7 @@ async function boot(): Promise<void> {
       if (!rotating) replaceUrl();
     },
   });
-  // ---- 几何流:场景已就绪,首块回调即渲(§2/§9-1)----
+  // ---- 几何流：场景已就绪，首块回调即可渲染 ----
   let geometryComplete = false;
   let pendingUrlHash: string | null = null;
   const geoDone = gstream.start((loaded) => {
@@ -209,7 +209,7 @@ async function boot(): Promise<void> {
       return point;
     });
 
-  /** 连接查询:第二个节点选定后计算并呈现(§4 扩展)。 */
+  /** 第二个节点选定后计算并呈现连接查询。 */
   async function handleLink(
     link: LinkState,
     bRank: number,
@@ -291,7 +291,7 @@ async function boot(): Promise<void> {
     state.link = null;
     state.selection = rank;
     state.selectionKey = keyHint;
-    // 落点未流式覆盖:一次 Range 点查同时解析坐标与 key(§6)
+    // 落点未流式覆盖时，一次 Range 点查同时解析坐标与 key。
     let key = keyHint ?? geo.key[rank] ?? 0;
     if (rank >= geo.loaded && (!geo.sparse.has(rank) || !key)) {
       const pt = await pointByRank(manifest, rank);
@@ -424,7 +424,7 @@ async function boot(): Promise<void> {
   };
   $("#dice").addEventListener("click", rollDice);
 
-  // ---- 键盘(§5 输入语法表)----
+  // ---- 键盘快捷键 ----
   document.addEventListener("keydown", (ev) => {
     if (ev.target instanceof HTMLInputElement) return;
     const k = ev.key.toLowerCase();

@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- 帧率 spike(EXPLORER_ARCHITECTURE.md §1.3)。一次性实验代码,不代表应用工程标准。 -->
+<!-- 对照探索器性能预算的帧率实验；一次性代码，不代表应用工程标准。 -->
 <html lang="zh">
 <head>
 <meta charset="utf-8">
@@ -15,7 +15,7 @@
 <div id="hud">初始化…</div>
 <script>
 "use strict";
-const N = 985_328;            // 入图节点数(设计文档 §2)
+const N = 985_328;            // 基准场景的节点数
 const E = 500_000;            // 骨架边数
 const CLUSTERS = 60;
 const hud = document.getElementById("hud");

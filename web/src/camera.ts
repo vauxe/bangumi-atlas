@@ -1,4 +1,4 @@
-/** 相机模块(§6):turntable 轨道、聚焦飞行、复位、俯视正交保底、
+/** 相机模块：turntable 轨道、聚焦飞行、复位、俯视正交保底、
  * 冷启动自转。视图状态是唯一事实,过渡参数不污染状态本身。 */
 
 import { LinearInterpolator, OrbitView } from "@deck.gl/core";
@@ -19,7 +19,7 @@ export function prefersReducedMotion(): boolean {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
-const FLY_MS = 400; // §5:双击/行走聚焦飞行 400ms
+const FLY_MS = 400;
 const MAX_ZOOM_REL = 7;
 
 export class Camera {
@@ -27,7 +27,7 @@ export class Camera {
   readonly fitZoom: number;
   readonly maxZoom: number;
   viewState: CameraViewState;
-  /** 俯视正交保底(§4/§7 四件套之一):true 时投影切正交。 */
+  /** 正交模式属于相机状态；启用时切换投影而不改变轨道位姿。 */
   ortho = false;
   private homeState: CameraViewState;
 
@@ -57,8 +57,8 @@ export class Camera {
     });
   }
 
-  /** 接收 deck 回调的视图状态;剥离过渡参数,防止 400ms 过渡
-   * 被后续 setView 继承(§5:复位/俯视为"即时")。 */
+  /** 接收 deck 回调的视图状态；剥离过渡参数，防止 400ms 过渡
+   * 被后续即时复位或投影切换继承。 */
   absorb(vs: Record<string, unknown>): void {
     const {
       transitionDuration: _d,
@@ -120,7 +120,7 @@ export class Camera {
     return this.viewState;
   }
 
-  /** 冷启动背景自转一步(§5);reduced-motion 时由调用方跳过。 */
+  /** 冷启动背景自转一步；reduced-motion 时由调用方跳过。 */
   orbitStep(deg: number): OrbitState {
     this.viewState = {
       ...this.viewState,

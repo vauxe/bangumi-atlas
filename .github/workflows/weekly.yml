@@ -1,4 +1,4 @@
-# 每周烘焙与发布(EXPLORER_ARCHITECTURE.md §8)
+# 每周烘焙与发布；门禁契约见 docs/EXPLORER_ARCHITECTURE.md。
 # dump 周三 05:00 GMT+8 更新;本 workflow 周三 08:00 GMT+8 运行。
 name: bake-and-deploy
 
@@ -42,7 +42,7 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: Check pipeline types and lint (mypy 契约,§3)
+      - name: Check pipeline types and lint
         run: |
           uv run python -m unittest discover -s tests
           uv run ruff check scripts/ tests/
@@ -100,7 +100,7 @@ jobs:
           fi
           cp data/layout/coords.parquet /tmp/cached_coords.parquet
           echo "layout report:" && cat data/layout/report.json
-          # §7 位移门槛 3% 是发布硬门禁;超限不得覆盖稳定坐标。
+          # 跨周 p95 位移超过 3% 时不得覆盖稳定坐标。
           if [ "${{ inputs.allow_cold_start }}" = "true" ]; then
             uv run python scripts/check_layout_report.py \
               --allow-cold-start data/layout/report.json
@@ -117,14 +117,14 @@ jobs:
       - name: Bake site data (row-level reconciliation inside)
         run: uv run python scripts/bake_site.py
 
-      - name: Enforce size / file-count budgets (§8)
+      - name: Enforce size / file-count budgets
         run: |
           uv run python - <<'EOF'
           import json, sys
           m = json.load(open("site/data/manifest.json"))
           print(f"site: {m['total_bytes'] / 1e6:,.0f} MB, {m['n_files']:,} files")
           if m["total_bytes"] > 1_000_000_000:
-              sys.exit("site exceeds GH Pages 1GB hard limit -> migrate to R2 (§8)")
+              sys.exit("site exceeds GH Pages 1GB hard limit -> migrate to R2")
           if m["total_bytes"] > 900_000_000:
               print("::warning::site size within 10% of the 1GB Pages limit")
           if m["n_files"] > 20_000:

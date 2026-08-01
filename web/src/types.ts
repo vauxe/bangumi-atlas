@@ -1,4 +1,4 @@
-/** 数据契约类型(EXPLORER_ARCHITECTURE.md §6;与烘焙侧 Python 手写镜像,变更须同步)。 */
+/** 浏览器数据契约；与烘焙侧 Python 手写镜像，变更须同步。 */
 
 export interface Manifest {
   /** 内容寻址版本(dump-YYYY-MM-DD-<hash>);全部数据请求以 ?v= 携带。 */
