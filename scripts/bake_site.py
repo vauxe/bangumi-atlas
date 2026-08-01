@@ -14,7 +14,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import orjson
@@ -349,8 +349,8 @@ def main() -> None:  # noqa: PLR0915
         绝不把单向事实伪装成同名的互惠关系。
         期望条目数由行数 + 集合运算独立推导,不依赖入列过程。"""
         nonlocal entries_expected, synthesized_reverse
-        a, b, labels = read_edges(fname, etype_s, etype_s, label_col)
-        assert labels is not None
+        a, b, maybe_labels = read_edges(fname, etype_s, etype_s, label_col)
+        labels = cast("list[Any]", maybe_labels)
         codes = (a.astype(np.int64) << 32) | b.astype(np.int64)
         directed = set(codes.tolist())
         rev_codes = (b.astype(np.int64) << 32) | a.astype(np.int64)
