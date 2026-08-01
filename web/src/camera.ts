@@ -11,39 +11,31 @@ export interface OrbitState {
   [k: string]: unknown;
 }
 
-interface CameraViewState extends OrbitState {
-  maxZoom: number;
-}
-
 export function prefersReducedMotion(): boolean {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 const FLY_MS = 400;
-const MAX_ZOOM_REL = 7;
+// OrbitView 在 zoom=0 时以一世界单位对应一像素；聚焦采用稳定的局部
+// 空间尺度，不随全图 bbox 改变。
+const FOCUS_ZOOM = 3.2;
 
 export class Camera {
-  /** 视口恰好装下全图的 zoom(由 bbox 自适应标定)。 */
-  readonly fitZoom: number;
-  readonly maxZoom: number;
-  viewState: CameraViewState;
+  viewState: OrbitState;
   /** 正交模式属于相机状态；启用时切换投影而不改变轨道位姿。 */
   ortho = false;
-  private homeState: CameraViewState;
+  private homeState: OrbitState;
 
   constructor(worldSize: number) {
-    this.fitZoom = Math.log2(
+    // 仅用 bbox 标定全图 home；交互与局部渲染使用绝对 zoom。
+    const fitZoom = Math.log2(
       Math.min(innerWidth, innerHeight) / Math.max(worldSize, 1),
     );
-    // OrbitView 的 zoom 就是推拉距离；maxZoom 只限定相机最近位置。
-    // fit+7 已比默认聚焦再放大 5.7 倍，足够观察局部结构。
-    this.maxZoom = this.fitZoom + MAX_ZOOM_REL;
     this.homeState = {
       target: [0, 0, 0],
-      zoom: this.fitZoom - 0.2,
+      zoom: fitZoom - 0.2,
       rotationX: 25,
       rotationOrbit: 0,
-      maxZoom: this.maxZoom,
     };
     this.viewState = { ...this.homeState };
   }
@@ -57,21 +49,17 @@ export class Camera {
     });
   }
 
-  /** 接收 deck 回调的视图状态；剥离过渡参数，防止 400ms 过渡
-   * 被后续即时复位或投影切换继承。 */
+  /** 接收 deck 回调的视图状态；剥离过渡参数和遗留缩放上限，避免
+   * 把控制器元数据保存为共享相机状态。 */
   absorb(vs: Record<string, unknown>): void {
     const {
       transitionDuration: _d,
       transitionInterpolator: _i,
       transitionEasing: _e,
+      maxZoom: _maxZoom,
       ...clean
     } = vs;
-    const next = clean as unknown as OrbitState;
-    this.viewState = {
-      ...next,
-      zoom: Math.min(next.zoom, this.maxZoom),
-      maxZoom: this.maxZoom,
-    };
+    this.viewState = clean as unknown as OrbitState;
   }
 
   /** 聚焦飞行:返回带一次性过渡参数的状态供 deck 消费,
@@ -84,11 +72,7 @@ export class Camera {
     this.viewState = {
       ...this.viewState,
       target: pos,
-      zoom: Math.min(
-        zoom ?? Math.max(this.viewState.zoom, this.fitZoom + 4.5),
-        this.maxZoom,
-      ),
-      maxZoom: this.maxZoom,
+      zoom: zoom ?? Math.max(this.viewState.zoom, FOCUS_ZOOM),
     };
     return {
       ...this.viewState,
@@ -113,7 +97,7 @@ export class Camera {
     return this.viewState;
   }
 
-  /** `H`:相机复位(恢复透视)。 */
+  /** `R`:相机复位(恢复透视)。 */
   home(): OrbitState {
     this.ortho = false;
     this.viewState = { ...this.homeState };
