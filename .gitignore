@@ -12,3 +12,7 @@ web/node_modules/
 web/.test-dist/
 site/app.js
 spike/*.bin
+data/raw/
+data/fact-snapshots/
+data/site-releases/
+data/verifications/
