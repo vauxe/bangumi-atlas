@@ -1,5 +1,5 @@
 /** 启动序列与交互接线；整体契约见 docs/EXPLORER_ARCHITECTURE.md。
- * 关键次序:场景先于几何流建立 → 首块即渲;名字表并行流式;
+ * 关键次序:场景先于几何流建立 → 首块即渲;名字按 rank 块读取;
  * 边/标签/热分片后台补齐。历史栈:离散导航 pushState,相机/过滤
  * replaceState;popstate 完整还原(每个操作可逆)。 */
 
@@ -12,7 +12,7 @@ import {
   loadCharmap,
   loadEdges,
   loadManifest,
-  loadNames,
+  openNames,
   openGeometry,
   pointByRank,
   prefetch,
@@ -49,16 +49,11 @@ async function boot(): Promise<void> {
   // ---- 数据流:先分配缓冲拿到 geo,流在场景建成后才启动 ----
   const gstream = openGeometry(manifest);
   const geo = gstream.geo;
-  const { names, done: namesDone } = loadNames(manifest.n_nodes);
-  let namesFailed = false;
-  namesDone.catch((error: unknown) => {
-    namesFailed = true;
-    reportError("名字表加载", error);
-  });
+  const names = openNames(manifest);
 
   const drawer = new Drawer($("#drawer"), {
     geo,
-    names: () => names,
+    names,
     manifest,
     walk: (rank) => runTask(select(rank, "fly"), "节点加载"),
     arm: (kind, fromRank, fromKey) => {
@@ -71,6 +66,7 @@ async function boot(): Promise<void> {
   });
 
   const tooltip = $("#tooltip");
+  let hoveredNode: { rank: number; x: number; y: number } | null = null;
   const showTooltip = (text: string, sub: string, x: number, y: number): void => {
     tooltip.style.display = "block";
     tooltip.style.left = `${x + 12}px`;
@@ -111,19 +107,36 @@ async function boot(): Promise<void> {
     },
     onHover: (rank, x, y) => {
       if (rank === null || rank >= geo.loaded) {
+        hoveredNode = null;
         tooltip.style.display = "none";
         return;
       }
+      hoveredNode = { rank, x, y };
       prefetch(geo.key[rank] ?? 0, manifest.buckets);
-      const name = names.c[rank] ?? names.n[rank];
+      const name = names.get(rank);
       showTooltip(
         name ?? "…",
         TYPE_NAMES[etype(geo.key[rank] ?? 0)] ?? "",
         x,
         y,
       );
+      if (name === null)
+        runTask(
+          names.load([rank]).then(() => {
+            const hovered = hoveredNode;
+            if (!hovered || hovered.rank !== rank) return;
+            showTooltip(
+              names.get(rank) ?? `#${rank}`,
+              TYPE_NAMES[etype(geo.key[rank] ?? 0)] ?? "",
+              hovered.x,
+              hovered.y,
+            );
+          }),
+          "名字加载",
+        );
     },
     onHoverEdge: (labelId, x, y) => {
+      hoveredNode = null;
       if (labelId === null) {
         tooltip.style.display = "none";
         return;
@@ -136,11 +149,10 @@ async function boot(): Promise<void> {
   let geometryComplete = false;
   let pendingUrlHash: string | null = null;
   const geoDone = gstream.start((loaded) => {
-    if (!namesFailed)
-      hud.textContent =
-        loaded === manifest.n_nodes
-          ? ""
-          : `渲染 ${loaded.toLocaleString()} / ${manifest.n_nodes.toLocaleString()} 节点`;
+    hud.textContent =
+      loaded === manifest.n_nodes
+        ? ""
+        : `渲染 ${loaded.toLocaleString()} / ${manifest.n_nodes.toLocaleString()} 节点`;
     scene.geometryGrew();
   });
 
@@ -158,7 +170,7 @@ async function boot(): Promise<void> {
   runTask(
     geoDone.then(() => {
       geometryComplete = true;
-      if (!namesFailed) hud.textContent = "";
+      hud.textContent = "";
       scene.geometryGrew();
       // 稳定 key 在流式未覆盖时挂起整个 URL。全量就绪后从原 URL
       // 重新解析两端与相机，避免把 common/path 悄悄降级成普通选中。
@@ -227,7 +239,7 @@ async function boot(): Promise<void> {
       const top = items.slice(0, 49);
       state.neighbors = [link.fromRank, ...top.map((i) => i.rank)];
       state.neighborLabels = [-1, ...top.map((i) => i.lb)];
-      drawer.showCompare(link.fromRank, bRank, items, direct);
+      await drawer.showCompare(link.fromRank, bRank, items, direct);
     } else {
       const res = await findPath(
         link.fromRank,
@@ -249,9 +261,10 @@ async function boot(): Promise<void> {
       state.pathLabels = res.labels;
       state.neighbors = res.ranks.filter((r) => r !== bRank);
       state.neighborLabels = state.neighbors.map(() => -1);
-      drawer.showPath(res);
+      await drawer.showPath(res);
       if (cam === "fly") scene.flyTo(bRank);
     }
+    if (epoch !== navigationEpoch) return;
     notify();
     if (push) pushUrl();
     hud.textContent = "";
@@ -336,12 +349,12 @@ async function boot(): Promise<void> {
   // ---- 结果面板:过滤谓词 + 枚举 = 完整查询 ----
   const results = new Results($("#results"), {
     geo,
-    names: () => names,
+    names,
     visible: (r) => scene.isVisible(r),
     pick: (rank) => void select(rank, "fly"),
+    reportError: (error) => reportError("结果名字加载", error),
   });
   subscribe(() => results.refresh());
-  void namesDone.then(() => results.refresh()).catch(() => {});
   void geoDone
     .then(() => results.refresh(), () => undefined)
     .catch((error: unknown) => reportError("结果索引刷新", error));

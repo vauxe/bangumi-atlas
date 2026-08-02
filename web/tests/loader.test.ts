@@ -5,7 +5,7 @@ import { gzipSync } from "node:zlib";
 
 import {
   loadManifest,
-  loadNames,
+  openNames,
   openGeometry,
   pointByRank,
   searchShard,
@@ -28,6 +28,8 @@ function testManifest(
 ): Manifest {
   const completeFiles = {
     "positions.bin": [nNodes * 12, "0".repeat(64)] as [number, string],
+    "names.idx": [8, "0".repeat(64)] as [number, string],
+    "names.pack": [1, hash(new Uint8Array([0]))] as [number, string],
     ...files,
   };
   return {
@@ -35,6 +37,7 @@ function testManifest(
     dump_version: "test-dump",
     n_nodes: nNodes,
     n_edges_skeleton: 0,
+    name_block_size: 2,
     buckets: 1,
     det_packs: 1,
     adj_inline: 1,
@@ -94,19 +97,65 @@ test("rejects obsolete geometry manifests before streaming", async () => {
   await assert.rejects(loadManifest(), /布局应为 topology-2\.5d\/3D.*重建站点数据/);
 });
 
-test("rejects a same-length names mutation that violates its hash", async () => {
-  const published = encoder.encode('["A",null]\n');
-  const mutated = encoder.encode('["B",null]\n');
-  const manifest = testManifest({
-    "names.ndjson": [published.byteLength, hash(published)],
-  });
-  await installFetch(manifest, async (path) => {
-    assert.match(path, /names\.ndjson$/);
-    return new Response(mutated, { status: 200 });
+test("rejects manifests with the obsolete whole name table", async () => {
+  const current = testManifest({});
+  const obsolete = {
+    ...current,
+    name_block_size: undefined,
+    files: Object.fromEntries(
+      Object.entries(current.files).filter(([path]) => !path.startsWith("names.")),
+    ),
+  };
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(obsolete))) as typeof fetch;
+
+  await assert.rejects(loadManifest(), /名字表应为按 rank 分块.*重建站点数据/);
+});
+
+test("loads and caches only the requested name blocks", async () => {
+  const first = gzipSync(JSON.stringify([["A", null], ["B", "乙"]]));
+  const second = gzipSync(JSON.stringify([["C", "丙"]]));
+  const pack = new Uint8Array(Buffer.concat([first, second]));
+  const index = new Uint8Array(
+    new Uint32Array([0, first.byteLength, pack.byteLength]).buffer,
+  );
+  const manifest = testManifest(
+    {
+      "names.idx": [index.byteLength, hash(index)],
+      "names.pack": [pack.byteLength, hash(pack)],
+    },
+    3,
+  );
+  const ranges: string[] = [];
+  await installFetch(manifest, async (path, init) => {
+    if (path.endsWith("names.idx")) return new Response(index);
+    assert.match(path, /names\.pack$/);
+    const range = new Headers(init?.headers).get("Range");
+    assert.ok(range);
+    ranges.push(range);
+    const match = range.match(/^bytes=(\d+)-(\d+)$/);
+    assert.ok(match);
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    return new Response(pack.slice(start, end + 1), {
+      status: 206,
+      headers: { "Content-Range": `bytes ${start}-${end}/${pack.byteLength}` },
+    });
   });
 
-  const { done } = loadNames(1);
-  await assert.rejects(done, /names\.ndjson: sha256 mismatch/);
+  const names = openNames(manifest);
+  assert.equal(names.get(2), null);
+  await names.load([2]);
+  assert.equal(names.get(2), "丙");
+  assert.equal(names.get(0), null);
+  await names.load([2]);
+  await names.load([0, 1]);
+  assert.equal(names.get(0), "A");
+  assert.equal(names.get(1), "乙");
+  assert.deepEqual(ranges, [
+    `bytes=${first.byteLength}-${pack.byteLength - 1}`,
+    `bytes=0-${first.byteLength - 1}`,
+  ]);
 });
 
 test("rejects a 206 response for the wrong byte range", async () => {

@@ -20,7 +20,7 @@ import type {
 
 export interface DrawerDeps {
   geo: Geometry;
-  names: () => Names | null;
+  names: Names;
   manifest: Manifest;
   walk: (rank: number) => void;
   /** 连接查询:锁定起点,等待用户选第二个节点。 */
@@ -82,6 +82,7 @@ export class Drawer {
   private el: HTMLElement;
   private deps: DrawerDeps;
   private cur: Current | null = null;
+  private viewEpoch = 0;
 
   constructor(el: HTMLElement, deps: DrawerDeps) {
     this.el = el;
@@ -112,6 +113,7 @@ export class Drawer {
   }
 
   hide(): void {
+    this.viewEpoch++;
     this.el.classList.remove("open");
   }
 
@@ -124,13 +126,13 @@ export class Drawer {
   }
 
   nameOf(rank: number): string {
-    const names = this.deps.names();
-    return names?.c[rank] ?? names?.n[rank] ?? `#${rank}`;
+    return this.deps.names.get(rank) ?? `#${rank}`;
   }
 
   /** key 由调用方解析传入:深链/行走落点未流式覆盖时
    * geo.key[rank] 还是 0,直接读会查错分片(main 已 Range 点查)。 */
   async show(rank: number, key: number): Promise<void> {
+    const viewEpoch = ++this.viewEpoch;
     this.el.classList.add("open");
     this.el.innerHTML = html`<div class="loading">加载中…</div>`;
     const [det, adj] = await Promise.all([
@@ -138,7 +140,7 @@ export class Drawer {
       loadAdj(key, this.deps.manifest.buckets),
     ]);
     if (state.selection !== rank) return; // 已经走到别处
-    this.cur = {
+    const cur: Current = {
       rank,
       key,
       det,
@@ -151,9 +153,16 @@ export class Drawer {
       epsPagesLoaded: 0,
       epsExpanded: false,
     };
+    this.cur = cur;
+    await this.deps.names.load([
+      rank,
+      ...(adj?.g ?? []).flatMap(([, , ranks]) =>
+        ranks.slice(0, GROUP_CHIPS),
+      ),
+    ]);
+    if (this.viewEpoch !== viewEpoch || this.cur !== cur) return;
     this.rerender();
   }
-
 
   /** 工作集邻居 = 全局收藏度 top-N。rank 即全库收藏度序，inline
    * 各组组内已按 rank 升序，扁平后取最小的 N 个即全局 top-N。 */
@@ -186,6 +195,12 @@ export class Drawer {
         cur.loading = false;
       }
     }
+    await this.deps.names.load(
+      (cur.adj.g ?? []).flatMap(([, , ranks]) => ranks).concat(
+        cur.extra.map(([, rank]) => rank),
+      ),
+    );
+    if (this.cur !== cur) return;
     this.rerender();
     this.restoreAnchor(anchor);
   }
@@ -251,14 +266,22 @@ export class Drawer {
   }
 
   /** 共同关联视图:两端点 + 交集列表(各自 top-200 关系内)。 */
-  showCompare(
+  async showCompare(
     aRank: number,
     bRank: number,
     items: CommonItem[],
     direct: number | null,
-  ): void {
+  ): Promise<void> {
+    const viewEpoch = ++this.viewEpoch;
     this.cur = null; // 非详情视图,分页态失效
     this.el.classList.add("open");
+    this.el.innerHTML = html`<div class="loading">加载名字…</div>`;
+    await this.deps.names.load([
+      aRank,
+      bRank,
+      ...items.slice(0, 100).map((item) => item.rank),
+    ]);
+    if (this.viewEpoch !== viewEpoch) return;
     const rows = items
       .slice(0, 100)
       .map(
@@ -289,9 +312,13 @@ export class Drawer {
   }
 
   /** 最短路径视图:链式列表,关系名标在相邻两点之间。 */
-  showPath(res: PathResult): void {
+  async showPath(res: PathResult): Promise<void> {
+    const viewEpoch = ++this.viewEpoch;
     this.cur = null;
     this.el.classList.add("open");
+    this.el.innerHTML = html`<div class="loading">加载名字…</div>`;
+    await this.deps.names.load(res.ranks);
+    if (this.viewEpoch !== viewEpoch) return;
     const rows = res.ranks
       .map((rank, i) => {
         const arrow =

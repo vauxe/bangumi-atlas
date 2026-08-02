@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ from scripts.site_contracts import (
     read_dump_version,
     reverse_navigation_label,
     validate_layout_report,
+    validate_name_pack,
 )
 
 
@@ -84,6 +86,73 @@ class SiteContractTests(unittest.TestCase):
             validate_layout_report({**report, "dimensions": 2})
         with self.assertRaisesRegex(ValueError, "topology-2.5d"):
             validate_layout_report({**report, "geometry": "free-3d"})
+
+    def test_name_pack_validation_reads_every_published_block(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = gzip_json([["A", None], ["B", "乙"]])
+            second = bytearray(gzip_json([["C", "丙"]]))
+            second[-1] ^= 0xFF
+            pack = first + second
+            (root / "names.pack").write_bytes(pack)
+            (root / "names.idx").write_bytes(
+                struct.pack("<III", 0, len(first), len(pack))
+            )
+
+            with self.assertRaisesRegex(ValueError, "names block 1"):
+                validate_name_pack(
+                    root / "names.pack",
+                    root / "names.idx",
+                    n_rows=3,
+                    block_size=2,
+                )
+
+    def test_name_pack_validation_reconciles_pack_with_index(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            block = gzip_json([["A", None]])
+            (root / "names.pack").write_bytes(block + b"trailing")
+            (root / "names.idx").write_bytes(struct.pack("<II", 0, len(block)))
+
+            with self.assertRaisesRegex(ValueError, "index endpoint"):
+                validate_name_pack(
+                    root / "names.pack",
+                    root / "names.idx",
+                    n_rows=1,
+                    block_size=2,
+                )
+
+    def test_name_pack_validation_reconciles_published_row_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            block = gzip_json([["A", None]])
+            (root / "names.pack").write_bytes(block)
+            (root / "names.idx").write_bytes(struct.pack("<II", 0, len(block)))
+
+            with self.assertRaisesRegex(ValueError, "expected 2 rows"):
+                validate_name_pack(
+                    root / "names.pack",
+                    root / "names.idx",
+                    n_rows=2,
+                    block_size=2,
+                )
+
+    def test_name_pack_validation_enforces_published_row_shape(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            block = gzip_json([["A", None, "unexpected"]])
+            (root / "names.pack").write_bytes(block)
+            (root / "names.idx").write_bytes(struct.pack("<II", 0, len(block)))
+
+            with self.assertRaisesRegex(ValueError, "invalid row"):
+                validate_name_pack(
+                    root / "names.pack",
+                    root / "names.idx",
+                    n_rows=1,
+                    block_size=2,
+                )
 
 
 class RowFingerprintTests(unittest.TestCase):
