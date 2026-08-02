@@ -41,6 +41,22 @@ def artifact_version(dump_version: str, contract: dict[str, Any]) -> str:
     return f"{dump_version}-{digest}"
 
 
+def validate_layout_report(
+    report: Any, *, allow_stub: bool = False
+) -> dict[str, Any]:
+    """Reject test or obsolete geometry before it can be published."""
+
+    if not isinstance(report, dict):
+        raise ValueError("layout report must be an object")
+    if report.get("stub") is not False and not allow_stub:
+        raise ValueError("stub layout is not publishable")
+    if report.get("dimensions") != 3:
+        raise ValueError("layout must be three-dimensional")
+    if report.get("geometry") != "topology-2.5d":
+        raise ValueError("layout geometry must be topology-2.5d")
+    return report
+
+
 def read_dump_version(path: Path) -> str:
     """Read required source provenance without a wall-clock fallback."""
 

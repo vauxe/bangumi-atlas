@@ -8,6 +8,7 @@ Products: site/data/ 下 manifest.json、几何 SoA bins、names.ndjson(流式)�
 纪律:失败与截断显式报出、行级对账,对不上非零退出。
 """
 
+import argparse
 import hashlib
 import shutil
 import sys
@@ -25,6 +26,7 @@ from site_contracts import (
     gzip_json,
     read_dump_version,
     reverse_navigation_label,
+    validate_layout_report,
 )
 
 
@@ -206,8 +208,23 @@ def load_info() -> dict[int, dict[str, Any]]:
 
 
 def main() -> None:  # noqa: PLR0915
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--allow-stub",
+        action="store_true",
+        help="allow non-publishable test geometry for local preview",
+    )
+    args = parser.parse_args()
     t_start = time.time()
     dump_version = read_dump_version(DUMP_VERSION)
+    if not LAYOUT_REPORT.exists():
+        sys.exit(
+            "FAILED: data/layout/report.json 缺失,先运行真实 layout.py"
+        )
+    layout_report = validate_layout_report(
+        orjson.loads(LAYOUT_REPORT.read_bytes()),
+        allow_stub=args.allow_stub,
+    )
     # 清场重建:防止上次运行的产物残留(与 fetch_dump 同一纪律)
     shutil.rmtree(SITE, ignore_errors=True)
     SITE.mkdir(parents=True, exist_ok=True)
@@ -239,12 +256,12 @@ def main() -> None:  # noqa: PLR0915
         )
     log("节点属性装载完成")
 
-    # ---- 几何 SoA(21B/节点,七文件,定长记录支持 Range 点查)----
+    # ---- 几何 SoA(25B/节点,七文件,定长记录支持 Range 点查)----
     # (community 只服务社区标签,留在 labels.json,不再出列)
     coords_f32 = coords_r.astype("<f4")
     lo = [float(v) for v in coords_f32.min(0)]
     hi = [float(v) for v in coords_f32.max(0)]
-    (SITE / "positions.bin").write_bytes(coords_f32[:, (0, 2)].tobytes())
+    (SITE / "positions.bin").write_bytes(coords_f32.tobytes())
     (SITE / "year.bin").write_bytes(year_r.tobytes())
     (SITE / "key.bin").write_bytes(key_r.tobytes())
     size_raw = np.round(18 * np.log2(1 + collect_r))
@@ -293,7 +310,7 @@ def main() -> None:  # noqa: PLR0915
         f"{int((tag_mask > 0).sum()):,} 节点)"
     )
     for fname, stride in (
-        ("positions.bin", 8),
+        ("positions.bin", 12),
         ("year.bin", 2),
         ("key.bin", 4),
         ("size.bin", 1),
@@ -705,14 +722,6 @@ def main() -> None:  # noqa: PLR0915
             log(f"  年份脏值 {n_dirty:,} 条在滑块窗口外(显式报出)")
     else:
         y_lo = y_hi = 0
-    if LAYOUT_REPORT.exists():
-        layout_report = orjson.loads(LAYOUT_REPORT.read_bytes())
-    else:
-        layout_report = None
-        log(
-            "WARNING: data/layout/report.json 缺失,manifest.layout = null"
-            "(本次未跑 layout.py)"
-        )
     manifest_contract = {
         "n_nodes": n,
         "n_edges_skeleton": len(skel),

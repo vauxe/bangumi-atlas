@@ -17,6 +17,7 @@ import {
   pointByRank,
   prefetch,
   prefetchHotShards,
+  SiteDataContractError,
 } from "./loader";
 import { loadLabels } from "./labels";
 import { prefersReducedMotion } from "./camera";
@@ -109,11 +110,7 @@ async function boot(): Promise<void> {
   };
 
   // ---- 场景先建，确保首块几何到达即可渲染 ----
-  const [blo, bhi] = manifest.bbox;
-  const worldSize = Math.max(
-    ...[0, 1, 2].map((i) => (bhi[i] ?? 1) - (blo[i] ?? 0)),
-  );
-  const scene: Scene = new Scene($<HTMLDivElement>("#map"), geo, worldSize, {
+  const scene: Scene = new Scene($<HTMLDivElement>("#map"), geo, manifest.bbox, {
     onPick: (rank) => {
       if (rank === null) {
         if (state.selection !== null) deselect(true);
@@ -357,15 +354,17 @@ async function boot(): Promise<void> {
   });
   subscribe(() => results.refresh());
   void namesDone.then(() => results.refresh()).catch(() => {});
-  runTask(geoDone.then(() => results.refresh()), "结果索引刷新");
+  void geoDone
+    .then(() => results.refresh(), () => undefined)
+    .catch((error: unknown) => reportError("结果索引刷新", error));
 
   // ---- URL 恢复(深链)与 popstate(浏览器后退 = 回上一视图)----
   const applyUrl = async (initial: boolean): Promise<void> => {
     const epoch = ++navigationEpoch;
+    const appliedHash = location.hash;
     historyApplications++;
     try {
-      const hash = location.hash;
-      const st = decode(hash);
+      const st = decode(appliedHash);
       pendingLink = null;
       scene.setOrtho(st.ortho);
       if (st.view) scene.setView(st.view);
@@ -392,7 +391,7 @@ async function boot(): Promise<void> {
               resolved.key,
             );
         } else if (st.key !== null && !geometryComplete) {
-          pendingUrlHash = hash;
+          pendingUrlHash = appliedHash;
         } else {
           pendingUrlHash = null;
           hud.textContent = "链接中的节点已不存在或身份无法解析";
@@ -402,6 +401,9 @@ async function boot(): Promise<void> {
       syncControls(); // 工具栏随 store 还原(操作可逆性)
     } finally {
       historyApplications--;
+      // 最后完成的恢复立即按实际相机状态规范化 URL。
+      if (historyApplications === 0)
+        history.replaceState(null, "", currentUrl());
     }
   };
 
@@ -428,8 +430,14 @@ async function boot(): Promise<void> {
   document.addEventListener("keydown", (ev) => {
     if (ev.target instanceof HTMLInputElement) return;
     const k = ev.key.toLowerCase();
-    if (k === "t") scene.topView(); // Top
-    if (k === "r") scene.home(); // Reset
+    if (k === "t") {
+      stopAutoRotate();
+      scene.topView();
+    }
+    if (k === "r") {
+      stopAutoRotate();
+      scene.home();
+    }
     if (ev.key === "Escape" && state.selection !== null) deselect(true);
   });
 
@@ -576,5 +584,9 @@ async function boot(): Promise<void> {
 void boot().catch((error: unknown) => {
   console.error("应用启动失败", error);
   const hud = document.querySelector<HTMLElement>("#hud");
-  if (hud) hud.textContent = "应用启动失败,请刷新重试";
+  if (hud)
+    hud.textContent =
+      error instanceof SiteDataContractError
+        ? error.message
+        : "应用启动失败,请刷新重试";
 });

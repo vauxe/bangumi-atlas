@@ -22,7 +22,7 @@ flowchart LR
     B --> G[数据库独立核验]
     E --> G
     F --> G
-    E --> H[平面布局]
+    E --> H[2.5D 拓扑布局]
     E --> I[站点数据烘焙]
     H --> I
     I --> J[静态探索器]
@@ -178,7 +178,7 @@ Parquet 是建图投影，不是原始 JSONL 的可逆编码。下表列出会�
 | `scripts/fetch_dump.py` | 下载快照、校验 SHA-256、清理并重新解压 |
 | `scripts/build_db.py` | 生成 Parquet，在临时路径 COPY 全量建库，完成后原子替换正式数据库 |
 | `scripts/verify_db.py` | 执行独立计数、全字段内容核验和查询冒烟测试 |
-| `scripts/layout.py` | 从 Parquet 生成 Canvas 平面布局 |
+| `scripts/layout.py` | 从 Parquet 生成 Canvas 2.5D 拓扑布局 |
 | `scripts/bake_site.py` | 从 Parquet 和布局生成静态站点数据 |
 
 `build_db.py` 包含三个阶段：

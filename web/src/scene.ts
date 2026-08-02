@@ -12,7 +12,11 @@ import { Deck, LayerExtension, OrbitView } from "@deck.gl/core";
 import { Buffer as LumaBuffer } from "@luma.gl/core";
 import type { Device } from "@luma.gl/core";
 import { IconLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
-import { Camera, prefersReducedMotion } from "./camera";
+import {
+  AtlasOrbitController,
+  Camera,
+  prefersReducedMotion,
+} from "./camera";
 import type { OrbitState } from "./camera";
 import { COVER_SIZES, coverItems, coverUrl } from "./covers";
 import type { CoverItem } from "./covers";
@@ -20,7 +24,7 @@ import { labelLayers } from "./labels";
 import type { LabelCache, LabelData } from "./labels";
 import { state } from "./store";
 import { TYPE_COLORS, etype } from "./types";
-import type { Geometry } from "./types";
+import type { Bounds3D, Geometry } from "./types";
 
 export type { OrbitState } from "./camera";
 
@@ -317,12 +321,17 @@ export class Scene {
   constructor(
     parent: HTMLDivElement,
     geo: Geometry,
-    worldSize: number,
+    bounds: Bounds3D,
     private cb: SceneCallbacks,
   ) {
     this.geo = geo;
-    this.worldSize = worldSize;
-    this.camera = new Camera(worldSize);
+    const [lo, hi] = bounds;
+    this.worldSize = Math.max(
+      hi[0] - lo[0],
+      hi[1] - lo[1],
+      hi[2] - lo[2],
+    );
+    this.camera = new Camera(bounds);
     const n = geo.key.length;
     this.styleBuf = new Uint8Array(n * 4);
     this.yearBuf = new Uint16Array(n);
@@ -331,9 +340,19 @@ export class Scene {
       views: this.camera.view(),
       useDevicePixels: Math.min(devicePixelRatio, 1.5),
       // 交互约定与 deck 默认相反：左键平移，右键轨道旋转。
-      controller: { inertia: 300, doubleClickZoom: false, dragMode: "pan" },
+      controller: {
+        type: AtlasOrbitController,
+        inertia: 300,
+        scrollZoom: { speed: 0.01, smooth: false },
+        doubleClickZoom: false,
+        dragMode: "pan",
+      },
       initialViewState: this.camera.viewState,
       pickingRadius: 5,
+      onResize: ({ height }) => {
+        this.camera.resize(height);
+        this.deck.setProps({ views: this.camera.view() });
+      },
       onDeviceInitialized: (device: Device) => {
         this.gpu = {
           positions: new GrowingBuffer(
@@ -355,12 +374,16 @@ export class Scene {
         this.syncGpu();
         this.render();
       },
-      onViewStateChange: ({ viewState }) => {
+      onViewStateChange: ({ viewState, interactionState }) => {
+        const zoomChanged = viewState.zoom !== this.camera.viewState.zoom;
         this.camera.absorb(viewState as Record<string, unknown>);
+        // 平移期间保持 controller 连续；松手后再按新枢轴扩展远裁剪面。
+        if (zoomChanged || interactionState.isDragging === false)
+          this.deck.setProps({ views: this.camera.view() });
         this.cb.onViewChange(this.camera.viewState);
         this.scheduleEdgeRebuild();
         this.render();
-        return viewState;
+        return { ...viewState, ...this.camera.viewState } as typeof viewState;
       },
       onClick: (info: { layer: unknown }) => {
         if (!info.layer) {
@@ -483,8 +506,10 @@ export class Scene {
   flyTo(rank: number, zoom?: number): void {
     const pos = this.posOf(rank);
     if (!pos) return;
+    const next = this.camera.flyTo(pos, zoom);
     this.deck.setProps({
-      initialViewState: this.camera.flyTo(pos, zoom),
+      views: this.camera.view(),
+      initialViewState: next,
     });
     this.cb.onViewChange(this.camera.viewState);
     this.scheduleEdgeRebuild();
@@ -493,10 +518,10 @@ export class Scene {
 
   setView(vs: Partial<OrbitState>): void {
     this.camera.absorb({ ...this.camera.viewState, ...vs });
-    this.applyCamera();
+    this.applyCamera(true);
   }
 
-  /** 正交开关(URL 还原用;`2` 键走 topView)。 */
+  /** 正交开关(URL 还原用;`T` 键走 topView)。 */
   setOrtho(v: boolean): void {
     if (this.camera.ortho === v) return;
     this.camera.ortho = v;

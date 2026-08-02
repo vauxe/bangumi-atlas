@@ -13,9 +13,9 @@ uv run python scripts/fetch_dump.py
 uv run python scripts/build_db.py
 uv run python scripts/verify_db.py
 
-# 本地预览使用快速随机布局；正式构建去掉 --stub
+# 本地预览显式允许快速随机布局；正式构建不使用这两个开关
 uv run python scripts/layout.py --stub
-uv run python scripts/bake_site.py
+uv run python scripts/bake_site.py --allow-stub
 
 npm --prefix web ci
 npm --prefix web run dev
