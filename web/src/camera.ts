@@ -1,5 +1,5 @@
-/** 相机模块：turntable 轨道、聚焦飞行、复位、俯视正交保底、
- * 冷启动自转。视图状态是唯一事实,过渡参数不污染状态本身。 */
+/** 相机模块：turntable 轨道、聚焦飞行、复位、俯视正交保底。
+ * 视图状态是唯一事实,过渡参数不污染状态本身。 */
 
 import {
   LinearInterpolator,
@@ -196,15 +196,6 @@ export class Camera {
     this.viewState = {
       ...this.homeState,
       target: [...this.homeState.target],
-    };
-    return this.viewState;
-  }
-
-  /** 冷启动背景自转一步；reduced-motion 时由调用方跳过。 */
-  orbitStep(deg: number): OrbitState {
-    this.viewState = {
-      ...this.viewState,
-      rotationOrbit: ((this.viewState.rotationOrbit + deg) % 360 + 360) % 360,
     };
     return this.viewState;
   }

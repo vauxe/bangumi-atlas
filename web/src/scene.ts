@@ -550,11 +550,6 @@ export class Scene {
     this.applyCamera(true);
   }
 
-  orbitStep(deg: number): void {
-    this.camera.orbitStep(deg);
-    this.applyCamera();
-  }
-
   getViewState(): OrbitState {
     return this.camera.viewState;
   }
