@@ -9,6 +9,10 @@
  * 几何流式期间属性写入 GPU Buffer 增量区间,不整块重传。 */
 
 import { Deck, LayerExtension, OrbitView } from "@deck.gl/core";
+import type {
+  OrbitViewState,
+  ViewStateChangeParameters,
+} from "@deck.gl/core";
 import { Buffer as LumaBuffer } from "@luma.gl/core";
 import type { Device } from "@luma.gl/core";
 import { IconLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
@@ -374,17 +378,7 @@ export class Scene {
         this.syncGpu();
         this.render();
       },
-      onViewStateChange: ({ viewState, interactionState }) => {
-        const zoomChanged = viewState.zoom !== this.camera.viewState.zoom;
-        this.camera.absorb(viewState as Record<string, unknown>);
-        // 平移期间保持 controller 连续；松手后再按新枢轴扩展远裁剪面。
-        if (zoomChanged || interactionState.isDragging === false)
-          this.deck.setProps({ views: this.camera.view() });
-        this.cb.onViewChange(this.camera.viewState);
-        this.scheduleEdgeRebuild();
-        this.render();
-        return { ...viewState, ...this.camera.viewState } as typeof viewState;
-      },
+      onViewStateChange: (change) => this.handleViewStateChange(change),
       onClick: (info: { layer: unknown }) => {
         if (!info.layer) {
           this.lastPickCycle = null; // 循环拾取状态随空白点击复位
@@ -412,6 +406,24 @@ export class Scene {
       if (typeof rank === "number" && rank >= 0) this.flyTo(rank);
     });
     this.render();
+  }
+
+  /** Deck 在回调返回后才提交内部 viewState；递归 setProps 会中断过渡。 */
+  private handleViewStateChange<ViewStateT extends OrbitViewState>({
+    viewState,
+    interactionState,
+  }: ViewStateChangeParameters<ViewStateT>): ViewStateT {
+    const refreshView =
+      viewState.zoom !== this.camera.viewState.zoom ||
+      interactionState.isDragging === false;
+    this.camera.absorb(viewState as Record<string, unknown>);
+    this.cb.onViewChange(this.camera.viewState);
+    queueMicrotask(() => {
+      if (refreshView) this.deck.setProps({ views: this.camera.view() });
+      this.scheduleEdgeRebuild();
+      this.render();
+    });
+    return { ...viewState, ...this.camera.viewState } as ViewStateT;
   }
 
   posOf(rank: number): [number, number, number] | null {
