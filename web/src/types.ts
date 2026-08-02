@@ -12,6 +12,8 @@ export interface Manifest {
   dump_version: string;
   n_nodes: number;
   n_edges_skeleton: number;
+  /** names.pack 每个独立 gzip 块包含的连续 rank 数。 */
+  name_block_size: number;
   buckets: number;
   /** 详情 pack 均分文件数(det-{p}.pack,p = bucket / (buckets/det_packs))。 */
   det_packs: number;
@@ -54,11 +56,14 @@ export interface Geometry {
   sparse: Map<number, [number, number, number]>;
 }
 
-/** 名字表(names.ndjson 流式填充,与几何同序)。 */
+export type NameRow = [original: string, chinese: string | null];
+
+/** 按 rank 分块、按需填充的名字缓存。 */
 export interface Names {
-  n: (string | null)[];
-  c: (string | null)[];
-  loaded: number;
+  /** 未加载时返回 null；中文名优先。 */
+  get(rank: number): string | null;
+  /** 加载 ranks 涉及的去重块；已加载和并发请求均复用。 */
+  load(ranks: Iterable<number>): Promise<void>;
 }
 
 /** 邻接分片条目:g = [labelId, 组总数, inline ranks][],n = 总数,

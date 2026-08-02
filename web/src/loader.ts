@@ -1,4 +1,4 @@
-/** 数据加载:几何 SoA 流式渐进、名字表流式、分片按需 fetch(带缓存)、
+/** 数据加载:几何 SoA 流式渐进、名字按 rank 分块、分片按需 fetch(带缓存)、
  * Range 按 rank 点查、热分片预取。全部数据请求携带 ?v=(防缓存错配)。 */
 
 import type {
@@ -8,6 +8,7 @@ import type {
   EpisodeRow,
   Geometry,
   Manifest,
+  NameRow,
   Names,
   SearchEntry,
 } from "./types";
@@ -62,6 +63,22 @@ export async function loadManifest(): Promise<Manifest> {
       "布局应为 topology-2.5d/3D,实际为 " +
         `${m.layout?.geometry ?? "缺失"}/${m.layout?.dimensions ?? "缺失"}D`,
     );
+  const nameBlockSize = m.name_block_size;
+  if (
+    !Number.isInteger(nameBlockSize) ||
+    nameBlockSize <= 0 ||
+    !m.files["names.idx"] ||
+    !m.files["names.pack"] ||
+    m.files["names.pack"][0] <= 0
+  )
+    throw new SiteDataContractError("名字表应为按 rank 分块的 names.idx/names.pack");
+  const expectedNameIndexBytes =
+    (Math.ceil(m.n_nodes / nameBlockSize) + 1) * 4;
+  if (m.files["names.idx"]?.[0] !== expectedNameIndexBytes)
+    throw new SiteDataContractError(
+      `names.idx 应为 ${expectedNameIndexBytes} 字节,实际为 ` +
+        `${m.files["names.idx"]?.[0] ?? "缺失"}`,
+    );
   version = m.version;
   manifestRef = m;
   return m;
@@ -102,7 +119,7 @@ async function streamInto(
   onProgress: (bytes: number) => void,
   priority: "high" | "low" = "high",
 ): Promise<void> {
-  // 优先级提示:几何七件 high(首块即渲),名字表 low(不抢带宽)
+  // 几何七件 high，确保首块尽快进入场景。
   const res = await fetch(url(path), { priority } as RequestInit);
   if (!res.ok || !res.body) throw new Error(`fetch ${path}: ${res.status}`);
   const reader = res.body.getReader();
@@ -190,57 +207,6 @@ export function openGeometry(manifest: Manifest): GeometryStream {
     ).then(() => update());
   };
   return { geo, start };
-}
-
-/** 名字表:NDJSON 逐行流式填充(与几何同序)。 */
-export function loadNames(
-  n: number,
-): { names: Names; done: Promise<void> } {
-  const names: Names = {
-    n: new Array<string | null>(n).fill(null),
-    c: new Array<string | null>(n).fill(null),
-    loaded: 0,
-  };
-  const done = (async (): Promise<void> => {
-    const [publishedSize] = publishedMeta("names.ndjson");
-    const publishedBytes = new Uint8Array(publishedSize);
-    const res = await fetch(url("names.ndjson"), {
-      priority: "low",
-    } as RequestInit);
-    if (!res.ok || !res.body)
-      throw new Error(`fetch names.ndjson: ${res.status}`);
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let received = 0;
-    let tail = "";
-    const feed = (text: string, flush: boolean): void => {
-      const lines = (tail + text).split("\n");
-      tail = flush ? "" : (lines.pop() ?? "");
-      for (const line of lines) {
-        if (!line) continue;
-        if (names.loaded >= n)
-          throw new Error(`names.ndjson: more than ${n} rows`);
-        const [nm, cn] = JSON.parse(line) as [string, string | null];
-        names.n[names.loaded] = nm;
-        names.c[names.loaded] = cn;
-        names.loaded++;
-      }
-    };
-    for (;;) {
-      const { done: eof, value } = await reader.read();
-      if (eof) break;
-      if (received + value.byteLength > publishedBytes.byteLength)
-        throw new Error("names.ndjson: response exceeds published size");
-      publishedBytes.set(value, received);
-      received += value.byteLength;
-      feed(decoder.decode(value, { stream: true }), false);
-    }
-    feed(decoder.decode(), true);
-    assertByteLength("names.ndjson rows", names.loaded, n);
-    assertByteLength("names.ndjson", received, publishedSize);
-    await verifyWholeFile("names.ndjson", publishedBytes);
-  })();
-  return { names, done };
 }
 
 export async function loadEdges(): Promise<Uint32Array> {
@@ -384,6 +350,72 @@ async function gunzipJson<T>(buf: ArrayBuffer): Promise<T> {
   if (!body) throw new Error("gunzip: empty body");
   const stream = body.pipeThrough(new DecompressionStream("gzip"));
   return (await new Response(stream).json()) as T;
+}
+
+/** 名字按连续 rank 分块。首屏不发请求；悬停、结果或关系视图只解压
+ * 实际需要的块。块内仍保留原名与中文名两个字段。 */
+export function openNames(manifest: Manifest): Names {
+  const blockSize = manifest.name_block_size;
+  const blockCount = Math.ceil(manifest.n_nodes / blockSize);
+  const blocks = new Map<number, NameRow[]>();
+  const pending = new AsyncMemo<number, NameRow[]>();
+
+  const loadBlock = (block: number): Promise<NameRow[]> =>
+    pending.get(block, async () => {
+      const idx = await loadIdx("names.idx");
+      if (idx.length !== blockCount + 1)
+        throw new SiteDataContractError(
+          `names.idx 应有 ${blockCount + 1} 项,实际为 ${idx.length}`,
+        );
+      const [packBytes] = publishedMeta("names.pack");
+      if (
+        idx[0] !== 0 ||
+        idx[idx.length - 1] !== packBytes ||
+        idx.some((off, i) => i > 0 && off <= (idx[i - 1] ?? 0))
+      )
+        throw new SiteDataContractError("names.idx 偏移与 names.pack 不一致");
+      const off = idx[block] ?? 0;
+      const len = (idx[block + 1] ?? off) - off;
+      if (len <= 0) throw new Error(`names block ${block}: empty slice`);
+      const rows = await gunzipJson<NameRow[]>(
+        await packSlice("names.pack", off, len),
+      );
+      const expected = Math.min(
+        blockSize,
+        manifest.n_nodes - block * blockSize,
+      );
+      if (!Array.isArray(rows) || rows.length !== expected)
+        throw new SiteDataContractError(
+          `names block ${block} 应有 ${expected} 行,实际为 ${rows.length}`,
+        );
+      for (const row of rows)
+        if (
+          !Array.isArray(row) ||
+          typeof row[0] !== "string" ||
+          (row[1] !== null && typeof row[1] !== "string")
+        )
+          throw new SiteDataContractError(`names block ${block} 含非法名字行`);
+      blocks.set(block, rows);
+      return rows;
+    });
+
+  return {
+    get(rank: number): string | null {
+      if (!Number.isInteger(rank) || rank < 0 || rank >= manifest.n_nodes)
+        return null;
+      const row = blocks.get(Math.floor(rank / blockSize))?.[rank % blockSize];
+      return row ? row[1] || row[0] || null : null;
+    },
+    async load(ranks: Iterable<number>): Promise<void> {
+      const needed = new Set<number>();
+      for (const rank of ranks)
+        if (Number.isInteger(rank) && rank >= 0 && rank < manifest.n_nodes) {
+          const block = Math.floor(rank / blockSize);
+          if (!blocks.has(block)) needed.add(block);
+        }
+      await Promise.all([...needed].map(loadBlock));
+    },
+  };
 }
 
 const idxCache = new AsyncMemo<string, Uint32Array>();

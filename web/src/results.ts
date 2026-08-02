@@ -8,10 +8,11 @@ import type { Geometry, Names } from "./types";
 
 export interface ResultsDeps {
   geo: Geometry;
-  names: () => Names;
+  names: Names;
   /** 年份/评分/标签谓词(与 shader 判定一致,scene.isVisible)。 */
   visible: (rank: number) => boolean;
   pick: (rank: number) => void;
+  reportError: (error: unknown) => void;
 }
 
 const PAGE = 50;
@@ -21,6 +22,7 @@ export class Results {
   private shown = PAGE;
   private filterKey = "";
   private collapsed = false; // 折叠态跨条件变化保持
+  private nameLoading = false;
 
   constructor(
     private el: HTMLElement,
@@ -83,10 +85,24 @@ export class Results {
       total++;
       if (hits.length < this.shown) hits.push(i);
     }
-    const names = this.deps.names();
+    const names = this.deps.names;
+    const missing = hits.filter((rank) => names.get(rank) === null);
+    if (missing.length > 0 && !this.nameLoading) {
+      this.nameLoading = true;
+      void names.load(missing).then(
+        () => {
+          this.nameLoading = false;
+          this.refresh();
+        },
+        (error: unknown) => {
+          this.nameLoading = false;
+          this.deps.reportError(error);
+        },
+      );
+    }
     const rows = hits
       .map((rank, i) => {
-        const name = names.c[rank] ?? names.n[rank] ?? `#${rank}`;
+        const name = names.get(rank) ?? "…";
         const y = this.deps.geo.year[rank] ?? 0;
         const s = this.deps.geo.score[rank] ?? 0;
         const meta = [

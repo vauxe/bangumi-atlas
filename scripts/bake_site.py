@@ -2,7 +2,8 @@
 
 See docs/EXPLORER_ARCHITECTURE.md for the browser data contract.
 
-Products: site/data/ 下 manifest.json、几何 SoA bins、names.ndjson(流式)、
+Products: site/data/ 下 manifest.json、几何 SoA bins、
+names pack(按 rank 分块)、
 骨架边、邻接分片(top-200 + 组总数 + 溢出分页)、详情分片(分集分页)、
 搜索索引分片(简繁日折叠)、标签表、坐标快照。
 纪律:失败与截断显式报出、行级对账,对不上非零退出。
@@ -27,6 +28,7 @@ from site_contracts import (
     read_dump_version,
     reverse_navigation_label,
     validate_layout_report,
+    validate_name_pack,
 )
 
 
@@ -69,6 +71,7 @@ DET_SPLIT = 4  # 详情 pack 按桶均分 4 个文件,单文件压缩后 <100MB
 SKELETON_TARGET = 500_000  # 传输目标；连通节点覆盖优先，超限显式报出
 LABELS_TOP = 20_000
 HOT_SHARDS = 24  # 随首块预取高频首字分片，保护冷搜索延迟
+NAME_BLOCK_SIZE = 8192  # 平衡单次读取大小与关系列表的块复用率
 SIZE_BUDGET = 1_000_000_000  # GH Pages 1GB 硬限
 FILE_BUDGET = 20_000  # CF Pages 迁移预案的文件数上限
 
@@ -321,17 +324,29 @@ def main() -> None:  # noqa: PLR0915
         reconcile(f"{fname} 字节数", n * stride, (SITE / fname).stat().st_size)
     log("几何 SoA 写出完成")
 
-    # ---- 名字表:NDJSON,与几何同序,客户端逐行流式 ----
-    with open(SITE / "names.ndjson", "wb") as nf:
-        for k in key_r:
+    # ---- 名字表:连续 rank 块独立 gzip,客户端只读取用到的块 ----
+    name_pack = PackWriter()
+    name_offsets = [0]
+    for start in range(0, n, NAME_BLOCK_SIZE):
+        rows = []
+        for k in key_r[start : start + NAME_BLOCK_SIZE]:
             d = info[int(k)]
-            nf.write(jdump([d["name"], d["cn"] or None]))
-            nf.write(b"\n")
-    # actual 重读落盘文件计行(名字含换行等装配错误在此暴露)
-    with open(SITE / "names.ndjson", encoding="utf-8") as nrf:
-        n_names = sum(1 for _ in nrf)
-    reconcile("names.ndjson 行数", n, n_names)
-    log("名字表写出完成")
+            rows.append([d["name"], d["cn"] or None])
+        off, length = name_pack.add(rows)
+        name_offsets.append(off + length)
+    name_pack.write(SITE / "names.pack")
+    np.asarray(name_offsets, dtype="<u4").tofile(SITE / "names.idx")
+    validate_name_pack(
+        SITE / "names.pack",
+        SITE / "names.idx",
+        n_rows=n,
+        block_size=NAME_BLOCK_SIZE,
+    )
+    n_name_blocks = len(name_offsets) - 1
+    log(
+        f"名字表写出完成:{n_name_blocks:,} 块,"
+        f"{(SITE / 'names.pack').stat().st_size / 1e6:,.1f} MB"
+    )
 
     # ---- 邻接(6 张边表;原始关系保留方向,缺反向行仅补导航项)----
     adj: dict[int, list[tuple[int, int]]] = defaultdict(list)
@@ -725,6 +740,7 @@ def main() -> None:  # noqa: PLR0915
     manifest_contract = {
         "n_nodes": n,
         "n_edges_skeleton": len(skel),
+        "name_block_size": NAME_BLOCK_SIZE,
         "buckets": BUCKETS,
         "det_packs": DET_SPLIT,
         "adj_inline": ADJ_INLINE,
