@@ -11,7 +11,7 @@ import sys
 import time
 import urllib.request
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -96,8 +96,8 @@ def load_mappings() -> tuple[EnumMap, EnumMap, EnumMap, EnumMap]:
     return relations, staffs, platforms, person_relations
 
 
-# fields this script knows how to import, per source file; anything beyond
-# these would be silently dropped, so iter_jsonl warns when they appear
+# Fields this script imports, per source file. Anything beyond this contract
+# would be dropped by the typed projection, so schema drift stops the build.
 EXPECTED_FIELDS: dict[str, set[str]] = {
     "subject": {
         "id",
@@ -172,23 +172,66 @@ EXPECTED_FIELDS: dict[str, set[str]] = {
         "ended",
     },
 }
-_field_drift_warned: set[tuple[str, str]] = set()
+SUBJECT_OBJECT_FIELDS = {
+    "favorite": {"wish", "done", "doing", "on_hold", "dropped"},
+    "score_details": {str(score) for score in range(1, 11)},
+}
+SUBJECT_TAG_FIELDS = {"name", "count"}
+PERSON_RELATION_TYPES = {"prsn", "crt"}
+
+
+def _validate_object_fields(
+    source: str,
+    field: str,
+    value: Any,
+    expected: set[str],
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise ValueError(f"{source}.{field} must be an object")
+    unknown = sorted(value.keys() - expected)
+    if unknown:
+        raise ValueError(
+            f"{source}.{field} has unknown source field(s): "
+            f"{', '.join(unknown)}"
+        )
+
+
+def _validate_source_record(name: str, record: dict[str, Any]) -> None:
+    unknown = sorted(record.keys() - EXPECTED_FIELDS[name])
+    if unknown:
+        raise ValueError(
+            f"{name} has unknown source field(s): {', '.join(unknown)}"
+        )
+    if name == "subject":
+        for field, expected in SUBJECT_OBJECT_FIELDS.items():
+            _validate_object_fields(name, field, record.get(field), expected)
+        tags = record.get("tags")
+        if tags is not None:
+            if not isinstance(tags, list):
+                raise ValueError("subject.tags must be an array")
+            for index, tag in enumerate(tags):
+                _validate_object_fields(
+                    name,
+                    f"tags[{index}]",
+                    tag,
+                    SUBJECT_TAG_FIELDS,
+                )
+    if name == "person-relations":
+        kind = record.get("person_type")
+        if kind not in PERSON_RELATION_TYPES:
+            raise ValueError(
+                "person-relations.person_type has unsupported value "
+                f"{kind!r}"
+            )
 
 
 def iter_jsonl(name: str) -> Iterator[dict[str, Any]]:
-    expected = EXPECTED_FIELDS[name]
     with open(DUMP / f"{name}.jsonlines", "rb") as f:
         for line in f:
             r = orjson.loads(line)
-            # 全行检查(超集判定极廉价):稀有新增字段抽样会漏检
-            if not expected.issuperset(r):
-                for k in r.keys() - expected:
-                    if (name, k) not in _field_drift_warned:
-                        _field_drift_warned.add((name, k))
-                        print(
-                            f"  WARNING: {name} has unknown field '{k}' "
-                            f"- not imported, schema needs updating"
-                        )
+            _validate_source_record(name, r)
             yield r
 
 
@@ -216,6 +259,7 @@ def build_parquet() -> dict[str, int]:
             "type_name",
             "name",
             "name_cn",
+            "platform_code",
             "platform",
             "date",
             "score",
@@ -253,6 +297,7 @@ def build_parquet() -> dict[str, int]:
         cols["type_name"].append(SUBJECT_TYPES.get(stype, str(stype)))
         cols["name"].append(r.get("name") or "")
         cols["name_cn"].append(r.get("name_cn") or "")
+        cols["platform_code"].append(r.get("platform"))
         cols["platform"].append(plat.get("type_cn") or plat.get("type") or "")
         cols["date"].append(r.get("date") or "")
         cols["score"].append(r.get("score"))
@@ -274,6 +319,7 @@ def build_parquet() -> dict[str, int]:
             ("type_name", pa.string()),
             ("name", pa.string()),
             ("name_cn", pa.string()),
+            ("platform_code", pa.int64()),
             ("platform", pa.string()),
             ("date", pa.string()),
             ("score", pa.float64()),
@@ -617,20 +663,13 @@ def build_parquet() -> dict[str, int]:
     ]
     edge_file("person_rel", rel_spec, person_rel_rows("prsn", person_ids))
     edge_file("character_rel", rel_spec, person_rel_rows("crt", character_ids))
-    kinds = Counter(r["person_type"] for r in iter_jsonl("person-relations"))
-    for kind, n in kinds.items():
-        if kind not in ("prsn", "crt"):
-            print(
-                f"  WARNING: person-relations has {n:,} rows with "
-                f"unhandled person_type '{kind}' - silently skipped, "
-                f"schema needs a new rel table"
-            )
     return stats
 
 
 DDL = """
 CREATE NODE TABLE Subject(id INT64 PRIMARY KEY, type INT64, type_name STRING,
-    name STRING, name_cn STRING, platform STRING, date STRING, score DOUBLE,
+    name STRING, name_cn STRING, platform_code INT64, platform STRING,
+    date STRING, score DOUBLE,
     rank INT64, nsfw BOOLEAN, wish INT64, done INT64, doing INT64,
     on_hold INT64, dropped INT64, series BOOLEAN, score_details INT64[],
     meta_tags STRING[], tags STRUCT(name STRING, count INT64)[],
@@ -673,38 +712,86 @@ COPIES = [
 ]
 
 
-def build_db() -> None:
+def _database_artifacts(path: Path) -> list[Path]:
+    return sorted(path.parent.glob(f"{path.name}*"))
+
+
+def _remove_database_artifacts(path: Path) -> None:
+    for artifact in _database_artifacts(path):
+        if artifact.is_dir():
+            shutil.rmtree(artifact)
+        else:
+            artifact.unlink()
+
+
+def replace_database(
+    target: Path,
+    populate: Callable[[Path], None],
+) -> None:
+    """Build beside target and replace it only after a complete close."""
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = target.with_name(f".{target.name}.build")
+    _remove_database_artifacts(staging)
+
+    sidecars = [path for path in _database_artifacts(target) if path != target]
+    if sidecars:
+        names = ", ".join(path.name for path in sidecars)
+        raise RuntimeError(
+            f"refusing to replace {target.name} with live sidecars: {names}"
+        )
+
+    try:
+        populate(staging)
+        artifacts = _database_artifacts(staging)
+        if artifacts != [staging] or not staging.is_file():
+            names = ", ".join(path.name for path in artifacts) or "none"
+            raise RuntimeError(
+                f"database build did not produce one closed file: {names}"
+            )
+        staging.replace(target)
+    finally:
+        _remove_database_artifacts(staging)
+
+
+def _populate_database(path: Path) -> None:
     import ladybug as lb
 
-    # 删旧库连同 sidecar(.wal 等):异常退出的残留会污染新库
-    if DB_PATH.parent.exists():
-        for p in DB_PATH.parent.glob(f"{DB_PATH.name}*"):
-            if p.is_dir():
-                shutil.rmtree(p)
-            else:
-                p.unlink()
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    db = lb.Database(str(DB_PATH))
-    conn = lb.Connection(db)
-    for stmt in DDL.strip().split(";"):
-        if stmt.strip():
-            conn.execute(stmt)
-    for table, fname in COPIES:
-        t0 = time.time()
-        conn.execute(f'COPY {table} FROM "{PARQUET / fname}.parquet"')
-        print(f"  COPY {table}: {time.time() - t0:.1f}s")
-    for table, _ in COPIES:
-        pattern = f"()-[r:{table}]->()" if table.isupper() else f"(n:{table})"
-        var = "r" if table.isupper() else "n"
-        res = cast(
-            "lb.QueryResult",
-            conn.execute(f"MATCH {pattern} RETURN count({var})"),
-        )
-        # stub says get_next() yields a dict; at runtime it is a list
-        row = cast("list[Any]", res.get_next())
-        print(f"  {table}: {row[0]:,}")
-    conn.close()
-    db.close()
+    db = lb.Database(str(path))
+    try:
+        conn = lb.Connection(db)
+        try:
+            for stmt in DDL.strip().split(";"):
+                if stmt.strip():
+                    conn.execute(stmt)
+            for table, fname in COPIES:
+                t0 = time.time()
+                conn.execute(
+                    f'COPY {table} FROM "{PARQUET / fname}.parquet"'
+                )
+                print(f"  COPY {table}: {time.time() - t0:.1f}s")
+            for table, _ in COPIES:
+                pattern = (
+                    f"()-[r:{table}]->()"
+                    if table.isupper()
+                    else f"(n:{table})"
+                )
+                var = "r" if table.isupper() else "n"
+                res = cast(
+                    "lb.QueryResult",
+                    conn.execute(f"MATCH {pattern} RETURN count({var})"),
+                )
+                # stub says get_next() yields a dict; at runtime it is a list
+                row = cast("list[Any]", res.get_next())
+                print(f"  {table}: {row[0]:,}")
+        finally:
+            conn.close()
+    finally:
+        db.close()
+
+
+def build_db() -> None:
+    replace_database(DB_PATH, _populate_database)
 
 
 def report_unknown_codes() -> None:

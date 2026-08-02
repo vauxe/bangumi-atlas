@@ -190,22 +190,26 @@ def main() -> None:
         live("person-characters", "person_id", "character_id"),
         count("MATCH ()-[e:VOICED]->() RETURN count(e)"),
     )
-    # person-relations 按 person_type 分池减悬空(build 同口径:
-    # prsn 走 Person 池,crt 走 Character 池,其余类型跳过并警告)
+    # person-relations 按 person_type 分池减悬空；未知类型无法映射到
+    # 固定端点表，必须阻断而不是生成不完整投影。
     rel_live = {"prsn": 0, "crt": 0}
     rel_skipped = 0
+    unsupported_kinds: set[str] = set()
     for r in rows("person-relations"):
         kind = r["person_type"]
         pool = {"prsn": person_ids, "crt": character_ids}.get(kind)
         if pool is None:
             rel_skipped += 1
+            unsupported_kinds.add(str(kind))
             continue
         if r["person_id"] in pool and r["related_person_id"] in pool:
             rel_live[kind] += 1
     if rel_skipped:
+        failures.append("person-relations unsupported person_type")
         print(
-            f"  WARNING  person-relations: {rel_skipped:,} rows with "
-            f"unhandled person_type (build skips them too)"
+            f"  MISMATCH person-relations: {rel_skipped:,} rows have "
+            "unsupported person_type "
+            f"({', '.join(sorted(unsupported_kinds))})"
         )
     check(
         "PERSON_REL",
