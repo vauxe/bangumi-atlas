@@ -11,6 +11,7 @@ from scripts.site_contracts import (
     gzip_json,
     read_dump_version,
     reverse_navigation_label,
+    validate_layout_report,
 )
 
 
@@ -61,6 +62,28 @@ class SiteContractTests(unittest.TestCase):
                 read_dump_version(version_file),
                 "dump-2026-07-28",
             )
+
+    def test_only_real_three_dimensional_layouts_are_publishable(self) -> None:
+        report = {
+            "algo": "umap",
+            "dimensions": 3,
+            "geometry": "topology-2.5d",
+            "stub": False,
+        }
+
+        self.assertIs(validate_layout_report(report), report)
+        with self.assertRaisesRegex(ValueError, "stub"):
+            validate_layout_report({**report, "stub": True})
+        self.assertIs(
+            validate_layout_report(
+                {**report, "stub": True}, allow_stub=True
+            )["stub"],
+            True,
+        )
+        with self.assertRaisesRegex(ValueError, "three-dimensional"):
+            validate_layout_report({**report, "dimensions": 2})
+        with self.assertRaisesRegex(ValueError, "topology-2.5d"):
+            validate_layout_report({**report, "geometry": "free-3d"})
 
 
 class RowFingerprintTests(unittest.TestCase):

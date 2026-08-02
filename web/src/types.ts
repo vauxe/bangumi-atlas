@@ -1,5 +1,10 @@
 /** 浏览器数据契约；与烘焙侧 Python 手写镜像，变更须同步。 */
 
+export type Bounds3D = [
+  [number, number, number],
+  [number, number, number],
+];
+
 export interface Manifest {
   /** 内容寻址版本(dump-YYYY-MM-DD-<hash>);全部数据请求以 ?v= 携带。 */
   version: string;
@@ -12,7 +17,7 @@ export interface Manifest {
   det_packs: number;
   adj_inline: number;
   eps_inline: number;
-  bbox: [number[], number[]];
+  bbox: Bounds3D;
   /** 时间滑块窗口:非零年份钳制到 [1900, 2035](上游有脏值);
    * 滑块拉满 = 不过滤,窗口外脏年份节点不受影响。 */
   year_range: [number, number];
@@ -31,7 +36,7 @@ export interface Manifest {
 
 /** 几何 SoA(rank 有序)。 */
 export interface Geometry {
-  /** 扩展为 xyz 的世界坐标,长度 3n(流式填充)。 */
+  /** 完整 xyz 世界坐标,长度 3n(流式填充)。 */
   positions: Float32Array;
   year: Uint16Array;
   key: Uint32Array;

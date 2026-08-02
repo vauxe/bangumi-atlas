@@ -22,6 +22,13 @@ const BASE = "data";
 let version = "";
 let manifestRef: Manifest | null = null;
 
+export class SiteDataContractError extends Error {
+  constructor(detail: string) {
+    super(`站点数据版本不兼容:${detail},请重建站点数据`);
+    this.name = "SiteDataContractError";
+  }
+}
+
 /** manifest 之后的一切数据请求都以数据版本寻址，避免跨发布缓存错配。 */
 function url(path: string): string {
   return version
@@ -40,6 +47,21 @@ export async function loadManifest(): Promise<Manifest> {
     !m.files
   )
     throw new Error("manifest.json: invalid data contract");
+  const positionBytes = m.files["positions.bin"]?.[0];
+  const expectedPositionBytes = m.n_nodes * 12;
+  if (positionBytes !== expectedPositionBytes)
+    throw new SiteDataContractError(
+      `positions.bin 应为 ${expectedPositionBytes} 字节,实际为 ` +
+        `${positionBytes ?? "缺失"}`,
+    );
+  if (
+    m.layout?.dimensions !== 3 ||
+    m.layout?.geometry !== "topology-2.5d"
+  )
+    throw new SiteDataContractError(
+      "布局应为 topology-2.5d/3D,实际为 " +
+        `${m.layout?.geometry ?? "缺失"}/${m.layout?.dimensions ?? "缺失"}D`,
+    );
   version = m.version;
   manifestRef = m;
   return m;
@@ -110,7 +132,7 @@ export interface GeometryStream {
 export function openGeometry(manifest: Manifest): GeometryStream {
   const n = manifest.n_nodes;
   const raw = {
-    positions: new Uint8Array(n * 8),
+    positions: new Uint8Array(n * 12),
     year: new Uint8Array(n * 2),
     key: new Uint8Array(n * 4),
     size: new Uint8Array(n),
@@ -119,7 +141,7 @@ export function openGeometry(manifest: Manifest): GeometryStream {
     tags: new Uint8Array(n * 4),
   };
   const stride: Record<keyof typeof raw, number> = {
-    positions: 8,
+    positions: 12,
     year: 2,
     key: 4,
     size: 1,
@@ -129,7 +151,7 @@ export function openGeometry(manifest: Manifest): GeometryStream {
   };
   const progress: Record<string, number> = {};
   const geo: Geometry = {
-    positions: new Float32Array(n * 3),
+    positions: new Float32Array(raw.positions.buffer),
     year: new Uint16Array(raw.year.buffer),
     key: new Uint32Array(raw.key.buffer),
     size: raw.size,
@@ -139,8 +161,6 @@ export function openGeometry(manifest: Manifest): GeometryStream {
     loaded: 0,
     sparse: new Map(),
   };
-  const planar = new Float32Array(raw.positions.buffer);
-  let expanded = 0;
   let lastEmit = 0;
 
   const start = (onChunk: (loaded: number) => void): Promise<void> => {
@@ -153,10 +173,6 @@ export function openGeometry(manifest: Manifest): GeometryStream {
           );
         }),
       );
-      for (; expanded < loaded; expanded++) {
-        geo.positions[expanded * 3] = planar[expanded * 2] ?? 0;
-        geo.positions[expanded * 3 + 2] = planar[expanded * 2 + 1] ?? 0;
-      }
       geo.loaded = loaded;
       const now = performance.now();
       if (now - lastEmit > 250 || loaded === n) {
@@ -273,13 +289,17 @@ export async function pointByRank(
     return bytes.buffer.slice(start, start + len);
   };
   const [posBuf, keyBuf] = await Promise.all([
-    range("positions.bin", rank * 8, 8),
+    range("positions.bin", rank * 12, 12),
     range("key.bin", rank * 4, 4),
   ]);
-  if (!posBuf || !keyBuf || posBuf.byteLength < 8 || keyBuf.byteLength < 4)
+  if (!posBuf || !keyBuf || posBuf.byteLength < 12 || keyBuf.byteLength < 4)
     return null;
-  const xy = new Float32Array(posBuf.slice(0, 8));
-  const pos: [number, number, number] = [xy[0] ?? 0, 0, xy[1] ?? 0];
+  const xyz = new Float32Array(posBuf.slice(0, 12));
+  const pos: [number, number, number] = [
+    xyz[0] ?? 0,
+    xyz[1] ?? 0,
+    xyz[2] ?? 0,
+  ];
   return { pos, key: new Uint32Array(keyBuf.slice(0, 4))[0] ?? 0 };
 }
 

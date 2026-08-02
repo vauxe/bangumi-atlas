@@ -1,6 +1,6 @@
 """Layout bake-off for docs/EXPLORER_ARCHITECTURE.md.
 
-Candidates: igraph DRL-2D (force family) vs igraph UMAP-2D (embedding
+Candidates: igraph DRL-3D (force family) vs igraph UMAP-3D (embedding
 family). For each: runtime, edge-compactness and community separation.
 Coordinates are exported for visual inspection with spike/preview.html.
 
@@ -14,6 +14,7 @@ from pathlib import Path
 import igraph as ig
 import numpy as np
 import pyarrow.parquet as pq
+from layout import shape_layout
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "spike"
@@ -44,9 +45,9 @@ def load_graph() -> tuple[ig.Graph, np.ndarray]:
 
 def run_layout(g: ig.Graph, candidate: str) -> np.ndarray:
     if candidate == "drl":
-        layout = g.layout_drl(dim=2)
+        layout = g.layout_drl(dim=3)
     elif candidate == "umap":
-        layout = g.layout_umap(dim=2, epochs=200)
+        layout = g.layout_umap(dim=3, epochs=200)
     else:
         raise ValueError(candidate)
     return np.asarray(layout.coords, dtype=np.float32)
@@ -96,10 +97,9 @@ def export_preview(coords: np.ndarray, g: ig.Graph, name: str) -> None:
     )
     c = coords - coords.mean(0)
     c *= 400 / np.abs(c).max()
-    xyz = np.column_stack(
-        (c[:, 0], np.zeros(len(c), dtype=np.float32), c[:, 1])
+    (OUT / f"coords_{name}.bin").write_bytes(
+        c.astype(np.float32).tobytes()
     )
-    (OUT / f"coords_{name}.bin").write_bytes(xyz.astype(np.float32).tobytes())
     (OUT / f"comm_{name}.bin").write_bytes(comm.tobytes())
     print(f"  preview 数据已导出:spike/coords_{name}.bin")
 
@@ -114,7 +114,13 @@ def main() -> None:
     print(f"  {g.vcount():,} 节点 / {g.ecount():,} 边", flush=True)
 
     t0 = time.time()
-    coords = run_layout(g, args.candidate)
+    desired = run_layout(g, args.candidate)
+    coords = shape_layout(
+        desired,
+        np.arange(g.vcount(), dtype=np.uint32),
+        np.asarray(g.degree(), dtype=np.int64),
+        np.zeros(g.vcount(), dtype=np.uint16),
+    )
     runtime = time.time() - t0
     print(f"  布局完成:{runtime:,.0f}s", flush=True)
 

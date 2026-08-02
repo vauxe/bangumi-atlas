@@ -1,4 +1,4 @@
-"""Bake a planar and collision-free graph layout."""
+"""Bake a topology-preserving 2.5D graph layout."""
 
 import argparse
 import json
@@ -25,10 +25,12 @@ EDGE_FILES = [
     ("character_rel", "from_id", "character", "to_id", "character"),
 ]
 
-# The lattice and bounded jitter make this a strict geometric invariant.
-MIN_NODE_DISTANCE = 0.25
-_LATTICE_SPACING = MIN_NODE_DISTANCE * 1.12
-_JITTER_RADIUS = MIN_NODE_DISTANCE * 0.05
+# Keep a navigable map silhouette while allowing topology-derived parallax.
+DEPTH_RATIO = 0.20
+TYPICAL_NODE_DISTANCE = 0.28
+_JITTER_RADIUS = TYPICAL_NODE_DISTANCE * 0.15
+_HALO_GAP = TYPICAL_NODE_DISTANCE * 6
+_GOLDEN_ANGLE = np.pi * (3 - np.sqrt(5.0))
 
 rng = np.random.default_rng(7)
 
@@ -89,130 +91,18 @@ def load_edges(index: dict[int, int]) -> np.ndarray:
 
 
 def run_layout(g: ig.Graph, algo: str) -> np.ndarray:
-    """Create a 2D layout from the current graph."""
+    """Embed graph topology directly into three dimensions."""
     if algo == "drl":
-        layout = g.layout_drl(dim=2)
+        layout = g.layout_drl(dim=3)
     elif algo == "umap":
-        layout = g.layout_umap(dim=2, epochs=200)
+        layout = g.layout_umap(dim=3, epochs=200)
     else:
         raise ValueError(algo)
     return np.asarray(layout.coords, dtype=np.float32)
 
 
-def _hex_ring(radius: int) -> list[tuple[int, int]]:
-    if radius == 0:
-        return [(0, 0)]
-    q, r = -radius, radius
-    cells: list[tuple[int, int]] = []
-    for dq, dr in (
-        (1, 0),
-        (1, -1),
-        (0, -1),
-        (-1, 0),
-        (-1, 1),
-        (0, 1),
-    ):
-        for _ in range(radius):
-            cells.append((q, r))
-            q += dq
-            r += dr
-    return cells
-
-
-def _nearest_hex(points: np.ndarray) -> np.ndarray:
-    """Round Cartesian points to axial hex-grid coordinates."""
-    root3 = np.sqrt(3.0)
-    rf = points[:, 1] / (_LATTICE_SPACING * root3 / 2)
-    qf = points[:, 0] / _LATTICE_SPACING - rf / 2
-    xf, zf, yf = qf, rf, -qf - rf
-    rx, ry, rz = np.rint(xf), np.rint(yf), np.rint(zf)
-    dx, dy, dz = np.abs(rx - xf), np.abs(ry - yf), np.abs(rz - zf)
-    x_largest = (dx > dy) & (dx > dz)
-    y_largest = (~x_largest) & (dy > dz)
-    rx[x_largest] = -ry[x_largest] - rz[x_largest]
-    ry[y_largest] = -rx[y_largest] - rz[y_largest]
-    z_largest = ~x_largest & ~y_largest
-    rz[z_largest] = -rx[z_largest] - ry[z_largest]
-    return np.column_stack((rx, rz)).astype(np.int64)
-
-
-def _cell_key(q: int, r: int) -> int:
-    return (q << 32) ^ (r & 0xFFFF_FFFF)
-
-
-def _assign_hex_cells(
-    desired: np.ndarray,
-    keys: np.ndarray,
-) -> np.ndarray:
-    positions = desired.astype(np.float64)
-    positions -= positions.mean(0)
-    if len(positions) > 1:
-        nearest = cKDTree(positions).query(
-            positions,
-            k=2,
-            workers=-1,
-        )[0][:, 1]
-        positive = nearest[nearest > np.finfo(np.float64).eps]
-        if len(positive):
-            positions *= _LATTICE_SPACING / float(np.median(positive))
-    base = _nearest_hex(positions)
-
-    order = np.argsort(keys, kind="stable")
-    occupied: set[int] = set()
-    assigned = np.empty_like(base)
-    rings: list[list[tuple[int, int]]] = [[]]
-    for index in order:
-        i = int(index)
-        q, r = int(base[i, 0]), int(base[i, 1])
-        code = _cell_key(q, r)
-        if code not in occupied:
-            occupied.add(code)
-            assigned[i] = (q, r)
-            continue
-
-        ring = 1
-        while True:
-            if ring == len(rings):
-                rings.append(_hex_ring(ring))
-            offsets = rings[ring]
-            start = int(keys[i]) % len(offsets)
-            for offset in range(len(offsets)):
-                dq, dr = offsets[(start + offset) % len(offsets)]
-                qq, rr = q + dq, r + dr
-                code = _cell_key(qq, rr)
-                if code in occupied:
-                    continue
-                occupied.add(code)
-                assigned[i] = (qq, rr)
-                break
-            else:
-                ring += 1
-                continue
-            break
-    return assigned
-
-
-def _outer_ring_cells(
-    count: int,
-    first_ring: int,
-    origin: np.ndarray,
-) -> np.ndarray:
-    cells: list[tuple[int, int]] = []
-    ring = max(first_ring, 1)
-    while len(cells) < count:
-        cells.extend(_hex_ring(ring))
-        ring += 1
-    return np.asarray(cells[:count], dtype=np.int64) + origin
-
-
-def _cartesian(cells: np.ndarray) -> np.ndarray:
-    q, r = cells[:, 0], cells[:, 1]
-    return _LATTICE_SPACING * np.column_stack(
-        (q + r / 2, (np.sqrt(3.0) / 2) * r)
-    )
-
-
 def _jitter(keys: np.ndarray) -> np.ndarray:
+    """Add a small deterministic offset for coincident projections."""
     h = keys.astype(np.uint64) + np.uint64(0x9E3779B97F4A7C15)
     with np.errstate(over="ignore"):
         h = (h ^ (h >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
@@ -222,70 +112,96 @@ def _jitter(keys: np.ndarray) -> np.ndarray:
     radial = (h >> np.uint64(32)).astype(np.float64) / 2**32
     angle = 2 * np.pi * unit
     radius = _JITTER_RADIUS * np.sqrt(radial)
-    return np.column_stack((np.cos(angle) * radius, np.sin(angle) * radius))
+    jitter = np.zeros((len(keys), 3), dtype=np.float64)
+    jitter[:, 0] = np.cos(angle) * radius
+    jitter[:, 2] = np.sin(angle) * radius
+    return jitter
 
 
-def pack_planar_layout(
+def _shape_connected(desired: np.ndarray, keys: np.ndarray) -> np.ndarray:
+    """Orient, flatten and scale continuous 3D topology coordinates."""
+    points = desired.astype(np.float64)
+    points -= points.mean(axis=0)
+    if len(points) > 1:
+        covariance = points.T @ points
+        values, axes = np.linalg.eigh(covariance)
+        points = points @ axes[:, np.argsort(values)[::-1]]
+
+    # Principal components 0/1 form the map; component 2 becomes restrained
+    # depth. Quantiles keep a few outliers from flattening the whole galaxy.
+    horizontal_span = 0.0
+    if len(points) > 1:
+        bounds = np.quantile(points, (0.01, 0.99), axis=0)
+        spans = bounds[1] - bounds[0]
+        horizontal_span = float(max(spans[0], spans[1]))
+        depth_span = float(spans[2])
+        if horizontal_span > 0 and depth_span > 0:
+            points[:, 2] *= DEPTH_RATIO * horizontal_span / depth_span
+
+    coords = points[:, (0, 2, 1)]
+    if horizontal_span > np.finfo(np.float64).eps:
+        target_span = TYPICAL_NODE_DISTANCE * np.sqrt(len(coords))
+        coords *= target_span / horizontal_span
+    coords += _jitter(keys)
+    return coords
+
+
+def _isolated_halo(count: int, inner_radius: float) -> np.ndarray:
+    """Place structureless nodes in a sparse, honest outer halo."""
+    if count == 0:
+        return np.empty((0, 3), dtype=np.float64)
+    cell_area = np.sqrt(3.0) / 2 * TYPICAL_NODE_DISTANCE**2
+    outer_radius = np.sqrt(inner_radius**2 + count * cell_area / np.pi)
+    order = np.arange(count, dtype=np.float64)
+    fraction = (order + 0.5) / count
+    radius = np.sqrt(
+        inner_radius**2
+        + fraction * (outer_radius**2 - inner_radius**2)
+    )
+    angle = order * _GOLDEN_ANGLE
+    coords = np.zeros((count, 3), dtype=np.float64)
+    coords[:, 0] = np.cos(angle) * radius
+    coords[:, 2] = np.sin(angle) * radius
+    return coords
+
+
+def shape_layout(
     desired: np.ndarray,
     keys: np.ndarray,
     degree: np.ndarray,
     years: np.ndarray,
 ) -> np.ndarray:
-    """Map desired 2D positions to unique nearby cells with a hard gap."""
+    """Create a flattened topology cloud plus an isolated-node halo."""
     n = len(keys)
-    if desired.shape != (n, 2):
-        raise ValueError(f"expected {(n, 2)} desired coordinates")
+    if desired.shape != (n, 3):
+        raise ValueError(f"expected {(n, 3)} desired coordinates")
+    if degree.shape != (n,) or years.shape != (n,):
+        raise ValueError("degree and years must match node count")
+
+    coords = np.zeros((n, 3), dtype=np.float64)
     connected = degree > 0
-    cells = np.empty((n, 2), dtype=np.int64)
     if connected.any():
-        cells[connected] = _assign_hex_cells(
-            desired[connected],
-            keys[connected],
+        coords[connected] = _shape_connected(
+            desired[connected], keys[connected]
         )
-        origin = np.rint(cells[connected].mean(0)).astype(np.int64)
-        cells[connected] -= origin
-        ring_origin = np.rint(cells[connected].mean(0)).astype(np.int64)
-        relative = cells[connected] - ring_origin
-        body_radius = np.sqrt(
-            relative[:, 0] ** 2
-            + relative[:, 0] * relative[:, 1]
-            + relative[:, 1] ** 2
-        ).max()
-        first_outer = int(np.ceil((body_radius + 3) * 2 / np.sqrt(3.0)))
+        body_radius = float(
+            np.linalg.norm(coords[connected][:, (0, 2)], axis=1).max()
+        )
     else:
-        ring_origin = np.zeros(2, dtype=np.int64)
-        first_outer = 1
+        body_radius = 0.0
 
     isolated = ~connected
     if isolated.any():
         isolated_index = np.flatnonzero(isolated)
         thematic_order = np.lexsort(
-            (years[isolated], keys[isolated] >> 24)
+            (keys[isolated], years[isolated], keys[isolated] >> 24)
         )
-        cells[isolated_index[thematic_order]] = _outer_ring_cells(
-            int(isolated.sum()),
-            first_outer,
-            ring_origin,
-        )
+        halo = _isolated_halo(int(isolated.sum()), body_radius + _HALO_GAP)
+        coords[isolated_index[thematic_order]] = halo
 
-    xy = _cartesian(cells) + _jitter(keys)
-    coords = np.zeros((n, 3), dtype=np.float32)
-    coords[:, 0] = xy[:, 0]
-    coords[:, 2] = xy[:, 1]
-
-    if n > 1:
-        plane = coords[:, (0, 2)]
-        nearest = cKDTree(plane).query(
-            plane,
-            k=2,
-            workers=-1,
-        )[0][:, 1]
-        if float(nearest.min()) < MIN_NODE_DISTANCE:
-            raise RuntimeError(
-                f"layout overlap: minimum distance {nearest.min():.6f} "
-                f"< {MIN_NODE_DISTANCE}"
-            )
-    return coords
+    if not np.isfinite(coords).all():
+        raise RuntimeError("layout contains non-finite coordinates")
+    return coords.astype(np.float32)
 
 
 def edge_compactness(coords: np.ndarray, edges: np.ndarray) -> float | None:
@@ -308,12 +224,12 @@ def edge_compactness(coords: np.ndarray, edges: np.ndarray) -> float | None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    # UMAP 是布局对决胜者；DRL 仅保留用于复现实验。
+    # UMAP is the production winner; DRL remains for reproducible bake-offs.
     ap.add_argument("--algo", choices=["drl", "umap"], default="umap")
     ap.add_argument(
         "--stub",
         action="store_true",
-        help="跳过真实布局,生成随机坐标(管道联调用)",
+        help="skip the real layout and emit non-publishable test geometry",
     )
     args = ap.parse_args()
 
@@ -323,69 +239,84 @@ def main() -> None:
     edges = load_edges(index)
     print(f"边 {len(edges):,}", flush=True)
 
-    deg = np.zeros(len(keys), dtype=np.int64)
-    np.add.at(deg, edges[:, 0], 1)
-    np.add.at(deg, edges[:, 1], 1)
-    isolated = deg == 0
-    print(f"孤立节点 {isolated.sum():,}(平面外环)", flush=True)
+    degree = np.zeros(len(keys), dtype=np.int64)
+    np.add.at(degree, edges[:, 0], 1)
+    np.add.at(degree, edges[:, 1], 1)
+    isolated = degree == 0
+    print(f"孤立节点 {isolated.sum():,}(外围光环)", flush=True)
 
-    connected = np.where(~isolated)[0]
+    connected = np.flatnonzero(~isolated)
     remap = -np.ones(len(keys), dtype=np.int64)
     remap[connected] = np.arange(len(connected))
     sub_edges = remap[edges]
 
-    desired = np.zeros((len(keys), 2), dtype=np.float32)
-    comm = np.full(len(keys), 0xFFFF, dtype=np.uint16)
+    desired = np.zeros((len(keys), 3), dtype=np.float32)
+    communities = np.full(len(keys), 0xFFFF, dtype=np.uint16)
 
     if args.stub:
-        desired[connected] = rng.normal(0, 1, (len(connected), 2)).astype(
+        desired[connected] = rng.normal(0, 1, (len(connected), 3)).astype(
             np.float32
         )
-        comm[connected] = (keys[connected] % 512).astype(np.uint16)
+        communities[connected] = (keys[connected] % 512).astype(np.uint16)
     else:
-        g = ig.Graph(
+        graph = ig.Graph(
             n=len(connected), edges=sub_edges.tolist(), directed=False
         )
-        g.simplify()
-        t0 = time.time()
-        desired[connected] = run_layout(g, args.algo)
-        print(f"布局完成 {time.time() - t0:,.0f}s", flush=True)
-        t0 = time.time()
+        graph.simplify()
+        started = time.time()
+        desired[connected] = run_layout(graph, args.algo)
+        print(f"布局完成 {time.time() - started:,.0f}s", flush=True)
+        started = time.time()
         leiden = np.asarray(
-            g.community_leiden(
+            graph.community_leiden(
                 objective_function="modularity", n_iterations=2
             ).membership,
             dtype=np.int64,
         )
-        comm[connected] = leiden.astype(np.uint16)
-        print(f"社区检测 {time.time() - t0:,.0f}s", flush=True)
+        communities[connected] = leiden.astype(np.uint16)
+        print(f"社区检测 {time.time() - started:,.0f}s", flush=True)
 
-    t0 = time.time()
-    coords = pack_planar_layout(desired, keys, deg, years)
-    plane = coords[:, (0, 2)]
-    min_distance = float(
-        cKDTree(plane).query(plane, k=2, workers=-1)[0][:, 1].min()
-    )
+    started = time.time()
+    coords = shape_layout(desired, keys, degree, years)
+    projected = coords[:, (0, 2)]
+    if len(coords) > 1:
+        nearest = cKDTree(projected).query(
+            projected,
+            k=2,
+            workers=-1,
+        )[0][:, 1]
+        min_distance = float(nearest.min())
+        median_distance = float(np.median(nearest))
+    else:
+        min_distance = median_distance = 0.0
     compactness = edge_compactness(coords[connected], sub_edges)
+    body = coords[connected] if len(connected) else coords
+    spans = np.ptp(body, axis=0)
+    horizontal_span = float(max(spans[0], spans[2]))
+    actual_depth_ratio = (
+        float(spans[1]) / horizontal_span if horizontal_span else 0.0
+    )
+    compactness_text = (
+        f"{compactness:.3f}" if compactness is not None else "n/a"
+    )
     print(
-        f"平面无重叠打包 {time.time() - t0:,.0f}s:"
-        f"最小间距 {min_distance:.3f},"
-        f"边紧凑度 {compactness:.3f}",
+        f"2.5D 整形 {time.time() - started:,.0f}s:"
+        f"投影中位间距 {median_distance:.3f},"
+        f"边紧凑度 {compactness_text}",
         flush=True,
     )
 
     OUT.mkdir(parents=True, exist_ok=True)
-
-    # The report records current geometry quality for release inspection.
     report: dict[str, object] = {
         "algo": args.algo,
-        "dimensions": 2,
-        "plane": "xz",
+        "dimensions": 3,
+        "geometry": "topology-2.5d",
+        "stub": args.stub,
         "n_nodes": int(len(keys)),
         "n_connected": int(len(connected)),
-        "min_node_distance": round(min_distance, 6),
-        "overlap_pairs": 0,
-        "plane_thickness": 0.0,
+        "min_projected_neighbor_distance": round(min_distance, 6),
+        "median_projected_neighbor_distance": round(median_distance, 6),
+        "depth_ratio": round(actual_depth_ratio, 6),
         "edge_compactness": (
             round(compactness, 6) if compactness is not None else None
         ),
@@ -398,11 +329,11 @@ def main() -> None:
                 "x": pa.array(coords[:, 0], pa.float32()),
                 "y": pa.array(coords[:, 1], pa.float32()),
                 "z": pa.array(coords[:, 2], pa.float32()),
-                "community": pa.array(comm, pa.uint16()),
+                "community": pa.array(communities, pa.uint16()),
                 "isolated": pa.array(isolated),
                 "collect": pa.array(collects, pa.int64()),
                 "year": pa.array(years, pa.uint16()),
-                "degree": pa.array(deg, pa.int64()),
+                "degree": pa.array(degree, pa.int64()),
             }
         ),
         OUT / "coords.parquet",
