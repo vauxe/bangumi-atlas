@@ -20,7 +20,6 @@ import {
   SiteDataContractError,
 } from "./loader";
 import { loadLabels } from "./labels";
-import { prefersReducedMotion } from "./camera";
 import { Scene } from "./scene";
 import { Search } from "./search";
 import { notify, state, subscribe } from "./store";
@@ -79,12 +78,6 @@ async function boot(): Promise<void> {
     tooltip.innerHTML = `${esc(text)} <span class="tt">${esc(sub)}</span>`;
   };
 
-  // ---- 冷启动自转状态(先声明:onViewChange 据此跳过 URL 回写)----
-  let rotating = !prefersReducedMotion() && location.hash.length <= 1;
-  const stopAutoRotate = (): void => {
-    rotating = false;
-  };
-
   // ---- URL 历史:离散导航入栈,相机/过滤原地替换 ----
   let historyApplications = 0;
   let replaceTimer = 0;
@@ -121,7 +114,6 @@ async function boot(): Promise<void> {
         tooltip.style.display = "none";
         return;
       }
-      stopAutoRotate();
       prefetch(geo.key[rank] ?? 0, manifest.buckets);
       const name = names.c[rank] ?? names.n[rank];
       showTooltip(
@@ -138,10 +130,7 @@ async function boot(): Promise<void> {
       }
       showTooltip(manifest.labels[labelId] ?? "关联", "关系", x, y);
     },
-    // 自转的相机帧不写 URL(不是可分享状态);过滤器变更不受此限
-    onViewChange: () => {
-      if (!rotating) replaceUrl();
-    },
+    onViewChange: replaceUrl,
   });
   // ---- 几何流：场景已就绪，首块回调即可渲染 ----
   let geometryComplete = false;
@@ -278,7 +267,6 @@ async function boot(): Promise<void> {
     keyHint: number | null = null,
   ): Promise<void> {
     const epoch = ++navigationEpoch;
-    stopAutoRotate();
     const link = pendingLink;
     pendingLink = null;
     // 普通选中即退出对比/路径视图
@@ -431,11 +419,9 @@ async function boot(): Promise<void> {
     if (ev.target instanceof HTMLInputElement) return;
     const k = ev.key.toLowerCase();
     if (k === "t") {
-      stopAutoRotate();
       scene.topView();
     }
     if (k === "r") {
-      stopAutoRotate();
       scene.home();
     }
     if (ev.key === "Escape" && state.selection !== null) deselect(true);
@@ -570,15 +556,6 @@ async function boot(): Promise<void> {
   window.addEventListener("popstate", () =>
     runTask(applyUrl(false), "历史状态恢复"),
   );
-
-  // ---- 冷启动背景自转(状态声明在前;首次交互即停)----
-  const spin = (): void => {
-    if (!rotating) return;
-    scene.orbitStep(0.02);
-    requestAnimationFrame(spin);
-  };
-  requestAnimationFrame(spin);
-  $("#map").addEventListener("pointerdown", stopAutoRotate, { once: true });
 }
 
 void boot().catch((error: unknown) => {
