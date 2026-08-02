@@ -1,10 +1,8 @@
-"""Historical layout bake-off for docs/EXPLORER_ARCHITECTURE.md.
+"""Layout bake-off for docs/EXPLORER_ARCHITECTURE.md.
 
 Candidates: igraph DRL-2D (force family) vs igraph UMAP-2D (embedding
-family). For each: runtime, edge-compactness, community separation, and
-the warm-start stability gate (p95 displacement of unperturbed nodes
-must stay under 1% of the layout diameter). Winner's coordinates are
-exported for visual inspection with spike/preview.html.
+family). For each: runtime, edge-compactness and community separation.
+Coordinates are exported for visual inspection with spike/preview.html.
 
 Usage: uv run python scripts/layout_bakeoff.py [--candidate drl|umap]
 """
@@ -12,7 +10,6 @@ Usage: uv run python scripts/layout_bakeoff.py [--candidate drl|umap]
 import argparse
 import time
 from pathlib import Path
-from typing import Any
 
 import igraph as ig
 import numpy as np
@@ -45,18 +42,14 @@ def load_graph() -> tuple[ig.Graph, np.ndarray]:
     return g, ids
 
 
-def run_layout(g: ig.Graph, candidate: str, seed: Any = None) -> np.ndarray:
+def run_layout(g: ig.Graph, candidate: str) -> np.ndarray:
     if candidate == "drl":
-        layout = g.layout_drl(seed=seed, dim=2)
+        layout = g.layout_drl(dim=2)
     elif candidate == "umap":
-        layout = g.layout_umap(dim=2, epochs=200, seed=seed)
+        layout = g.layout_umap(dim=2, epochs=200)
     else:
         raise ValueError(candidate)
     return np.asarray(layout.coords, dtype=np.float32)
-
-
-def diameter(coords: np.ndarray) -> float:
-    return float(np.linalg.norm(coords.max(0) - coords.min(0)))
 
 
 def edge_compactness(g: ig.Graph, coords: np.ndarray) -> float:
@@ -92,30 +85,6 @@ def community_separation(g: ig.Graph, coords: np.ndarray) -> float:
         coords[ra[diff_mask]] - coords[rb[diff_mask]], axis=1
     ).mean()
     return float(intra / inter)
-
-
-def stability_gate(
-    g: ig.Graph, coords: np.ndarray, candidate: str
-) -> tuple[float, bool]:
-    """Warm-restart with 1% of nodes perturbed; p95 displacement of the
-    other 99% must stay under 1% of the layout diameter."""
-    n = len(coords)
-    seed = coords.copy()
-    touched = rng.choice(n, size=max(1, n // 100), replace=False)
-    lo, hi = coords.min(0), coords.max(0)
-    seed[touched] = rng.uniform(lo, hi, (len(touched), 2)).astype(np.float32)
-    coords2 = run_layout(g, candidate, seed=seed.tolist())
-    untouched = np.setdiff1d(np.arange(n), touched)
-    # Compare candidates after removing their arbitrary global rotation.
-    from scipy.linalg import orthogonal_procrustes
-
-    a = coords2[untouched] - coords2[untouched].mean(0)
-    b = coords[untouched] - coords[untouched].mean(0)
-    rot, _ = orthogonal_procrustes(a, b)
-    disp = np.linalg.norm(a @ rot - b, axis=1)
-    p95 = float(np.percentile(disp, 95))
-    dia = diameter(coords)
-    return p95 / dia, (p95 / dia) < 0.01
 
 
 def export_preview(coords: np.ndarray, g: ig.Graph, name: str) -> None:
@@ -154,14 +123,6 @@ def main() -> None:
     print(f"  边紧凑度(越小越好): {ec:.3f}", flush=True)
     print(f"  社区分离度(越小越好): {cs:.3f}", flush=True)
 
-    t0 = time.time()
-    ratio, ok = stability_gate(g, coords, args.candidate)
-    print(
-        f"  稳定性门槛:p95 位移 / 直径 = {ratio:.4f} "
-        f"({'PASS' if ok else 'FAIL'},门槛 0.01;"
-        f"重跑 {time.time() - t0:,.0f}s)",
-        flush=True,
-    )
     export_preview(coords, g, args.candidate)
 
 

@@ -1,4 +1,4 @@
-"""Bake a stable, planar and collision-free graph layout."""
+"""Bake a planar and collision-free graph layout."""
 
 import argparse
 import json
@@ -88,12 +88,8 @@ def load_edges(index: dict[int, int]) -> np.ndarray:
     return lookup(edges)
 
 
-def run_layout(
-    g: ig.Graph, algo: str, seed: np.ndarray | None
-) -> np.ndarray:
-    """Create a 2D layout, or preserve the published weekly baseline."""
-    if seed is not None:
-        return seed.copy()
+def run_layout(g: ig.Graph, algo: str) -> np.ndarray:
+    """Create a 2D layout from the current graph."""
     if algo == "drl":
         layout = g.layout_drl(dim=2)
     elif algo == "umap":
@@ -147,14 +143,10 @@ def _cell_key(q: int, r: int) -> int:
 def _assign_hex_cells(
     desired: np.ndarray,
     keys: np.ndarray,
-    *,
-    normalize: bool,
-    fixed: np.ndarray | None,
 ) -> np.ndarray:
     positions = desired.astype(np.float64)
-    if normalize:
-        positions -= positions.mean(0)
-    if normalize and len(positions) > 1:
+    positions -= positions.mean(0)
+    if len(positions) > 1:
         nearest = cKDTree(positions).query(
             positions,
             k=2,
@@ -165,8 +157,7 @@ def _assign_hex_cells(
             positions *= _LATTICE_SPACING / float(np.median(positive))
     base = _nearest_hex(positions)
 
-    fixed = np.zeros(len(keys), dtype=bool) if fixed is None else fixed
-    order = np.lexsort((keys, ~fixed))
+    order = np.argsort(keys, kind="stable")
     occupied: set[int] = set()
     assigned = np.empty_like(base)
     rings: list[list[tuple[int, int]]] = [[]]
@@ -239,27 +230,20 @@ def pack_planar_layout(
     keys: np.ndarray,
     degree: np.ndarray,
     years: np.ndarray,
-    *,
-    warm_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """Map desired 2D positions to unique nearby cells with a hard gap."""
     n = len(keys)
     if desired.shape != (n, 2):
         raise ValueError(f"expected {(n, 2)} desired coordinates")
-    if warm_mask is not None and warm_mask.shape != (n,):
-        raise ValueError(f"expected {(n,)} warm mask")
     connected = degree > 0
     cells = np.empty((n, 2), dtype=np.int64)
     if connected.any():
         cells[connected] = _assign_hex_cells(
             desired[connected],
             keys[connected],
-            normalize=warm_mask is None,
-            fixed=warm_mask[connected] if warm_mask is not None else None,
         )
-        if warm_mask is None:
-            origin = np.rint(cells[connected].mean(0)).astype(np.int64)
-            cells[connected] -= origin
+        origin = np.rint(cells[connected].mean(0)).astype(np.int64)
+        cells[connected] -= origin
         ring_origin = np.rint(cells[connected].mean(0)).astype(np.int64)
         relative = cells[connected] - ring_origin
         body_radius = np.sqrt(
@@ -304,101 +288,6 @@ def pack_planar_layout(
     return coords
 
 
-def align_communities(
-    comm: np.ndarray, prev: pq.ParquetFile | None, keys: np.ndarray
-) -> np.ndarray:
-    """按成员重叠一对一匹配上周社区 ID(防配色每周洗牌)。
-
-    贪心:按重叠数降序配对,新旧各只用一次——多对一会把不同社区
-    别名成同色,正是该机制要防的事。未匹配的新社区取未占用的新 ID。
-    0xFFFF 是孤立节点哨兵,永不分配。"""
-    if prev is None:
-        return comm
-    old = prev.read(columns=["key", "community"])
-    old_map = dict(
-        zip(
-            np.asarray(old.column("key")).tolist(),
-            np.asarray(old.column("community")).tolist(),
-            strict=True,
-        )
-    )
-    old_of = np.array(
-        [old_map.get(int(k), -1) for k in keys], dtype=np.int64
-    )
-    valid = (old_of >= 0) & (old_of != 0xFFFF)
-    base = int(old_of.max()) + 1
-    codes = comm[valid] * base + old_of[valid]
-    uniq, counts = np.unique(codes, return_counts=True)
-    mapping: dict[int, int] = {}
-    used_old: set[int] = set()
-    for idx in np.argsort(-counts, kind="stable"):
-        new_c, old_c = int(uniq[idx]) // base, int(uniq[idx]) % base
-        if new_c not in mapping and old_c not in used_old:
-            mapping[new_c] = old_c
-            used_old.add(old_c)
-    free = (i for i in range(0xFFFF) if i not in used_old)
-    lut = np.zeros(int(comm.max()) + 1, dtype=np.int64)
-    for c in np.unique(comm):
-        if int(c) not in mapping:
-            mapping[int(c)] = next(free)
-            used_old.add(mapping[int(c)])
-        lut[c] = mapping[int(c)]
-    out = lut[comm]
-    if out.max() >= 0xFFFF:
-        raise SystemExit(
-            f"社区 ID {out.max()} 溢出 u16 契约(0xFFFF 为孤立哨兵)"
-        )
-    return out
-
-
-def _is_ground_plane(points: np.ndarray) -> bool:
-    return float(np.ptp(points[:, 1])) < 1e-4
-
-
-def _build_warm_seed(
-    prev_map: dict[int, tuple[float, float, float]],
-    keys: np.ndarray,
-    edges: np.ndarray,
-) -> tuple[np.ndarray | None, np.ndarray, int, int, int]:
-    prev_keys = np.fromiter(prev_map, dtype=np.uint32)
-    prev_xyz = np.asarray(list(prev_map.values()), dtype=np.float32)
-    prev_xy = prev_xyz[:, (0, 2)]
-    old = dict(zip(prev_keys.tolist(), prev_xy.tolist(), strict=True))
-    known = np.array([int(key) in old for key in keys])
-    if not known.any():
-        return None, known, len(keys), 0, len(keys)
-
-    seed = np.zeros((len(keys), 2), dtype=np.float32)
-    seed[known] = np.asarray(
-        [old[int(key)] for key in keys[known]], dtype=np.float32
-    )
-    new_count = int((~known).sum())
-    if not new_count:
-        return seed, known, 0, 0, 0
-
-    sums = np.zeros((len(keys), 2), dtype=np.float64)
-    counts = np.zeros(len(keys), dtype=np.int64)
-    source, target = edges[:, 0], edges[:, 1]
-    mask = known[target]
-    np.add.at(sums, source[mask], seed[target[mask]])
-    np.add.at(counts, source[mask], 1)
-    mask = known[source]
-    np.add.at(sums, target[mask], seed[source[mask]])
-    np.add.at(counts, target[mask], 1)
-
-    anchored = (~known) & (counts > 0)
-    lo, hi = seed[known].min(0), seed[known].max(0)
-    seed[anchored] = (
-        sums[anchored] / counts[anchored, None]
-        + rng.normal(0, _JITTER_RADIUS, (int(anchored.sum()), 2))
-    ).astype(np.float32)
-    stray = (~known) & (counts == 0)
-    seed[stray] = rng.uniform(lo, hi, (int(stray.sum()), 2)).astype(
-        np.float32
-    )
-    return seed, known, new_count, int(anchored.sum()), int(stray.sum())
-
-
 def edge_compactness(coords: np.ndarray, edges: np.ndarray) -> float | None:
     """Mean edge length divided by mean random-pair length."""
     if not len(edges) or len(coords) < 2:
@@ -421,12 +310,6 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     # UMAP 是布局对决胜者；DRL 仅保留用于复现实验。
     ap.add_argument("--algo", choices=["drl", "umap"], default="umap")
-    ap.add_argument(
-        "--warm-start",
-        type=Path,
-        default=None,
-        help="上周 coords.parquet,热启动用",
-    )
     ap.add_argument(
         "--stub",
         action="store_true",
@@ -453,10 +336,6 @@ def main() -> None:
 
     desired = np.zeros((len(keys), 2), dtype=np.float32)
     comm = np.full(len(keys), 0xFFFF, dtype=np.uint16)
-    prev_map: dict[int, tuple[float, float, float]] | None = None
-    shift_baseline = False
-    warm_started = False
-    warm_mask: np.ndarray | None = None
 
     if args.stub:
         desired[connected] = rng.normal(0, 1, (len(connected), 2)).astype(
@@ -468,52 +347,8 @@ def main() -> None:
             n=len(connected), edges=sub_edges.tolist(), directed=False
         )
         g.simplify()
-        seed = None
-        if args.warm_start and args.warm_start.exists():
-            prev = pq.read_table(
-                args.warm_start, columns=["key", "x", "y", "z", "isolated"]
-            )
-            # Isolated -> connected is a topology event, not layout drift.
-            prev_map = {
-                int(k): (float(x), float(y), float(z))
-                for k, x, y, z, iso in zip(
-                    np.asarray(prev.column("key")),
-                    np.asarray(prev.column("x")),
-                    np.asarray(prev.column("y")),
-                    np.asarray(prev.column("z")),
-                    np.asarray(prev.column("isolated")),
-                    strict=True,
-                )
-                if not iso
-            }
-            prev_xyz = np.asarray(list(prev_map.values()), dtype=np.float32)
-            shift_baseline = _is_ground_plane(prev_xyz)
-            if shift_baseline:
-                (
-                    seed,
-                    known,
-                    n_new,
-                    n_anchored,
-                    n_stray,
-                ) = _build_warm_seed(prev_map, keys[connected], sub_edges)
-                if seed is not None:
-                    warm_mask = np.zeros(len(keys), dtype=bool)
-                    warm_mask[connected] = known
-            else:
-                n_new = n_anchored = n_stray = 0
-            if n_new:
-                print(
-                    f"热启动:新节点 {n_new:,}"
-                    f"(邻居质心 {n_anchored:,} / 随机 {n_stray:,})",
-                    flush=True,
-                )
-            if seed is None:
-                print("旧坐标不是二维布局:本次冷启动迁移", flush=True)
-            else:
-                print("热启动:载入上周二维坐标", flush=True)
-            warm_started = seed is not None
         t0 = time.time()
-        desired[connected] = run_layout(g, args.algo, seed)
+        desired[connected] = run_layout(g, args.algo)
         print(f"布局完成 {time.time() - t0:,.0f}s", flush=True)
         t0 = time.time()
         leiden = np.asarray(
@@ -522,23 +357,11 @@ def main() -> None:
             ).membership,
             dtype=np.int64,
         )
-        prev_pf = (
-            pq.ParquetFile(args.warm_start)
-            if args.warm_start and args.warm_start.exists()
-            else None
-        )
-        aligned = align_communities(leiden, prev_pf, keys[connected])
-        comm[connected] = aligned.astype(np.uint16)
-        print(f"社区检测+对齐 {time.time() - t0:,.0f}s", flush=True)
+        comm[connected] = leiden.astype(np.uint16)
+        print(f"社区检测 {time.time() - t0:,.0f}s", flush=True)
 
     t0 = time.time()
-    coords = pack_planar_layout(
-        desired,
-        keys,
-        deg,
-        years,
-        warm_mask=warm_mask,
-    )
+    coords = pack_planar_layout(desired, keys, deg, years)
     plane = coords[:, (0, 2)]
     min_distance = float(
         cKDTree(plane).query(plane, k=2, workers=-1)[0][:, 1].min()
@@ -553,13 +376,11 @@ def main() -> None:
 
     OUT.mkdir(parents=True, exist_ok=True)
 
-    # Published nodes are fixed; this report catches packing regressions.
+    # The report records current geometry quality for release inspection.
     report: dict[str, object] = {
         "algo": args.algo,
         "dimensions": 2,
         "plane": "xz",
-        "warm_start": warm_started,
-        "shift_baseline": shift_baseline,
         "n_nodes": int(len(keys)),
         "n_connected": int(len(connected)),
         "min_node_distance": round(min_distance, 6),
@@ -568,44 +389,7 @@ def main() -> None:
         "edge_compactness": (
             round(compactness, 6) if compactness is not None else None
         ),
-        "p95_shift_pct": None,
-        "median_shift_pct": None,
-        "n_common": 0,
     }
-    if prev_map is not None and shift_baseline:
-        common = np.array(
-            [
-                i
-                for i in connected
-                if int(keys[i]) in prev_map
-            ],
-            dtype=np.int64,
-        )
-        if len(common):
-            prev_xyz = np.array(
-                [prev_map[int(keys[i])] for i in common], dtype=np.float32
-            )
-            shift = np.linalg.norm(coords[common] - prev_xyz, axis=1)
-            span = coords[connected]
-            diameter = float(np.linalg.norm(span.max(0) - span.min(0)))
-            report["n_common"] = int(len(common))
-            report["p95_shift_pct"] = round(
-                float(np.percentile(shift, 95)) / diameter * 100, 3
-            )
-            report["median_shift_pct"] = round(
-                float(np.median(shift)) / diameter * 100, 3
-            )
-            print(
-                f"跨周位移:p95 {report['p95_shift_pct']}% / "
-                f"中位 {report['median_shift_pct']}%(直径归一,"
-                f"共同节点 {len(common):,};门槛 3%,超限需人工裁断)",
-                flush=True,
-            )
-    elif prev_map is not None:
-        print(
-            "跨周位移:旧坐标不是二维布局,本次视为显式迁移冷启动",
-            flush=True,
-        )
     (OUT / "report.json").write_text(json.dumps(report))
     pq.write_table(
         pa.table(

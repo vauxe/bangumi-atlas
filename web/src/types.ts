@@ -21,7 +21,7 @@ export interface Manifest {
   labels: string[];
   /** 高频首字搜索分片(hex 码点),随首块预取。 */
   hot_shards: string[];
-  /** 布局报告(p95_shift_pct 等),跨周位移留观。 */
+  /** 当前快照的布局算法与几何质量报告。 */
   layout: Record<string, unknown> | null;
   /** 文件名 -> [bytes, sha256](分片已打包,产物全为顶层文件)。 */
   files: Record<string, [number, string]>;

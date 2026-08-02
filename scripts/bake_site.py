@@ -680,9 +680,6 @@ def main() -> None:  # noqa: PLR0915
     )
     log(f"标签表:节点 {len(labels):,} + 社区 {len(comm_labels):,}")
 
-    # ---- 坐标快照:下周热启动 + 位置恒定的事实来源,纳入清单 ----
-    shutil.copy(LAYOUT, SITE / "coords.parquet")
-
     # ---- manifest:版本 + 文件清单 + 哈希(客户端 ?v= 寻址防缓存错配)。
     # 分片已全部打包,产物只剩顶层文件,逐个 sha256 ----
     file_meta: dict[str, list[Any]] = {}
@@ -714,7 +711,7 @@ def main() -> None:  # noqa: PLR0915
         layout_report = None
         log(
             "WARNING: data/layout/report.json 缺失,manifest.layout = null"
-            "(冷启动或本次未跑 layout.py)"
+            "(本次未跑 layout.py)"
         )
     manifest_contract = {
         "n_nodes": n,
