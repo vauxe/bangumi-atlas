@@ -1,4 +1,4 @@
-"""Bake a topology-preserving 2.5D graph layout."""
+"""Bake a topology-preserving 3D graph layout."""
 
 import argparse
 import json
@@ -300,7 +300,7 @@ def main() -> None:
         f"{compactness:.3f}" if compactness is not None else "n/a"
     )
     print(
-        f"2.5D 整形 {time.time() - started:,.0f}s:"
+        f"3D 整形 {time.time() - started:,.0f}s:"
         f"投影中位间距 {median_distance:.3f},"
         f"边紧凑度 {compactness_text}",
         flush=True,
@@ -310,7 +310,7 @@ def main() -> None:
     report: dict[str, object] = {
         "algo": args.algo,
         "dimensions": 3,
-        "geometry": "topology-2.5d",
+        "geometry": "topology-3d",
         "stub": args.stub,
         "n_nodes": int(len(keys)),
         "n_connected": int(len(connected)),

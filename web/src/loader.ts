@@ -57,10 +57,10 @@ export async function loadManifest(): Promise<Manifest> {
     );
   if (
     m.layout?.dimensions !== 3 ||
-    m.layout?.geometry !== "topology-2.5d"
+    m.layout?.geometry !== "topology-3d"
   )
     throw new SiteDataContractError(
-      "布局应为 topology-2.5d/3D,实际为 " +
+      "布局应为 topology-3d/3D,实际为 " +
         `${m.layout?.geometry ?? "缺失"}/${m.layout?.dimensions ?? "缺失"}D`,
     );
   const nameBlockSize = m.name_block_size;

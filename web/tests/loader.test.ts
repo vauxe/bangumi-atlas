@@ -52,7 +52,7 @@ function testManifest(
     hot_shards: [],
     layout: {
       dimensions: 3,
-      geometry: "topology-2.5d",
+      geometry: "topology-3d",
       stub: false,
     },
     files: completeFiles,
@@ -94,7 +94,7 @@ test("rejects obsolete geometry manifests before streaming", async () => {
   };
   globalThis.fetch = (async () =>
     new Response(JSON.stringify(obsoleteLayout))) as typeof fetch;
-  await assert.rejects(loadManifest(), /布局应为 topology-2\.5d\/3D.*重建站点数据/);
+  await assert.rejects(loadManifest(), /布局应为 topology-3d\/3D.*重建站点数据/);
 });
 
 test("rejects manifests with the obsolete whole name table", async () => {
