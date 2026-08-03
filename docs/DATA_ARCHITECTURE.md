@@ -141,10 +141,10 @@ Parquet 是面向建图的类型化投影，不能反向还原为原始 JSONL。
 | `platform` | 原始整数写入 `platform_code`，解码名称写入 `platform` |
 | 其他枚举解码 | 按“实体类型 + 枚举码”生成名称列，同时保留原始码 |
 | `favorite` | 展开为 `wish`、`done`、`doing`、`on_hold`、`dropped` |
-| `score_details` | 转为 `INT64[]`，数组下标表示分数 |
+| `score_details` | 转为固定 10 项的 `INT64[]`，第 1 至 10 项分别对应 1 至 10 分；缺失计数填 0 |
 | `tags` | 转为 `STRUCT(name STRING, count INT64)[]` |
 | `order` | 重命名为 `sort_order`，避免与保留字冲突 |
-| 空值 | 按目标列类型归一为 `""`、`[]` 或 `NULL` |
+| 空值与缺失值 | 文本和列表空值归一为 `""`、`[]`；可空标量保留 `NULL`；缺失计数按字段语义填 0，布尔空值取 `false` |
 | 重复主键 | 在 Parquet 阶段保留首次出现的记录 |
 | 悬空关系 | 端点不存在时不进入关系 Parquet，并逐表报告数量 |
 
