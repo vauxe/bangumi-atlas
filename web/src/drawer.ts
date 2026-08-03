@@ -25,6 +25,7 @@ export interface DrawerDeps {
   walk: (rank: number) => void;
   /** 连接查询:锁定起点,等待用户选第二个节点。 */
   arm: (kind: "common" | "path", from: number, fromKey: number) => void;
+  reportError: (context: string, error: unknown) => void;
 }
 
 const GROUP_CHIPS = 12; // 每组初始 chips 数,展开后放开
@@ -78,6 +79,10 @@ export function drawerTopActions(key?: number): string {
   </div>`;
 }
 
+export function pathArrow(label: string, direction: 1 | -1): string {
+  return `${direction === 1 ? "↓" : "↑"} ${label}`;
+}
+
 export class Drawer {
   private el: HTMLElement;
   private deps: DrawerDeps;
@@ -87,6 +92,8 @@ export class Drawer {
   constructor(el: HTMLElement, deps: DrawerDeps) {
     this.el = el;
     this.deps = deps;
+    this.el.inert = true;
+    this.el.setAttribute("aria-hidden", "true");
     el.addEventListener("click", (ev) => {
       const t = ev.target as HTMLElement;
       const rankAttr = t.closest("[data-rank]")?.getAttribute("data-rank");
@@ -113,16 +120,25 @@ export class Drawer {
   }
 
   hide(): void {
+    const restoreFocus = this.el.contains(document.activeElement);
     this.viewEpoch++;
     this.el.classList.remove("open");
+    if (restoreFocus)
+      document.querySelector<HTMLInputElement>("#search")?.focus();
+    this.el.inert = true;
+    this.el.setAttribute("aria-hidden", "true");
+  }
+
+  private open(): void {
+    this.el.inert = false;
+    this.el.setAttribute("aria-hidden", "false");
+    this.el.classList.add("open");
   }
 
   private run(task: Promise<void>, context: string): void {
-    void task.catch((error: unknown) => {
-      console.error(context, error);
-      const loading = this.el.querySelector<HTMLElement>(".loading");
-      if (loading) loading.textContent = `${context}失败,请重试`;
-    });
+    void task.catch((error: unknown) =>
+      this.deps.reportError(context, error),
+    );
   }
 
   nameOf(rank: number): string {
@@ -133,7 +149,7 @@ export class Drawer {
    * geo.key[rank] 还是 0,直接读会查错分片(main 已 Range 点查)。 */
   async show(rank: number, key: number): Promise<void> {
     const viewEpoch = ++this.viewEpoch;
-    this.el.classList.add("open");
+    this.open();
     this.el.innerHTML = html`<div class="loading">加载中…</div>`;
     const [det, adj] = await Promise.all([
       loadDetail(key, this.deps.manifest.buckets),
@@ -274,16 +290,15 @@ export class Drawer {
   ): Promise<void> {
     const viewEpoch = ++this.viewEpoch;
     this.cur = null; // 非详情视图,分页态失效
-    this.el.classList.add("open");
+    this.open();
     this.el.innerHTML = html`<div class="loading">加载名字…</div>`;
     await this.deps.names.load([
       aRank,
       bRank,
-      ...items.slice(0, 100).map((item) => item.rank),
+      ...items.map((item) => item.rank),
     ]);
     if (this.viewEpoch !== viewEpoch) return;
     const rows = items
-      .slice(0, 100)
       .map(
         (it) => html`<div class="prow">
           ${raw(this.chipOf(it.rank))}
@@ -315,7 +330,7 @@ export class Drawer {
   async showPath(res: PathResult): Promise<void> {
     const viewEpoch = ++this.viewEpoch;
     this.cur = null;
-    this.el.classList.add("open");
+    this.open();
     this.el.innerHTML = html`<div class="loading">加载名字…</div>`;
     await this.deps.names.load(res.ranks);
     if (this.viewEpoch !== viewEpoch) return;
@@ -323,7 +338,12 @@ export class Drawer {
       .map((rank, i) => {
         const arrow =
           i < res.labels.length
-            ? html`<div class="parrow">↓ ${this.lbl(res.labels[i] ?? -1)}</div>`
+            ? html`<div class="parrow">
+                ${pathArrow(
+                  this.lbl(res.labels[i] ?? -1),
+                  res.directions[i] ?? 1,
+                )}
+              </div>`
             : "";
         return html`<div class="prow">${raw(this.chipOf(rank))}</div>${raw(arrow)}`;
       })

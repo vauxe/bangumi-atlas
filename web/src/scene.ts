@@ -1,5 +1,5 @@
 /** deck.gl 场景:语境层(点+近景视锥内骨架边)、工作集聚光/X-ray、
- * GPU 拾取、雾。
+ * GPU 拾取。
  *
  * 性能架构:节点的颜色/亮度/可见性全部在 shader 里由静态实例属性
  * (style、year)+ 少量 uniform 推导——年份滑块、媒介 chips、
@@ -19,6 +19,7 @@ import { IconLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
 import {
   AtlasOrbitController,
   Camera,
+  FOCUS_ZOOM,
   prefersReducedMotion,
 } from "./camera";
 import type { OrbitState } from "./camera";
@@ -32,8 +33,6 @@ import type { Bounds3D, Geometry } from "./types";
 
 export type { OrbitState } from "./camera";
 
-const DIM_ALPHA = 38; // 聚光时语境层 ~15% 亮度
-const PERSON_DIM = 90; // 时间过滤不适用于人物/角色，只降低其亮度
 const EDGE_ZOOM = 1.2;
 const EDGE_CAP = 120_000; // 可见边上限(spike:边是填充率杀手)
 const EDGE_FADE_MS = 250;
@@ -45,6 +44,12 @@ export const EDGE_WIDTHS = {
 const CASCADE_STEP_MS = 30;
 const CASCADE_FADE_MS = 200;
 const PULSE_MS = 500;
+// 持久节点使用世界尺寸：在标准聚焦层级保持原有屏幕观感，继续靠近时
+// 则遵循 3D 投影自然放大。只保留远景最小像素尺寸，不设近景上限。
+const FOCUS_SCALE = 2 ** FOCUS_ZOOM;
+const WORKING_NODE_RADIUS = 9 / FOCUS_SCALE;
+const WORKING_COVER_SIZE = 16.5 / FOCUS_SCALE;
+const WORKING_GLOW_RADIUS = 36 / FOCUS_SCALE;
 
 /** Crop dynamically packed cover textures to the circular node silhouette. */
 class CircleCropExtension extends LayerExtension {
@@ -69,9 +74,6 @@ class CircleCropExtension extends LayerExtension {
 // 全用 float——int 成员的默认精度 vs(highp)/fs(mediump)不一致,
 // 会在链接期报 precision mismatch,掩码值 ≤126 用 float 无损
 const ATLAS_UNIFORM_BLOCK = `uniform atlasUniforms {
-  vec3 cameraPos;
-  float fogStart;
-  float fogFalloff;
   float yearMin;
   float yearMax;
   float mediaMask;
@@ -79,7 +81,6 @@ const ATLAS_UNIFORM_BLOCK = `uniform atlasUniforms {
   float tagLo;
   float tagHi;
   float spotlight;
-  float zoom;
 } atlas;`;
 
 const atlasShaderModule = {
@@ -87,9 +88,6 @@ const atlasShaderModule = {
   vs: ATLAS_UNIFORM_BLOCK,
   fs: ATLAS_UNIFORM_BLOCK,
   uniformTypes: {
-    cameraPos: "vec3<f32>",
-    fogStart: "f32",
-    fogFalloff: "f32",
     yearMin: "f32",
     yearMax: "f32",
     mediaMask: "f32",
@@ -97,14 +95,10 @@ const atlasShaderModule = {
     tagLo: "f32",
     tagHi: "f32",
     spotlight: "f32",
-    zoom: "f32",
   },
 } as const;
 
 export interface AtlasUniforms {
-  cameraPos: [number, number, number];
-  fogStart: number;
-  fogFalloff: number;
   yearMin: number;
   yearMax: number;
   mediaMask: number;
@@ -112,7 +106,6 @@ export interface AtlasUniforms {
   tagLo: number;
   tagHi: number;
   spotlight: number;
-  zoom: number;
 }
 
 export class NodeStyleExtension extends LayerExtension {
@@ -128,13 +121,11 @@ in float instanceYear;
 in vec2 instanceTags;
 out vec4 atlas_style;
 out float atlas_year;
-out vec2 atlas_tags;
-out float atlas_fogDepth;`,
+out vec2 atlas_tags;`,
         "vs:#main-end": `
 atlas_style = instanceStyle;
 atlas_year = instanceYear;
-atlas_tags = instanceTags;
-atlas_fogDepth = distance(geometry.worldPosition.xyz, atlas.cameraPos);`,
+atlas_tags = instanceTags;`,
         // deck 先钳制再做透视；这里在最终屏幕空间补上同一上下限。
         "vs:DECKGL_FILTER_SIZE": `
 if (gl_Position.w > 0.0) {
@@ -143,21 +134,17 @@ if (gl_Position.w > 0.0) {
   float screenRadius = radius * project.focalDistance / gl_Position.w;
   size.xy *= clamp(screenRadius, scatterplot.radiusMinPixels,
     scatterplot.radiusMaxPixels) / screenRadius;
-}
-if (mod(floor(instanceStyle.x / 2.0), 2.0) >= 1.0)
-  size.xy *= mix(0.35, 1.0, smoothstep(0.2, 2.2, atlas.zoom));`,
+}`,
         "fs:#decl": `
 in vec4 atlas_style;
 in float atlas_year;
-in vec2 atlas_tags;
-in float atlas_fogDepth;`,
+in vec2 atlas_tags;`,
         // 颜色、亮度和可见性统一在 shader 中推导；
         // discard 使被滤除节点同时移出拾取与 autoHighlight。
         "fs:DECKGL_FILTER_COLOR": `
 {
   float f_flags = atlas_style.x;
   float f_etype = atlas_style.y;
-  float f_size = atlas_style.z;
   float f_year = atlas_year;
   bool a_iso = mod(floor(f_flags / 2.0), 2.0) >= 1.0;
   int a_media = int(floor(f_flags / 4.0));
@@ -166,8 +153,8 @@ in float atlas_fogDepth;`,
   bool scoreOn = atlas.scoreMin > 0.5;
   bool tagsOn = atlas.tagLo > 0.5 || atlas.tagHi > 0.5;
   if (isSubject) {
-    if (yearOn && f_year > 0.5 &&
-        (f_year < atlas.yearMin || f_year > atlas.yearMax)) discard;
+    if (yearOn && (f_year < 0.5 ||
+        f_year < atlas.yearMin || f_year > atlas.yearMax)) discard;
     // 评分过滤:无评分(0)在过滤激活时一并隐藏
     if (scoreOn && atlas_style.w < atlas.scoreMin) discard;
     if (tagsOn) { // AND 语义:须含全部所选标签(u32 拆两半 u16)
@@ -181,25 +168,21 @@ in float atlas_fogDepth;`,
   vec3 rgb = isSubject ? vec3(61.0, 142.0, 222.0)
            : f_etype < 2.5 ? vec3(229.0, 106.0, 64.0)
            : vec3(39.0, 171.0, 124.0);
-  // 孤立外环 9.2 万点包裹主体,远景亮度稍高即叠成实心带(实测
-  // 压到约 14% 才不糊住主体；近景密度自然稀疏，压制随缩放
-  // 消退,凑近的孤立节点恢复接近普通节点的亮度
-  float isoT = smoothstep(0.2, 2.2, atlas.zoom);
-  float a = a_iso
-    ? mix(36.0, 150.0, isoT)
-    : 160.0 + min(50.0, floor(f_size / 4.0));
-  // 作品属性过滤激活时,人物/角色(与无年份作品)随之降暗不隐藏
+  // 节点重要度已由半径表达，普通节点保持完整实体色，避免重复编码把
+  // 中低热度节点系统性压暗。Alpha 只保留 SDF 圆边，不参与亮度。
+  float visibility = a_iso ? 150.0 / 255.0 : 1.0;
+  // 作品属性过滤激活时,人物/角色降暗但不隐藏。
   bool subjFilterOn = yearOn || scoreOn || tagsOn;
-  if ((subjFilterOn && !isSubject) ||
-      (yearOn && isSubject && f_year < 0.5)) a = min(a, 90.0);
+  if (subjFilterOn && !isSubject)
+    visibility = min(visibility, 90.0 / 255.0);
   int mediaMask = int(atlas.mediaMask + 0.5);
   if (mediaMask != 0 && a_media > 0 &&
-      (mediaMask & (1 << a_media)) == 0) a = 40.0;
-  if (atlas.spotlight > 0.5) a = min(a, 38.0);
-  a *= mix(0.25, 1.0,
-    exp(-max(atlas_fogDepth - atlas.fogStart, 0.0) * atlas.fogFalloff));
-  // 入参 color.a 携带圆边平滑因子(SDF AA),必须保留
-  color = vec4(rgb / 255.0, (a / 255.0) * color.a);
+      (mediaMask & (1 << a_media)) == 0) visibility = 40.0 / 255.0;
+  if (atlas.spotlight > 0.5)
+    visibility = min(visibility, 38.0 / 255.0);
+  vec3 stableRgb = mix(vec3(15.0, 26.0, 28.0), rgb, visibility);
+  // 入参 color.a 只携带圆边平滑因子(SDF AA)，中心像素固定为不透明。
+  color = vec4(stableRgb / 255.0, color.a);
 }`,
       },
     };
@@ -283,7 +266,6 @@ export class Scene {
   readonly camera: Camera;
   private deck: Deck<OrbitView>;
   private geo: Geometry;
-  private worldSize: number;
   private labels: LabelData | null = null;
   private labelCache: LabelCache = {};
   private styleVersion = 0; // 标签可见性相关过滤的变化计数(缓存键)
@@ -329,12 +311,6 @@ export class Scene {
     private cb: SceneCallbacks,
   ) {
     this.geo = geo;
-    const [lo, hi] = bounds;
-    this.worldSize = Math.max(
-      hi[0] - lo[0],
-      hi[1] - lo[1],
-      hi[2] - lo[2],
-    );
     this.camera = new Camera(bounds);
     const n = geo.key.length;
     this.styleBuf = new Uint8Array(n * 4);
@@ -445,7 +421,7 @@ export class Scene {
     const yearOn = f.yearMin > 0 || f.yearMax < 9999;
     if (yearOn) {
       const y = this.geo.year[rank] ?? 0;
-      if (y > 0 && (y < f.yearMin || y > f.yearMax)) return false;
+      if (y === 0 || y < f.yearMin || y > f.yearMax) return false;
     }
     if (f.scoreMin > 0 && (this.geo.score[rank] ?? 0) < f.scoreMin)
       return false;
@@ -606,7 +582,7 @@ export class Scene {
       if ((key[i] ?? 0) >>> 24 !== 1) return true;
       if (yearOn) {
         const y = year[i] ?? 0;
-        if (y > 0 && (y < yMin || y > yMax)) return false;
+        if (y === 0 || y < yMin || y > yMax) return false;
       }
       if (sMin > 0 && (score[i] ?? 0) < sMin) return false;
       if (sel !== 0 && (((tags[i] ?? 0) & sel) >>> 0) !== sel)
@@ -818,9 +794,8 @@ export class Scene {
         data: { length: 1, attributes: { getPosition: { value: pos, size: 3 } } },
         getFillColor: [242, 91, 166, 46], // Miku 品红光晕
         radiusUnits: "common",
-        getRadius: 7,
+        getRadius: WORKING_GLOW_RADIUS,
         radiusMinPixels: 12,
-        radiusMaxPixels: 36,
         billboard: true,
         parameters: { depthCompare: "always", depthWriteEnabled: false },
       }),
@@ -835,9 +810,8 @@ export class Scene {
           },
         },
         radiusUnits: "common",
-        getRadius: 2.2,
+        getRadius: WORKING_NODE_RADIUS,
         radiusMinPixels: 3,
-        radiusMaxPixels: 9,
         filled: false,
         stroked: true,
         getLineWidth: 1,
@@ -860,9 +834,8 @@ export class Scene {
           },
         },
         radiusUnits: "common",
-        getRadius: 2.2,
+        getRadius: WORKING_NODE_RADIUS,
         radiusMinPixels: 3,
-        radiusMaxPixels: 9,
         stroked: true,
         getLineColor: [255, 255, 255, 200],
         getLineWidth: 1,
@@ -896,7 +869,7 @@ export class Scene {
             height: 100,
           }),
           getPosition: (d) => this.posOf(d.rank) ?? [0, 0, 0],
-          getSize: 4.05,
+          getSize: WORKING_COVER_SIZE,
           getColor: (d) => {
             const k =
               reduced || d.index === 0
@@ -914,7 +887,6 @@ export class Scene {
           updateTriggers: { getColor: t },
           sizeUnits: "common",
           sizeMinPixels: 5.5,
-          sizeMaxPixels: 16.5,
           billboard: true,
           extensions: [new CircleCropExtension()],
           onIconError: () => undefined,
@@ -936,10 +908,10 @@ export class Scene {
           getLineColor: [242, 91, 166, Math.round(200 * (1 - k))],
           getLineWidth: 1.5,
           lineWidthUnits: "pixels",
-          radiusUnits: "common",
-          getRadius: 2.2 + 6 * k,
-          radiusMinPixels: 4 + 26 * k,
-          radiusMaxPixels: 9 + 40 * k,
+          // 脉冲是屏幕反馈，不是节点几何；用像素单位避免相机缩放
+          // 改变一次性动效的起止尺寸。
+          radiusUnits: "pixels",
+          getRadius: 9 + 40 * k,
           billboard: true,
           parameters: { depthCompare: "always", depthWriteEnabled: false },
         }),
@@ -1032,15 +1004,6 @@ export class Scene {
     let sel = 0;
     for (const b of f.tags) sel |= 1 << b;
     return {
-      cameraPos: this.cameraPosition(),
-      // 起雾距离带绝对下限:无雾泡若随枢轴距离塌缩,拉近后除枢轴
-      // 紧邻外一切都算"远",凑近节点反而入雾更深(越近越暗);
-      // 雾只该压远景,近/中景(相机 0.3×世界内)永不入雾
-      fogStart: Math.max(
-        this.cameraDistance() * 1.05,
-        0.3 * this.worldSize,
-      ),
-      fogFalloff: 1.6 / Math.max(this.worldSize, 1),
       yearMin: f.yearMin,
       yearMax: f.yearMax,
       mediaMask: mask,
@@ -1048,7 +1011,6 @@ export class Scene {
       tagLo: sel & 0xffff,
       tagHi: sel >>> 16,
       spotlight: state.selection !== null ? 1 : 0,
-      zoom: this.camera.viewState.zoom,
     };
   }
 
@@ -1106,41 +1068,6 @@ export class Scene {
       );
     layers.push(...this.workingSetLayers());
     this.deck.setProps({ layers: layers as never[] });
-  }
-
-  /** 相机世界坐标(雾用):优先取 deck 视口的真实值——手推公式
-   * 曾把轨道角 X 分量符号写反,旋转后雾压暗的是朝向观者的半边。 */
-  private cameraPosition(): [number, number, number] {
-    try {
-      // deck 初始化完成前 getViewports 会断言失败(构造期首帧)
-      const vp = this.deck.getViewports()[0] as
-        | { cameraPosition?: number[] }
-        | undefined;
-      const cp = vp?.cameraPosition;
-      if (cp && cp.length === 3)
-        return [cp[0] ?? 0, cp[1] ?? 0, cp[2] ?? 0];
-    } catch {
-      // 落入后备公式
-    }
-    // 首帧视口未就绪时的后备(已对 deck OrbitViewport 逐例核准)
-    const { target, rotationX, rotationOrbit } = this.camera.viewState;
-    const d = this.cameraDistance();
-    const rx = (rotationX * Math.PI) / 180;
-    const ro = (rotationOrbit * Math.PI) / 180;
-    return [
-      target[0] - d * Math.cos(rx) * Math.sin(ro),
-      target[1] + d * Math.sin(rx),
-      target[2] + d * Math.cos(rx) * Math.cos(ro),
-    ];
-  }
-
-  private cameraDistance(): number {
-    // OrbitView 默认 fovy 50°:dist = (h/2) / tan(fov/2) / 2^zoom
-    const h = Math.max(innerHeight, 1);
-    return (
-      h / 2 / Math.tan((50 / 2) * (Math.PI / 180)) /
-      Math.pow(2, this.camera.viewState.zoom)
-    );
   }
 
   /** 重叠处连续点击循环切换:同一位置再点,拾取下一深度候选。 */

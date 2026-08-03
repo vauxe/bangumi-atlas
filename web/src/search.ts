@@ -1,6 +1,6 @@
 /** 搜索:归一 → 前缀分片 → 联想下拉;回车/点击 → 选中。 */
 
-import { esc, html } from "./html";
+import { html } from "./html";
 import { fold, loadCharmap, searchShard } from "./loader";
 import type { SearchEntry } from "./types";
 
@@ -22,6 +22,7 @@ export class Search {
     this.onPick = onPick;
     box.addEventListener("input", () => this.runUpdate());
     box.addEventListener("keydown", (ev) => this.onKey(ev));
+    box.addEventListener("blur", () => this.close());
     list.addEventListener("mousedown", (ev) => {
       const t = (ev.target as HTMLElement).closest("[data-rank]");
       const r = t?.getAttribute("data-rank");
@@ -47,8 +48,7 @@ export class Search {
     void this.update(epoch).catch((error: unknown) => {
       if (epoch !== this.updateEpoch) return;
       console.error("search update failed", error);
-      this.items = [];
-      this.active = -1;
+      this.reset();
       this.list.textContent = "搜索索引加载失败,请重试";
     });
   }
@@ -58,10 +58,7 @@ export class Search {
     if (epoch !== this.updateEpoch) return;
     const q = fold(this.box.value);
     if (q.length === 0) {
-      this.list.innerHTML = "";
-      this.items = [];
-      this.box.setAttribute("aria-expanded", "false");
-      this.box.removeAttribute("aria-activedescendant");
+      this.reset();
       return;
     }
     // 首字按码点取(q[0] 是 UTF-16 code unit,增补平面会拿到半个代理)
@@ -98,6 +95,7 @@ export class Search {
 
   private onKey(ev: KeyboardEvent): void {
     if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      if (!this.items.length) return;
       ev.preventDefault();
       const d = ev.key === "ArrowDown" ? 1 : -1;
       this.active = Math.max(
@@ -109,20 +107,26 @@ export class Search {
       const hit = this.items[this.active];
       if (hit) this.pick(hit[2]);
     } else if (ev.key === "Escape") {
-      this.list.innerHTML = "";
-      this.box.setAttribute("aria-expanded", "false");
-      this.box.removeAttribute("aria-activedescendant");
-      this.box.blur();
+      this.close(true);
     }
   }
 
   private pick(rank: number): void {
+    this.close(true);
+    this.onPick(rank);
+  }
+
+  private reset(): void {
+    this.items = [];
+    this.active = -1;
     this.list.innerHTML = "";
     this.box.setAttribute("aria-expanded", "false");
     this.box.removeAttribute("aria-activedescendant");
-    this.box.blur();
-    this.onPick(rank);
+  }
+
+  private close(blur = false): void {
+    this.updateEpoch++;
+    this.reset();
+    if (blur) this.box.blur();
   }
 }
-
-export { esc };

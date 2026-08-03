@@ -2,7 +2,7 @@
  * 枚举满足条件的作品(节点本身按热度排序,顺序扫描即 top-N),
  * 点击行即飞往。全列(score/tags/year/flags)在内存,全扫毫秒级。 */
 
-import { esc, html, raw } from "./html";
+import { html, raw } from "./html";
 import { state } from "./store";
 import type { Geometry, Names } from "./types";
 
@@ -143,5 +143,3 @@ export class Results {
     this.el.classList.add("open");
   }
 }
-
-export { esc };

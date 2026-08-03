@@ -21,6 +21,7 @@ from typing import Any, cast
 import numpy as np
 import orjson
 import pyarrow.parquet as pq
+from community_labels import build_community_labels
 from opencc import OpenCC
 from site_contracts import (
     artifact_version,
@@ -681,20 +682,12 @@ def main() -> None:  # noqa: PLR0915
         f"热分片 {len(hot_shards)},折叠映射 {len(charmap):,} 字"
     )
 
-    # ---- 标签表(社区标签 = 社区内 top 节点名)----
+    # ---- 标签表(社区标签名取社区 top 节点，位置取几何中心)----
     labels: list[list[Any]] = []
     for rank in range(min(LABELS_TOP, n)):
         dl = info[int(key_r[rank])]
         labels.append([rank, str(dl["cn"] or dl["name"])])
-    comm_labels: dict[int, list[Any]] = {}
-    for rank in range(n):
-        c = int(comm_r[rank])
-        if c != 0xFFFF and c not in comm_labels:
-            dl = info[int(key_r[rank])]
-            comm_labels[c] = [
-                str(dl["cn"] or dl["name"]),
-                [round(float(v), 1) for v in coords_r[rank]],
-            ]
+    comm_labels = build_community_labels(comm_r, coords_r, key_r, info)
     n_comm_total = len(np.unique(comm_r[comm_r != 0xFFFF]))
     reconcile("社区标签覆盖全部社区", n_comm_total, len(comm_labels))
     charset = sorted(

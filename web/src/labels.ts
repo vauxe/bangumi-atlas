@@ -20,7 +20,7 @@ export interface LabelData {
 // ui-rounded 这类新 CSS 泛型,否则整串被忽略
 const LABEL_FONT = '"Yuanti SC", "YouYuan", "PingFang SC", sans-serif';
 const COMMUNITY_LABEL_MAX_ZOOM = 1.9;
-const NODE_LABEL_MIN_ZOOM = -0.1;
+const NODE_LABEL_MIN_ZOOM = COMMUNITY_LABEL_MAX_ZOOM;
 
 /** 由 Scene 持有的缓存槽。 */
 export interface LabelCache {

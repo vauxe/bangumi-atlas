@@ -13,6 +13,11 @@ import type { AdjEntry, Geometry } from "./types";
 const WIDTH = 48; // 每层前沿与每节点扩展的宽度上限
 const MAX_HOPS = 6;
 
+type AdjLoader = (
+  key: number,
+  buckets: number,
+) => Promise<AdjEntry | null>;
+
 /** [rank, labelId] 扁平化,按 rank 升序(= 热度降序)截前 WIDTH。 */
 function flat(adj: AdjEntry | null): [number, number][] {
   const { ranks, labels } = uniqueNeighbors(adj, WIDTH);
@@ -67,6 +72,8 @@ interface Visit {
 export interface PathResult {
   ranks: number[]; // A → … → B
   labels: number[]; // labels[i] = ranks[i] 与 ranks[i+1] 的关系
+  /** 1 = ranks[i] → ranks[i+1]；-1 = 关系由后者指向前者。 */
+  directions: (1 | -1)[];
 }
 
 /** 有界双向 BFS。找不到(或超界)返回 null。 */
@@ -75,15 +82,17 @@ export async function findPath(
   bRank: number,
   geo: Geometry,
   buckets: number,
+  load: AdjLoader = loadAdj,
 ): Promise<PathResult | null> {
-  if (aRank === bRank) return { ranks: [aRank], labels: [] };
+  if (aRank === bRank)
+    return { ranks: [aRank], labels: [], directions: [] };
   const visited: [Map<number, Visit>, Map<number, Visit>] = [
     new Map([[aRank, { parent: -1, lid: -1 }]]),
     new Map([[bRank, { parent: -1, lid: -1 }]]),
   ];
   let frontier: [number[], number[]] = [[aRank], [bRank]];
 
-  const rebuild = (meet: number, lastSide: 0 | 1): PathResult => {
+  const rebuild = (meet: number): PathResult => {
     // 从相遇点分别回溯到两端,拼接
     const walk = (side: 0 | 1): { ranks: number[]; labels: number[] } => {
       const ranks: number[] = [];
@@ -100,10 +109,13 @@ export async function findPath(
     };
     const wa = walk(0); // meet → … → A
     const wb = walk(1); // meet → … → B
-    void lastSide;
     return {
       ranks: [...wa.ranks.reverse(), ...wb.ranks.slice(1)],
       labels: [...wa.labels.reverse(), ...wb.labels],
+      directions: [
+        ...wa.labels.map(() => 1 as const),
+        ...wb.labels.map(() => -1 as const),
+      ],
     };
   };
 
@@ -115,7 +127,7 @@ export async function findPath(
     const nodes = [...frontier[side]].sort((a, b) => a - b).slice(0, WIDTH);
     if (!nodes.length) return null;
     const adjs = await Promise.all(
-      nodes.map((r) => loadAdj(geo.key[r] ?? 0, buckets)),
+      nodes.map((r) => load(geo.key[r] ?? 0, buckets)),
     );
     const next: number[] = [];
     for (let i = 0; i < nodes.length; i++) {
@@ -123,7 +135,7 @@ export async function findPath(
       for (const [r, lid] of flat(adjs[i] ?? null)) {
         if (visited[side].has(r)) continue;
         visited[side].set(r, { parent: from, lid });
-        if (visited[other].has(r)) return rebuild(r, side);
+        if (visited[other].has(r)) return rebuild(r);
         next.push(r);
       }
     }

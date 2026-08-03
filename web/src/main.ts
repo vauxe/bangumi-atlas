@@ -55,6 +55,7 @@ async function boot(): Promise<void> {
     geo,
     names,
     manifest,
+    reportError,
     walk: (rank) => runTask(select(rank, "fly"), "节点加载"),
     arm: (kind, fromRank, fromKey) => {
       pendingLink = { kind, fromRank, fromKey };
@@ -219,6 +220,11 @@ async function boot(): Promise<void> {
     if (!bKey || geo.key[link.fromRank] !== link.fromKey) {
       hud.textContent = "节点身份解析失败,请刷新重试";
       return;
+    }
+    if (link.kind === "path" && !geometryComplete) {
+      hud.textContent = "正在完成路径所需的几何索引…";
+      await geoDone;
+      if (epoch !== navigationEpoch) return;
     }
     hud.textContent =
       link.kind === "common" ? "计算共同关联…" : "搜索路径…";
@@ -415,15 +421,16 @@ async function boot(): Promise<void> {
 
   // ---- 骰子:随机传送(跳过隐藏节点;冷启动屏同款)----
   const rollDice = (): void => {
-    const cap = Math.min(50_000, geo.loaded);
-    if (!cap) return;
-    for (let tries = 0; tries < 64; tries++) {
-      const rank = Math.floor(Math.random() * cap);
+    const count = geo.loaded;
+    if (!count) return;
+    for (let tries = 0; tries < Math.min(512, count); tries++) {
+      const rank = Math.floor(Math.random() * count);
       if (scene.isVisible(rank)) {
         runTask(select(rank, "fly"), "随机节点加载");
         return;
       }
     }
+    hud.textContent = "当前筛选条件下未随机到可见节点,可从结果中选择";
   };
   $("#dice").addEventListener("click", rollDice);
 
