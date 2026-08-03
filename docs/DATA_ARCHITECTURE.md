@@ -6,6 +6,10 @@
 [EXPLORER_ARCHITECTURE.md](EXPLORER_ARCHITECTURE.md)。数据版本、规模和耗时只记录在
 生成产物与构建日志中，不在设计文档中维护。
 
+分层发布完整结构语义和按需长文本的后续方案见
+[结构化站点数据与按需长文本设计](STRUCTURAL_SITE_DATA_DESIGN.md)。该方案尚未实现；
+本文继续描述当前管道与产物。
+
 ## 1. 架构概览
 
 管道每周执行一次全量构建。Parquet 为数据库、布局和站点数据提供共享的类型化投影；
