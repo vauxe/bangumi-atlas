@@ -24,7 +24,7 @@ export function prefersReducedMotion(): boolean {
 const FLY_MS = 400;
 // OrbitView 在 zoom=0 时以一世界单位对应一像素；聚焦采用稳定的局部
 // 空间尺度。zoom=6.2 时 0.28 世界尺度略大于高亮节点的 18 px 直径。
-const FOCUS_ZOOM = 6.2;
+export const FOCUS_ZOOM = 6.2;
 const FAR_MARGIN = 1.1;
 
 /** deck 的滚轮曲线，但不把鼠标所在的空平面误当成新的关注点。 */
