@@ -69,7 +69,7 @@ class SiteContractTests(unittest.TestCase):
         report = {
             "algo": "umap",
             "dimensions": 3,
-            "geometry": "topology-2.5d",
+            "geometry": "topology-3d",
             "stub": False,
         }
 
@@ -84,7 +84,7 @@ class SiteContractTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "three-dimensional"):
             validate_layout_report({**report, "dimensions": 2})
-        with self.assertRaisesRegex(ValueError, "topology-2.5d"):
+        with self.assertRaisesRegex(ValueError, "topology-3d"):
             validate_layout_report({**report, "geometry": "free-3d"})
 
     def test_name_pack_validation_reads_every_published_block(self) -> None:

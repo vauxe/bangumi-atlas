@@ -55,8 +55,8 @@ def validate_layout_report(
         raise ValueError("stub layout is not publishable")
     if report.get("dimensions") != 3:
         raise ValueError("layout must be three-dimensional")
-    if report.get("geometry") != "topology-2.5d":
-        raise ValueError("layout geometry must be topology-2.5d")
+    if report.get("geometry") != "topology-3d":
+        raise ValueError("layout geometry must be topology-3d")
     return report
 
 
