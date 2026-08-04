@@ -11,7 +11,7 @@
     "smoke": "esbuild tests/smoke.mts --bundle --platform=node --format=esm --outfile=.test-dist/smoke.mjs && node .test-dist/smoke.mjs"
   },
   "devDependencies": {
-    "@types/node": "^26.0.0",
+    "@types/node": "^26.1.2",
     "esbuild": "^0.28.1",
     "http-server": "^14.1.1",
     "typescript": "^7.0.2"
