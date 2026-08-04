@@ -97,9 +97,7 @@ def export_preview(coords: np.ndarray, g: ig.Graph, name: str) -> None:
     )
     c = coords - coords.mean(0)
     c *= 400 / np.abs(c).max()
-    (OUT / f"coords_{name}.bin").write_bytes(
-        c.astype(np.float32).tobytes()
-    )
+    (OUT / f"coords_{name}.bin").write_bytes(c.astype(np.float32).tobytes())
     (OUT / f"comm_{name}.bin").write_bytes(comm.tobytes())
     print(f"  preview 数据已导出:spike/coords_{name}.bin")
 

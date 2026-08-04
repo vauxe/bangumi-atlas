@@ -284,9 +284,7 @@ def collect_mappings() -> tuple[dict[str, Any], dict[str, int]]:
         "subject_type": subject_type,
         "platform": dict(sorted(platform.items())),
         "person_type": {str(k): v for k, v in PERSON_TYPE_NAMES.items()},
-        "character_role": {
-            str(k): v for k, v in CHARACTER_ROLE_NAMES.items()
-        },
+        "character_role": {str(k): v for k, v in CHARACTER_ROLE_NAMES.items()},
     }
     return mappings, unresolved
 
@@ -330,9 +328,24 @@ def main() -> None:  # noqa: PLR0915
     sub_t = pq.read_table(
         PARQUET / "subject.parquet",
         columns=[
-            "id", "type", "name", "name_cn", "platform_code", "date",
-            "score", "rank", "nsfw", "wish", "done", "doing", "on_hold",
-            "dropped", "series", "score_details", "meta_tags", "tags",
+            "id",
+            "type",
+            "name",
+            "name_cn",
+            "platform_code",
+            "date",
+            "score",
+            "rank",
+            "nsfw",
+            "wish",
+            "done",
+            "doing",
+            "on_hold",
+            "dropped",
+            "series",
+            "score_details",
+            "meta_tags",
+            "tags",
         ],
     )
     sub_text_bits = {
@@ -353,15 +366,30 @@ def main() -> None:  # noqa: PLR0915
     del sub_t
     per_t = pq.read_table(
         PARQUET / "person.parquet",
-        columns=["id", "name", "type", "career", "comments", "collects",
-                 "summary", "infobox"],
+        columns=[
+            "id",
+            "name",
+            "type",
+            "career",
+            "comments",
+            "collects",
+            "summary",
+            "infobox",
+        ],
     )
     per = per_t.to_pydict()
     del per_t
     cha_t = pq.read_table(
         PARQUET / "character.parquet",
-        columns=["id", "name", "role", "comments", "collects",
-                 "summary", "infobox"],
+        columns=[
+            "id",
+            "name",
+            "role",
+            "comments",
+            "collects",
+            "summary",
+            "infobox",
+        ],
     )
     cha = cha_t.to_pydict()
     del cha_t
@@ -388,9 +416,7 @@ def main() -> None:  # noqa: PLR0915
     reconcile("节点属性覆盖全部入图节点", n, covered)
     reconcile("库实体数 = 入图节点数", len(info), n)
     if failures:
-        sys.exit(
-            f"FAILED: 布局与库不同步({failures}),先重跑 layout.py 再烘焙"
-        )
+        sys.exit(f"FAILED: 布局与库不同步({failures}),先重跑 layout.py 再烘焙")
 
     # ---- 几何 SoA(25B/节点,定长记录支持 Range 点查)----
     coords_f32 = coords_r.astype("<f4")
@@ -453,8 +479,9 @@ def main() -> None:  # noqa: PLR0915
     rank_segments: dict[str, dict[str, int]] = {}
     rank_buf = bytearray()
     for kind in sr.KINDS:
-        ids = [int(k) & sr.MAX_SOURCE_ID for k in key_r
-               if int(k) >> 24 == kind]
+        ids = [
+            int(k) & sr.MAX_SOURCE_ID for k in key_r if int(k) >> 24 == kind
+        ]
         count = (max(ids) + 1) if ids else 0
         seg = np.full(count, sr.RANK_SENTINEL, dtype="<u4")
         for k, rank in rank_of_key.items():
@@ -462,7 +489,8 @@ def main() -> None:  # noqa: PLR0915
                 seg[k & sr.MAX_SOURCE_ID] = rank
         as_u8 = seg.view(np.uint8).reshape(-1, 4)[:, :3]
         rank_segments[str(kind)] = {
-            "offset": len(rank_buf), "count": count,
+            "offset": len(rank_buf),
+            "count": count,
         }
         rank_buf += as_u8.tobytes()
     (SITE / "rank-by-key.bin").write_bytes(bytes(rank_buf))
@@ -515,13 +543,9 @@ def main() -> None:  # noqa: PLR0915
     )
 
     # ---- 词表(career / meta_tags / tags.name)----
-    career_vocab = vocab_sorted(
-        {c for lst in per["career"] for c in lst}
-    )
+    career_vocab = vocab_sorted({c for lst in per["career"] for c in lst})
     meta_vocab = vocab_sorted({t for lst in sub["meta_tags"] for t in lst})
-    tag_vocab = vocab_sorted(
-        {tg["name"] for lst in sub["tags"] for tg in lst}
-    )
+    tag_vocab = vocab_sorted({tg["name"] for lst in sub["tags"] for tg in lst})
     career_id = {s: i for i, s in enumerate(career_vocab)}
     meta_id = {s: i for i, s in enumerate(meta_vocab)}
     tag_id = {s: i for i, s in enumerate(tag_vocab)}
@@ -576,8 +600,7 @@ def main() -> None:  # noqa: PLR0915
                     int(sub["series"][i]),
                     sub["score_details"][i],
                     [meta_id[t] for t in sub["meta_tags"][i]],
-                    [[tag_id[t["name"]], t["count"]]
-                     for t in sub["tags"][i]],
+                    [[tag_id[t["name"]], t["count"]] for t in sub["tags"][i]],
                     int(bool(sub_text_bits["summary"][i])),
                     int(bool(sub_text_bits["infobox"][i])),
                 ],
@@ -633,9 +656,7 @@ def main() -> None:  # noqa: PLR0915
         )
     entities_pack.write()
     (SITE / "entities.idx").write_bytes(
-        sr.gzip_member(
-            {"width": sr.ENTITY_BLOCK_IDS, "k": ent_ranges}, 6
-        )
+        sr.gzip_member({"width": sr.ENTITY_BLOCK_IDS, "k": ent_ranges}, 6)
     )
     reconcile(
         "实体结构行数",
@@ -671,9 +692,7 @@ def main() -> None:  # noqa: PLR0915
         )
         for i in range(len(rel["from_id"]))
     ]
-    wo = read_cols(
-        "worked_on", ["from_id", "to_id", "position", "appear_eps"]
-    )
+    wo = read_cols("worked_on", ["from_id", "to_id", "position", "appear_eps"])
     fact_rows["WORKED_ON"] = [
         (
             (
@@ -684,9 +703,7 @@ def main() -> None:  # noqa: PLR0915
         )
         for i in range(len(wo["from_id"]))
     ]
-    ap = read_cols(
-        "appears_in", ["from_id", "to_id", "type", "sort_order"]
-    )
+    ap = read_cols("appears_in", ["from_id", "to_id", "type", "sort_order"])
     fact_rows["APPEARS_IN"] = [
         (
             (
@@ -781,22 +798,18 @@ def main() -> None:  # noqa: PLR0915
         mult = fact_mult[enc]
         if inc_kind == "VOICE_CREDIT":
             disk_attrs: tuple[Any, ...] = (
-                inc_attrs[0], int(bool(inc_attrs[1])),
+                inc_attrs[0],
+                int(bool(inc_attrs[1])),
             )
             if inc_parts[2] not in info:
                 voice_unresolved += 1
         else:
             disk_attrs = inc_attrs
         for inc_key in dict.fromkeys(inc_parts):
-            tup = sr.incidence_tuple(
-                ref, mult, inc_key, inc_parts, disk_attrs
-            )
+            tup = sr.incidence_tuple(ref, mult, inc_key, inc_parts, disk_attrs)
             others = cast("list[int]", tup[3])
             heat = min(
-                (
-                    rank_of_key.get(o, sr.RANK_SENTINEL)
-                    for o in others
-                ),
+                (rank_of_key.get(o, sr.RANK_SENTINEL) for o in others),
                 default=rank_of_key.get(inc_key, sr.RANK_SENTINEL),
             )
             incid[inc_key].append((heat, sr.FACT_TAGS[inc_kind], tup))
@@ -917,8 +930,17 @@ def main() -> None:  # noqa: PLR0915
     # ---- Episode 从属集合(结构记录;description 只留存在位)----
     eps_t = pq.read_table(
         PARQUET / "episode.parquet",
-        columns=["id", "name", "name_cn", "airdate", "disc", "duration",
-                 "sort", "type", "subject_id"],
+        columns=[
+            "id",
+            "name",
+            "name_cn",
+            "airdate",
+            "disc",
+            "duration",
+            "sort",
+            "type",
+            "subject_id",
+        ],
     )
     eps_desc_bits = pc.not_equal(
         pq.read_table(
@@ -976,9 +998,7 @@ def main() -> None:  # noqa: PLR0915
         if ep_over:
             entry["op"] = [
                 pages_pack.add(member)
-                for member in sr.gzip_pages(
-                    ep_over, pages_level, sr.PAGE_SIZE
-                )
+                for member in sr.gzip_pages(ep_over, pages_level, sr.PAGE_SIZE)
             ]
             eps_paged_rows += len(ep_over)
         eps_items.append((sid, entry))
@@ -1131,9 +1151,7 @@ def main() -> None:  # noqa: PLR0915
                 emit_desc([(sid, part)])
                 continue
             loc = desc_pack.add(part_gz)
-            desc_ranges.append(
-                [sid, sid, *loc, part[0][0], part[-1][0]]
-            )
+            desc_ranges.append([sid, sid, *loc, part[0][0], part[-1][0]])
 
     desc_items = sorted(desc_by_subject.items())
     start = 0
@@ -1210,9 +1228,7 @@ def main() -> None:  # noqa: PLR0915
         "compressed_bytes": sum(fs_pack.sizes),
     }
     text_quantile_gate(family, fs_pack.sizes)
-    (SITE / "text.idx").write_bytes(
-        sr.gzip_member({"families": text_dir}, 6)
-    )
+    (SITE / "text.idx").write_bytes(sr.gzip_member({"families": text_dir}, 6))
     del fact_refs
 
     # ---- 显示映射 ----
@@ -1237,9 +1253,7 @@ def main() -> None:  # noqa: PLR0915
     entries: list[tuple[str, str, int]] = []
     for rank, k in enumerate(key_r):
         di = info[int(k)]
-        for text in dict.fromkeys(
-            str(t) for t in (di["name"], di["cn"]) if t
-        ):
+        for text in dict.fromkeys(str(t) for t in (di["name"], di["cn"]) if t):
             nk = fold(text)
             if nk:
                 entries.append((nk, text, rank))
@@ -1254,9 +1268,7 @@ def main() -> None:  # noqa: PLR0915
         # Python 字符串按码点索引;客户端以 codePointAt 对齐同一规则
         return norm[prefix_len]
 
-    def emit_search(
-        prefix: str, items: list[tuple[str, str, int]]
-    ) -> None:
+    def emit_search(prefix: str, items: list[tuple[str, str, int]]) -> None:
         nonlocal n_leaves, n_internal
         rows = [[e[0], e[1], e[2]] for e in items]
         gz = sr.gzip_member(rows, search_level)
@@ -1267,9 +1279,7 @@ def main() -> None:  # noqa: PLR0915
         n_internal += 1
         top = [[e[0], e[1], e[2]] for e in items[: sr.SEARCH_TOP]]
         node: dict[str, Any] = {
-            "t": search_pack.add(
-                sr.gzip_member(top, search_level)
-            )
+            "t": search_pack.add(sr.gzip_member(top, search_level))
         }
         search_dir[prefix] = node
         children: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
@@ -1326,9 +1336,7 @@ def main() -> None:  # noqa: PLR0915
     file_meta: dict[str, list[Any]] = {}
     total_bytes = 0
     n_files = 0
-    text_files = {
-        f for fam in text_dir.values() for f in fam["files"]
-    }
+    text_files = {f for fam in text_dir.values() for f in fam["files"]}
     core_bytes = 0
     artifacts = sorted(SITE.iterdir())
     for fpath in artifacts:

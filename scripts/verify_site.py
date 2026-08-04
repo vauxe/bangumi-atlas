@@ -39,13 +39,14 @@ def log(msg: str) -> None:
 def check(label: str, ok: bool, detail: str = "") -> None:
     if not ok:
         failures.append(label)
-    log(f"  {'ok' if ok else 'MISMATCH':8s} {label}"
-        f"{': ' + detail if detail else ''}")
+    log(
+        f"  {'ok' if ok else 'MISMATCH':8s} {label}"
+        f"{': ' + detail if detail else ''}"
+    )
 
 
 def reconcile(label: str, expected: Any, actual: Any) -> None:
-    check(label, expected == actual,
-          f"expected {expected}, got {actual}")
+    check(label, expected == actual, f"expected {expected}, got {actual}")
 
 
 def sha256_of(path: Path) -> str:
@@ -113,14 +114,13 @@ def main() -> None:  # noqa: PLR0915
     reconcile("field_policy", sr.FIELD_POLICY, manifest["field_policy"])
     listed = {meta[2] for meta in artifact_files.values()}
     on_disk = {
-        p.name for p in SITE.iterdir()
+        p.name
+        for p in SITE.iterdir()
         if p.is_file() and p.name != "manifest.json"
     }
     reconcile("manifest.files 覆盖全部数据文件", on_disk, listed)
     total = 0
-    for fname, (size, digest, physical_name) in sorted(
-        artifact_files.items()
-    ):
+    for fname, (size, digest, physical_name) in sorted(artifact_files.items()):
         reconcile(
             f"{fname} 内容寻址物理名",
             sr.published_object_name(fname, digest),
@@ -133,13 +133,18 @@ def main() -> None:  # noqa: PLR0915
         total += size
         if fname.endswith(".pack") and size > sr.PACK_CAP:
             check(f"{fname} <= 80MB pack 上限", False, f"{size:,}")
-    check("files 字节数与摘要全部一致", total == manifest["total_bytes"],
-          f"sum {total:,} vs total_bytes {manifest['total_bytes']:,}")
+    check(
+        "files 字节数与摘要全部一致",
+        total == manifest["total_bytes"],
+        f"sum {total:,} vs total_bytes {manifest['total_bytes']:,}",
+    )
     staging_total = sum(
         p.stat().st_size for p in SITE_ROOT.rglob("*") if p.is_file()
     )
-    log(f"  staging site/ 全部普通文件 {staging_total:,} B"
-        f"(发布门禁 <= 1,000,000,000)")
+    log(
+        f"  staging site/ 全部普通文件 {staging_total:,} B"
+        f"(发布门禁 <= 1,000,000,000)"
+    )
     check("staging site/ <= 1GB", staging_total <= 1_000_000_000)
 
     # ---- 几何与 rank-by-key ----
@@ -203,9 +208,7 @@ def main() -> None:  # noqa: PLR0915
     for bi in range(len(name_idx) - 1):
         off, end = int(name_idx[bi]), int(name_idx[bi + 1])
         name_sizes.append(end - off)
-        names_by_rank.extend(
-            load_member("names.pack", off, end - off)
-        )
+        names_by_rank.extend(load_member("names.pack", off, end - off))
     reconcile("names 行数", n, len(names_by_rank))
     check(
         "名称成员 P99 体验门禁",
@@ -220,7 +223,9 @@ def main() -> None:  # noqa: PLR0915
     ent_sizes: list[int] = []
     rank_of_key = {int(k): i for i, k in enumerate(key_r)}
     presence: dict[str, dict[int, tuple[int, int]]] = {
-        "1": {}, "2": {}, "3": {}
+        "1": {},
+        "2": {},
+        "3": {},
     }
     for kind_s, ranges in ent_idx["k"].items():
         kind = int(kind_s)
@@ -231,37 +236,78 @@ def main() -> None:  # noqa: PLR0915
             member = load_member("entities.pack", off, length)
             for sid, tup in zip(member["i"], member["r"], strict=True):
                 if sid < start or sid > end or sid in seen_ids:
-                    check(f"entities kind={kind} 身份唯一且在范围内",
-                          False, str(sid))
+                    check(
+                        f"entities kind={kind} 身份唯一且在范围内",
+                        False,
+                        str(sid),
+                    )
                 seen_ids.add(sid)
                 key = (kind << 24) | sid
                 nm = names_by_rank[rank_of_key[key]]
                 if kind == sr.KIND_SUBJECT:
-                    (styp, plat, date, score, brank, nsfw, wish, done,
-                     doing, hold, drop, series, sd, mts, tags,
-                     hs, hi) = tup
-                    site_ent_fp.add([
-                        kind, sid, nm[0], nm[1] or "", styp, plat, date,
-                        score, brank, nsfw, wish, done, doing, hold,
-                        drop, series, sd,
-                        [vocab["meta_tags"][t] for t in mts],
-                        [[vocab["tags"][t], c] for t, c in tags],
-                    ])
+                    (
+                        styp,
+                        plat,
+                        date,
+                        score,
+                        brank,
+                        nsfw,
+                        wish,
+                        done,
+                        doing,
+                        hold,
+                        drop,
+                        series,
+                        sd,
+                        mts,
+                        tags,
+                        hs,
+                        hi,
+                    ) = tup
+                    site_ent_fp.add(
+                        [
+                            kind,
+                            sid,
+                            nm[0],
+                            nm[1] or "",
+                            styp,
+                            plat,
+                            date,
+                            score,
+                            brank,
+                            nsfw,
+                            wish,
+                            done,
+                            doing,
+                            hold,
+                            drop,
+                            series,
+                            sd,
+                            [vocab["meta_tags"][t] for t in mts],
+                            [[vocab["tags"][t], c] for t, c in tags],
+                        ]
+                    )
                 elif kind == sr.KIND_PERSON:
                     ptyp, careers, comments, collects, hs, hi = tup
-                    site_ent_fp.add([
-                        kind, sid, nm[0], ptyp,
-                        [vocab["career"][c] for c in careers],
-                        comments, collects,
-                    ])
+                    site_ent_fp.add(
+                        [
+                            kind,
+                            sid,
+                            nm[0],
+                            ptyp,
+                            [vocab["career"][c] for c in careers],
+                            comments,
+                            collects,
+                        ]
+                    )
                 else:
                     role, comments, collects, hs, hi = tup
-                    site_ent_fp.add([kind, sid, nm[0], role,
-                                     comments, collects])
+                    site_ent_fp.add(
+                        [kind, sid, nm[0], role, comments, collects]
+                    )
                 presence[kind_s][sid] = (hs, hi)
                 ent_counts[kind] += 1
-    for kind_name, kind in (("subject", 1), ("person", 2),
-                            ("character", 3)):
+    for kind_name, kind in (("subject", 1), ("person", 2), ("character", 3)):
         reconcile(
             f"实体计数 {kind_name}",
             manifest["counts"]["entities"][kind_name],
@@ -272,27 +318,54 @@ def main() -> None:  # noqa: PLR0915
     pq_ent_fp = RowFingerprint()
     sub = pq.read_table(PARQUET / "subject.parquet").to_pydict()
     for i in range(len(sub["id"])):
-        pq_ent_fp.add([
-            1, sub["id"][i], sub["name"][i], sub["name_cn"][i],
-            sub["type"][i], sub["platform_code"][i], sub["date"][i],
-            sub["score"][i], sub["rank"][i], int(sub["nsfw"][i]),
-            sub["wish"][i], sub["done"][i], sub["doing"][i],
-            sub["on_hold"][i], sub["dropped"][i], int(sub["series"][i]),
-            sub["score_details"][i], sub["meta_tags"][i],
-            [[t["name"], t["count"]] for t in sub["tags"][i]],
-        ])
+        pq_ent_fp.add(
+            [
+                1,
+                sub["id"][i],
+                sub["name"][i],
+                sub["name_cn"][i],
+                sub["type"][i],
+                sub["platform_code"][i],
+                sub["date"][i],
+                sub["score"][i],
+                sub["rank"][i],
+                int(sub["nsfw"][i]),
+                sub["wish"][i],
+                sub["done"][i],
+                sub["doing"][i],
+                sub["on_hold"][i],
+                sub["dropped"][i],
+                int(sub["series"][i]),
+                sub["score_details"][i],
+                sub["meta_tags"][i],
+                [[t["name"], t["count"]] for t in sub["tags"][i]],
+            ]
+        )
     per = pq.read_table(PARQUET / "person.parquet").to_pydict()
     for i in range(len(per["id"])):
-        pq_ent_fp.add([
-            2, per["id"][i], per["name"][i], per["type"][i],
-            per["career"][i], per["comments"][i], per["collects"][i],
-        ])
+        pq_ent_fp.add(
+            [
+                2,
+                per["id"][i],
+                per["name"][i],
+                per["type"][i],
+                per["career"][i],
+                per["comments"][i],
+                per["collects"][i],
+            ]
+        )
     cha = pq.read_table(PARQUET / "character.parquet").to_pydict()
     for i in range(len(cha["id"])):
-        pq_ent_fp.add([
-            3, cha["id"][i], cha["name"][i], cha["role"][i],
-            cha["comments"][i], cha["collects"][i],
-        ])
+        pq_ent_fp.add(
+            [
+                3,
+                cha["id"][i],
+                cha["name"][i],
+                cha["role"][i],
+                cha["comments"][i],
+                cha["collects"][i],
+            ]
+        )
     check(
         "实体结构内容指纹 = parquet",
         site_ent_fp.snapshot() == pq_ent_fp.snapshot(),
@@ -308,15 +381,22 @@ def main() -> None:  # noqa: PLR0915
         sizes: list[int] = []
         seen_count = 0
         raw_bytes = 0
-        seen_by_kind: dict[str, set[int]] = {"1": set(), "2": set(),
-                                             "3": set()}
+        seen_by_kind: dict[str, set[int]] = {
+            "1": set(),
+            "2": set(),
+            "3": set(),
+        }
         for kind_s, ranges in fam["ranges"].items():
             for start, end, fidx, off, length in ranges:
                 sizes.append(length)
                 m = load_member(fam["files"][fidx], off, length)
                 for sid, text in zip(m["i"], m["t"], strict=True):
-                    if (sid < start or sid > end
-                            or sid in seen_by_kind[kind_s] or not text):
+                    if (
+                        sid < start
+                        or sid > end
+                        or sid in seen_by_kind[kind_s]
+                        or not text
+                    ):
                         check(f"{family} 身份唯一且非空", False, str(sid))
                     seen_by_kind[kind_s].add(sid)
                     fp_site.add([int(kind_s), sid, text])
@@ -325,8 +405,7 @@ def main() -> None:  # noqa: PLR0915
         fp_pq = RowFingerprint()
         pq_non_empty = 0
         pq_empty = 0
-        for kind, table in ((1, "subject"), (2, "person"),
-                            (3, "character")):
+        for kind, table in ((1, "subject"), (2, "person"), (3, "character")):
             t = pq.read_table(
                 PARQUET / f"{table}.parquet", columns=["id", column]
             ).to_pydict()
@@ -339,25 +418,38 @@ def main() -> None:  # noqa: PLR0915
                     pq_empty += 1
                 bits = presence[str(kind)][t["id"][i]]
                 if bits[bit] != int(bool(text)):
-                    check(f"{family} 存在位一致", False,
-                          f"{kind}:{t['id'][i]}")
-        check(f"{family} 内容指纹 = parquet",
-              fp_site.snapshot() == fp_pq.snapshot())
-        reconcile(f"{family} 非空计数",
-                  manifest["counts"]["text"][family]["non_empty"],
-                  seen_count)
+                    check(
+                        f"{family} 存在位一致", False, f"{kind}:{t['id'][i]}"
+                    )
+        check(
+            f"{family} 内容指纹 = parquet",
+            fp_site.snapshot() == fp_pq.snapshot(),
+        )
+        reconcile(
+            f"{family} 非空计数",
+            manifest["counts"]["text"][family]["non_empty"],
+            seen_count,
+        )
         reconcile(f"{family} 非空计数 = parquet", pq_non_empty, seen_count)
-        reconcile(f"{family} 空计数",
-                  manifest["counts"]["text"][family]["empty"], pq_empty)
-        reconcile(f"{family} UTF-8 字节数",
-                  manifest["text_bytes"][family]["raw"], raw_bytes)
-        check(f"{family} 成员硬上限",
-              not sizes or max(sizes) <= sr.MEMBER_CAP)
-        check(f"{family} P99 体验门禁",
-              quantile(sizes, 0.99) <= sr.TEXT_P99_CAP)
-        reconcile(f"{family} 成员大小分布 = manifest",
-                  manifest["text_layout"][family]["max"],
-                  max(sizes) if sizes else 0)
+        reconcile(
+            f"{family} 空计数",
+            manifest["counts"]["text"][family]["empty"],
+            pq_empty,
+        )
+        reconcile(
+            f"{family} UTF-8 字节数",
+            manifest["text_bytes"][family]["raw"],
+            raw_bytes,
+        )
+        check(f"{family} 成员硬上限", not sizes or max(sizes) <= sr.MEMBER_CAP)
+        check(
+            f"{family} P99 体验门禁", quantile(sizes, 0.99) <= sr.TEXT_P99_CAP
+        )
+        reconcile(
+            f"{family} 成员大小分布 = manifest",
+            manifest["text_layout"][family]["max"],
+            max(sizes) if sizes else 0,
+        )
 
     verify_entity_text("entity-summary", "summary", 0)
     verify_entity_text("entity-infobox", "infobox", 1)
@@ -375,8 +467,11 @@ def main() -> None:  # noqa: PLR0915
         for sid, pairs in zip(m["i"], m["t"], strict=True):
             for epid, text in pairs:
                 if (sid, epid) in desc_site or not text:
-                    check("episode-description 身份唯一且非空", False,
-                          f"{sid}:{epid}")
+                    check(
+                        "episode-description 身份唯一且非空",
+                        False,
+                        f"{sid}:{epid}",
+                    )
                 if len(row) == 7 and not (row[5] <= epid <= row[6]):
                     check("episode-description 分集边界", False, str(epid))
                 desc_site[(sid, epid)] = True
@@ -398,19 +493,29 @@ def main() -> None:  # noqa: PLR0915
             pq_non_empty += 1
         else:
             pq_empty += 1
-    check("episode-description 内容指纹 = parquet",
-          fp_site.snapshot() == fp_pq.snapshot())
+    check(
+        "episode-description 内容指纹 = parquet",
+        fp_site.snapshot() == fp_pq.snapshot(),
+    )
     reconcile("episode-description 非空计数", pq_non_empty, len(desc_site))
-    reconcile("episode-description 空计数",
-              manifest["counts"]["text"]["episode-description"]["empty"],
-              pq_empty)
-    reconcile("episode-description UTF-8 字节数",
-              manifest["text_bytes"]["episode-description"]["raw"],
-              desc_raw)
-    check("episode-description 成员硬上限",
-          not sizes or max(sizes) <= sr.MEMBER_CAP)
-    check("episode-description P99 体验门禁",
-          quantile(sizes, 0.99) <= sr.TEXT_P99_CAP)
+    reconcile(
+        "episode-description 空计数",
+        manifest["counts"]["text"]["episode-description"]["empty"],
+        pq_empty,
+    )
+    reconcile(
+        "episode-description UTF-8 字节数",
+        manifest["text_bytes"]["episode-description"]["raw"],
+        desc_raw,
+    )
+    check(
+        "episode-description 成员硬上限",
+        not sizes or max(sizes) <= sr.MEMBER_CAP,
+    )
+    check(
+        "episode-description P99 体验门禁",
+        quantile(sizes, 0.99) <= sr.TEXT_P99_CAP,
+    )
 
     # fact-summary:当前全空快照必须产生零负载 + 规范空目录
     fam = text_idx["fact-summary"]
@@ -419,8 +524,10 @@ def main() -> None:  # noqa: PLR0915
         m = load_member(fam["files"][fidx], off, length)
         for ref, text in zip(m["i"], m["t"], strict=True):
             fact_summary[ref] = text
-    check("fact-summary 目录与 pack 存在",
-          all(site_file(f).exists() for f in fam["files"]))
+    check(
+        "fact-summary 目录与 pack 存在",
+        all(site_file(f).exists() for f in fam["files"]),
+    )
     vo = pq.read_table(
         PARQUET / "voiced.parquet",
         columns=["summary"],
@@ -461,11 +568,14 @@ def main() -> None:  # noqa: PLR0915
                 epid, name, cn, air, disc, dur, sort, typ, hd = r
                 if hd != desc_bit_by_ep.get(epid, -1):
                     check("episodes 描述存在位", False, str(epid))
-                site_ep_fp.add([sid, epid, name, cn, air, disc, dur,
-                                sort, typ])
+                site_ep_fp.add(
+                    [sid, epid, name, cn, air, disc, dur, sort, typ]
+                )
                 order_key = (
-                    typ, disc,
-                    float("inf") if sort is None else sort, epid,
+                    typ,
+                    disc,
+                    float("inf") if sort is None else sort,
+                    epid,
                 )
                 if prev_key is not None and order_key < prev_key:
                     check("episodes 组内有序", False, str(epid))
@@ -473,23 +583,42 @@ def main() -> None:  # noqa: PLR0915
                 ep_rows_seen += 1
     ep_full = pq.read_table(
         PARQUET / "episode.parquet",
-        columns=["id", "subject_id", "name", "name_cn", "airdate",
-                 "disc", "duration", "sort", "type"],
+        columns=[
+            "id",
+            "subject_id",
+            "name",
+            "name_cn",
+            "airdate",
+            "disc",
+            "duration",
+            "sort",
+            "type",
+        ],
     ).to_pydict()
     pq_ep_fp = RowFingerprint()
     for i in range(len(ep_full["id"])):
-        pq_ep_fp.add([
-            ep_full["subject_id"][i], ep_full["id"][i],
-            ep_full["name"][i], ep_full["name_cn"][i],
-            ep_full["airdate"][i], ep_full["disc"][i],
-            ep_full["duration"][i], ep_full["sort"][i],
-            ep_full["type"][i],
-        ])
-    check("分集内容指纹 = parquet",
-          site_ep_fp.snapshot() == pq_ep_fp.snapshot())
+        pq_ep_fp.add(
+            [
+                ep_full["subject_id"][i],
+                ep_full["id"][i],
+                ep_full["name"][i],
+                ep_full["name_cn"][i],
+                ep_full["airdate"][i],
+                ep_full["disc"][i],
+                ep_full["duration"][i],
+                ep_full["sort"][i],
+                ep_full["type"][i],
+            ]
+        )
+    check(
+        "分集内容指纹 = parquet", site_ep_fp.snapshot() == pq_ep_fp.snapshot()
+    )
     reconcile("分集行数", manifest["counts"]["episodes"], ep_rows_seen)
-    reconcile("孤儿分组数",
-              manifest["counts"]["episode_orphan_groups"], orphan_groups)
+    reconcile(
+        "孤儿分组数",
+        manifest["counts"]["episode_orphan_groups"],
+        orphan_groups,
+    )
     check("分集成员硬上限", max(eps_sizes) <= sr.MEMBER_CAP)
 
     # ---- 事实:incidence 还原 FactRef、multiplicity 对账 ----
@@ -505,53 +634,95 @@ def main() -> None:  # noqa: PLR0915
             fact_source_rows += 1
 
     rel = pq.read_table(PARQUET / "relates_to.parquet").to_pydict()
-    add_rows("RELATES_TO", (
-        (((1 << 24) | rel["from_id"][i], (1 << 24) | rel["to_id"][i]),
-         (rel["relation_type"][i], rel["sort_order"][i]))
-        for i in range(len(rel["from_id"]))
-    ))
+    add_rows(
+        "RELATES_TO",
+        (
+            (
+                ((1 << 24) | rel["from_id"][i], (1 << 24) | rel["to_id"][i]),
+                (rel["relation_type"][i], rel["sort_order"][i]),
+            )
+            for i in range(len(rel["from_id"]))
+        ),
+    )
     wo = pq.read_table(PARQUET / "worked_on.parquet").to_pydict()
-    add_rows("WORKED_ON", (
-        (((2 << 24) | wo["from_id"][i], (1 << 24) | wo["to_id"][i]),
-         (wo["position"][i], wo["appear_eps"][i]))
-        for i in range(len(wo["from_id"]))
-    ))
+    add_rows(
+        "WORKED_ON",
+        (
+            (
+                ((2 << 24) | wo["from_id"][i], (1 << 24) | wo["to_id"][i]),
+                (wo["position"][i], wo["appear_eps"][i]),
+            )
+            for i in range(len(wo["from_id"]))
+        ),
+    )
     ap = pq.read_table(PARQUET / "appears_in.parquet").to_pydict()
-    add_rows("APPEARS_IN", (
-        (((3 << 24) | ap["from_id"][i], (1 << 24) | ap["to_id"][i]),
-         (ap["type"][i], ap["sort_order"][i]))
-        for i in range(len(ap["from_id"]))
-    ))
+    add_rows(
+        "APPEARS_IN",
+        (
+            (
+                ((3 << 24) | ap["from_id"][i], (1 << 24) | ap["to_id"][i]),
+                (ap["type"][i], ap["sort_order"][i]),
+            )
+            for i in range(len(ap["from_id"]))
+        ),
+    )
     vo_full = pq.read_table(PARQUET / "voiced.parquet").to_pydict()
-    add_rows("VOICE_CREDIT", (
-        (((2 << 24) | vo_full["from_id"][i],
-          (3 << 24) | vo_full["to_id"][i],
-          (1 << 24) | vo_full["subject_id"][i]),
-         (vo_full["type"][i], vo_full["summary"][i]))
-        for i in range(len(vo_full["from_id"]))
-    ))
+    add_rows(
+        "VOICE_CREDIT",
+        (
+            (
+                (
+                    (2 << 24) | vo_full["from_id"][i],
+                    (3 << 24) | vo_full["to_id"][i],
+                    (1 << 24) | vo_full["subject_id"][i],
+                ),
+                (vo_full["type"][i], vo_full["summary"][i]),
+            )
+            for i in range(len(vo_full["from_id"]))
+        ),
+    )
     pr = pq.read_table(PARQUET / "person_rel.parquet").to_pydict()
-    add_rows("PERSON_REL", (
-        (((2 << 24) | pr["from_id"][i], (2 << 24) | pr["to_id"][i]),
-         (pr["relation_type"][i], int(pr["spoiler"][i]),
-          int(pr["ended"][i])))
-        for i in range(len(pr["from_id"]))
-    ))
+    add_rows(
+        "PERSON_REL",
+        (
+            (
+                ((2 << 24) | pr["from_id"][i], (2 << 24) | pr["to_id"][i]),
+                (
+                    pr["relation_type"][i],
+                    int(pr["spoiler"][i]),
+                    int(pr["ended"][i]),
+                ),
+            )
+            for i in range(len(pr["from_id"]))
+        ),
+    )
     cr = pq.read_table(PARQUET / "character_rel.parquet").to_pydict()
-    add_rows("CHARACTER_REL", (
-        (((3 << 24) | cr["from_id"][i], (3 << 24) | cr["to_id"][i]),
-         (cr["relation_type"][i], int(cr["spoiler"][i]),
-          int(cr["ended"][i])))
-        for i in range(len(cr["from_id"]))
-    ))
+    add_rows(
+        "CHARACTER_REL",
+        (
+            (
+                ((3 << 24) | cr["from_id"][i], (3 << 24) | cr["to_id"][i]),
+                (
+                    cr["relation_type"][i],
+                    int(cr["spoiler"][i]),
+                    int(cr["ended"][i]),
+                ),
+            )
+            for i in range(len(cr["from_id"]))
+        ),
+    )
     for i, enc in enumerate(sorted(mult_count)):
         expected[enc] = (i, mult_count[enc])
     n_facts = len(expected)
     reconcile("事实计数", manifest["counts"]["facts"], n_facts)
-    reconcile("事实源行数",
-              manifest["counts"]["fact_source_rows"], fact_source_rows)
-    reconcile("multiplicity 总和 = 源行数",
-              fact_source_rows, sum(mult_count.values()))
+    reconcile(
+        "事实源行数", manifest["counts"]["fact_source_rows"], fact_source_rows
+    )
+    reconcile(
+        "multiplicity 总和 = 源行数",
+        fact_source_rows,
+        sum(mult_count.values()),
+    )
     del rel, wo, ap, pr, cr
 
     tag_to_kind = {v: k for k, v in sr.FACT_TAGS.items()}
@@ -653,8 +824,11 @@ def main() -> None:  # noqa: PLR0915
             if got != exp_items[: sr.SEARCH_TOP]:
                 ok_search = False
     check("搜索叶与内部 top-12 与全量排序一致", ok_search)
-    check("搜索成员 <= 64,000", search_max <= sr.SEARCH_LEAF_CAP,
-          f"max {search_max:,}")
+    check(
+        "搜索成员 <= 64,000",
+        search_max <= sr.SEARCH_LEAF_CAP,
+        f"max {search_max:,}",
+    )
     covered = set()
     for nk, _text, _rank in entries:
         p = None
@@ -667,9 +841,11 @@ def main() -> None:  # noqa: PLR0915
             break
         covered.add(p)
 
-    for logical_name, (size, _digest, _physical_name) in (
-        artifact_files.items()
-    ):
+    for logical_name, (
+        size,
+        _digest,
+        _physical_name,
+    ) in artifact_files.items():
         if not logical_name.endswith(".pack"):
             continue
         cursor = 0
@@ -713,8 +889,10 @@ def main() -> None:  # noqa: PLR0915
 
     elapsed = time.time() - t0
     if failures:
-        log(f"FAILED: {len(failures)} 处不符 ({elapsed:,.0f}s): "
-            f"{failures[:10]}")
+        log(
+            f"FAILED: {len(failures)} 处不符 ({elapsed:,.0f}s): "
+            f"{failures[:10]}"
+        )
         sys.exit(1)
     log(f"verify_site: all checks passed in {elapsed:,.0f}s")
 

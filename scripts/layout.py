@@ -155,8 +155,7 @@ def _isolated_halo(count: int, inner_radius: float) -> np.ndarray:
     order = np.arange(count, dtype=np.float64)
     fraction = (order + 0.5) / count
     radius = np.sqrt(
-        inner_radius**2
-        + fraction * (outer_radius**2 - inner_radius**2)
+        inner_radius**2 + fraction * (outer_radius**2 - inner_radius**2)
     )
     angle = order * _GOLDEN_ANGLE
     coords = np.zeros((count, 3), dtype=np.float64)

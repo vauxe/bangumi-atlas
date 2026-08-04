@@ -45,6 +45,7 @@ CHARACTER_APPEAR_TYPES = {
 # reported at the end of the parquet stage so mapping staleness is loud
 unknown_codes: Counter[tuple[str, int | str, int | None]] = Counter()
 
+
 def validate_mapping_snapshot() -> str:
     return enum_mappings.validate_mapping_snapshot(MAPPINGS)
 
@@ -183,8 +184,7 @@ def _validate_source_record(name: str, record: dict[str, Any]) -> None:
         kind = record.get("person_type")
         if kind not in PERSON_RELATION_TYPES:
             raise ValueError(
-                "person-relations.person_type has unsupported value "
-                f"{kind!r}"
+                f"person-relations.person_type has unsupported value {kind!r}"
             )
 
 
@@ -742,9 +742,7 @@ def _populate_database(path: Path) -> None:
                     conn.execute(stmt)
             for table, fname in COPIES:
                 t0 = time.time()
-                conn.execute(
-                    f'COPY {table} FROM "{PARQUET / fname}.parquet"'
-                )
+                conn.execute(f'COPY {table} FROM "{PARQUET / fname}.parquet"')
                 print(f"  COPY {table}: {time.time() - t0:.1f}s")
             for table, _ in COPIES:
                 pattern = (
@@ -785,8 +783,7 @@ def report_unknown_codes() -> None:
     )
     for (scope, namespace, code), count in entries:
         print(
-            f"    {scope} namespace={namespace} code={code}: "
-            f"{count:,} records"
+            f"    {scope} namespace={namespace} code={code}: {count:,} records"
         )
 
 
