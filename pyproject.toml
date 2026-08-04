@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["ruff>=0.9", "mypy>=1.14", "types-pyyaml>=6"]
+dev = ["ruff>=0.16.1", "mypy>=1.14", "types-pyyaml>=6"]
 
 [tool.ruff]
 line-length = 79
