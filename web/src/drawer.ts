@@ -28,8 +28,6 @@ export interface DrawerDeps {
   /** 连接查询:锁定起点,等待用户选第二个节点。 */
   arm: (kind: "common" | "path", from: number, fromKey: number) => void;
   reportError: (context: string, error: unknown) => void;
-  /** 节省流量模式下跳过所有推测预取。 */
-  saveData: () => boolean;
 }
 
 const GROUP_CHIPS = 12; // 每组初始 chips 数,展开后放开
@@ -40,7 +38,7 @@ type TextState =
   | { s: "idle" }
   | { s: "loading" }
   | { s: "empty" }
-  | { s: "ready"; text: string };
+  | { s: "ready"; text: string; shown: number };
 
 interface Current {
   rank: number;
@@ -59,7 +57,6 @@ interface Current {
   summary: TextState;
   summaryOpen: boolean;
   infobox: TextState;
-  infoboxShown: number;
   descs: Map<number, TextState>;
 }
 
@@ -157,13 +154,25 @@ export class Drawer {
           this.rerender();
         }
       }
-      if (t.id === "load-infobox")
-        this.run(this.loadInfobox(), "infobox 加载");
-      if (t.id === "infobox-more" && this.cur) {
-        this.cur.infoboxShown += TEXT_SEGMENT;
+      if (t.id === "summary-more" && this.cur?.summary.s === "ready") {
+        this.cur.summary.shown += TEXT_SEGMENT;
         this.rerender();
       }
-      if (t.id === "sum-load") this.run(this.loadSummary(true), "简介加载");
+      if (t.id === "load-infobox")
+        this.run(this.loadInfobox(), "infobox 加载");
+      if (t.id === "infobox-more" && this.cur?.infobox.s === "ready") {
+        this.cur.infobox.shown += TEXT_SEGMENT;
+        this.rerender();
+      }
+      const epMore = /^ep-more-(\d+)$/.exec(t.id);
+      if (epMore && this.cur) {
+        const text = this.cur.descs.get(Number(epMore[1]));
+        if (text?.s === "ready") {
+          text.shown += TEXT_SEGMENT;
+          this.rerender();
+        }
+      }
+      if (t.id === "sum-load") this.run(this.loadSummary(), "简介加载");
     });
   }
 
@@ -223,21 +232,12 @@ export class Drawer {
       summary: { s: "idle" },
       summaryOpen: false,
       infobox: { s: "idle" },
-      infoboxShown: TEXT_SEGMENT,
       descs: new Map(),
     };
     this.cur = cur;
     await this.loadChipNames(cur);
     if (this.viewEpoch !== viewEpoch || this.cur !== cur) return;
     this.rerender();
-    // 结构详情显示完成后低优先级预取 summary(节省流量模式跳过);
-    // infobox 与分集介绍仍只在明确请求时读取。
-    if (
-      cur.entity?.hasSummary &&
-      !this.deps.saveData() &&
-      cur.summary.s === "idle"
-    )
-      this.run(this.loadSummary(false), "简介预取");
   }
 
   private async loadChipNames(cur: Current): Promise<void> {
@@ -268,12 +268,12 @@ export class Drawer {
     return [...groups];
   }
 
-  private async loadSummary(openAfter: boolean): Promise<void> {
+  private async loadSummary(): Promise<void> {
     const cur = this.cur;
     if (!cur || !cur.entity?.hasSummary || cur.summary.s === "loading")
       return;
     if (cur.summary.s === "ready") {
-      cur.summaryOpen = openAfter || cur.summaryOpen;
+      cur.summaryOpen = true;
       this.rerender();
       return;
     }
@@ -281,13 +281,14 @@ export class Drawer {
     const res = await this.deps.data.longText({
       kind: "entity-summary",
       entity: cur.key,
+      present: cur.entity.hasSummary,
     });
     if (this.cur !== cur) return;
     cur.summary =
       res.kind === "present"
-        ? { s: "ready", text: res.text }
+        ? { s: "ready", text: res.text, shown: TEXT_SEGMENT }
         : { s: "empty" };
-    if (openAfter) cur.summaryOpen = true;
+    cur.summaryOpen = true;
     this.rerender();
   }
 
@@ -300,13 +301,13 @@ export class Drawer {
     const res = await this.deps.data.longText({
       kind: "entity-infobox",
       entity: cur.key,
+      present: cur.entity.hasInfobox,
     });
     if (this.cur !== cur) return;
     cur.infobox =
       res.kind === "present"
-        ? { s: "ready", text: res.text }
+        ? { s: "ready", text: res.text, shown: TEXT_SEGMENT }
         : { s: "empty" };
-    cur.infoboxShown = TEXT_SEGMENT;
     this.rerender();
   }
 
@@ -326,12 +327,15 @@ export class Drawer {
       kind: "episode-description",
       subject: cur.key,
       episode: episodeId,
+      present:
+        cur.eps?.find((episode) => episode.id === episodeId)
+          ?.hasDescription ?? false,
     });
     if (this.cur !== cur) return;
     cur.descs.set(
       episodeId,
       res.kind === "present"
-        ? { s: "ready", text: res.text }
+        ? { s: "ready", text: res.text, shown: TEXT_SEGMENT }
         : { s: "empty" },
     );
     this.rerender();
@@ -603,8 +607,15 @@ export class Drawer {
     let summary = "";
     if (entity?.hasSummary) {
       if (cur.summary.s === "ready") {
+        const summaryBody = cur.summaryOpen
+          ? segmented(
+              cur.summary.text,
+              cur.summary.shown,
+              "summary-more",
+            )
+          : html`${cur.summary.text.slice(0, TEXT_SEGMENT)}`;
         summary = html`<div class="sum ${cur.summaryOpen ? "expanded" : ""}">
-          ${cur.summary.text}
+          ${raw(summaryBody)}
           <button id="sum-toggle" class="sum-toggle">展开/收起</button>
         </div>`;
       } else if (cur.summary.s === "loading") {
@@ -629,7 +640,7 @@ export class Drawer {
         infobox = html`<div class="group">
           <div class="group-label">infobox(Wiki 源码,纯文本)</div>
           <pre class="infobox">${raw(
-            segmented(cur.infobox.text, cur.infoboxShown, "infobox-more"),
+            segmented(cur.infobox.text, cur.infobox.shown, "infobox-more"),
           )}</pre>
         </div>`;
       }
@@ -694,7 +705,9 @@ export class Drawer {
       : "";
     const body =
       desc?.s === "ready"
-        ? html`<div class="ep-body">${desc.text}</div>`
+        ? html`<div class="ep-body">${raw(
+            segmented(desc.text, desc.shown, `ep-more-${e.id}`),
+          )}</div>`
         : desc?.s === "loading"
           ? html`<div class="ep-body">介绍加载中…</div>`
           : "";

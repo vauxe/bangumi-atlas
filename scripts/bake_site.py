@@ -46,7 +46,6 @@ LABELS_TOP = 20_000
 SIZE_BUDGET = 1_000_000_000  # GH Pages 1GB 硬限(发布门禁按 site/ 全量)
 SIZE_WARN = 900_000_000
 FILE_BUDGET = 20_000  # CF Pages 迁移预案的文件数上限
-SEARCH_PAGE = 500  # 不可再拆叶的分页条数(压缩后必须 <= 64,000)
 
 # 人物类型与角色分类没有上游映射文件;这是站点显示映射的权威声明,
 # 参与 mappings.json 摘要。未覆盖的原始码由客户端按数值显示。
@@ -110,6 +109,7 @@ class PackFile:
         self.sizes: list[int] = []
 
     def add(self, gz: bytes) -> list[int]:
+        sr.require_member_size(gz, self.name)
         off = len(self.blob)
         self.blob += gz
         self.sizes.append(len(gz))
@@ -137,8 +137,7 @@ class RolloverPack:
         self.sizes: list[int] = []
 
     def add(self, gz: bytes) -> list[int]:
-        if len(gz) > sr.PACK_CAP:
-            raise ValueError(f"{self.stem}: member exceeds pack cap")
+        sr.require_member_size(gz, self.stem)
         if len(self.blobs[-1]) + len(gz) > sr.PACK_CAP:
             self.blobs.append(bytearray())
         file_idx = len(self.blobs) - 1
@@ -828,13 +827,12 @@ def main() -> None:  # noqa: PLR0915
         }
         inline_written += len(inline)
         if over:
+            page_rows = [[tag, *tup] for _, tag, tup in over]
             entry["op"] = [
-                pages_pack.add_json(
-                    [[tag, *tup] for _, tag, tup in
-                     over[i : i + sr.PAGE_SIZE]],
-                    pages_level,
+                pages_pack.add(member)
+                for member in sr.gzip_pages(
+                    page_rows, pages_level, sr.PAGE_SIZE
                 )
-                for i in range(0, len(over), sr.PAGE_SIZE)
             ]
             paged_written += len(over)
         bucket_entries[key % sr.FACT_BUCKETS][str(key)] = entry
@@ -977,10 +975,10 @@ def main() -> None:  # noqa: PLR0915
         ep_over = ep_rows[sr.EPISODE_INLINE :]
         if ep_over:
             entry["op"] = [
-                pages_pack.add_json(
-                    ep_over[i : i + sr.PAGE_SIZE], pages_level
+                pages_pack.add(member)
+                for member in sr.gzip_pages(
+                    ep_over, pages_level, sr.PAGE_SIZE
                 )
-                for i in range(0, len(ep_over), sr.PAGE_SIZE)
             ]
             eps_paged_rows += len(ep_over)
         eps_items.append((sid, entry))
@@ -1273,21 +1271,6 @@ def main() -> None:  # noqa: PLR0915
                 sr.gzip_member(top, search_level)
             )
         }
-        terminals = [e for e in items if e[0] == prefix]
-        if terminals:
-            pages = []
-            for i in range(0, len(terminals), SEARCH_PAGE):
-                page_rows = [
-                    [e[0], e[1], e[2]]
-                    for e in terminals[i : i + SEARCH_PAGE]
-                ]
-                page_gz = sr.gzip_member(page_rows, search_level)
-                if len(page_gz) > sr.SEARCH_LEAF_CAP:
-                    raise ValueError(
-                        f"search terminal page for {prefix!r} exceeds cap"
-                    )
-                pages.append(search_pack.add(page_gz))
-            node["p"] = pages
         search_dir[prefix] = node
         children: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
         for e in items:
@@ -1347,16 +1330,21 @@ def main() -> None:  # noqa: PLR0915
         f for fam in text_dir.values() for f in fam["files"]
     }
     core_bytes = 0
-    for fpath in sorted(SITE.iterdir()):
+    artifacts = sorted(SITE.iterdir())
+    for fpath in artifacts:
         if fpath.name == "manifest.json":
             continue
         assert fpath.is_file(), f"产物应全为顶层文件,发现目录 {fpath.name}"
         size = fpath.stat().st_size
-        file_meta[fpath.name] = [size, sha256_of(fpath)]
+        digest = sha256_of(fpath)
+        physical_name = sr.published_object_name(fpath.name, digest)
+        file_meta[fpath.name] = [size, digest, physical_name]
         total_bytes += size
         if fpath.name not in text_files:
             core_bytes += size
         n_files += 1
+    for logical_name, (_size, _digest, physical_name) in file_meta.items():
+        (SITE / logical_name).replace(SITE / physical_name)
     year_nonzero = year_r[year_r > 0]
     if len(year_nonzero):
         y_lo = int(np.clip(year_nonzero.min(), 1900, 2035))

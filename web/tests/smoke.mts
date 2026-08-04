@@ -31,7 +31,11 @@ const data = new Data(manifest, names);
 await ensureRankIndex();
 
 // 取一个高热度作品(rank 0 未必是 subject,扫描前几名)
-const keyBytes = await (await realFetch(`${BASE}/data/key.bin`)).arrayBuffer();
+const keyObject = manifest.files["key.bin"]?.[2];
+assert.ok(keyObject, "manifest contains the key.bin physical object");
+const keyResponse = await realFetch(`${BASE}/data/${keyObject}`);
+assert.equal(keyResponse.status, 200);
+const keyBytes = await keyResponse.arrayBuffer();
 const keys = new Uint32Array(keyBytes);
 const subjectKey = [...keys.slice(0, 50)].find((k) => k >>> 24 === 1);
 assert.ok(subjectKey);
@@ -69,9 +73,10 @@ for (const ep of episodes.items.slice(0, 200)) {
 const withDesc = episodes.items.find((e) => e.hasDescription);
 if (withDesc) {
   const desc = await data.longText({
-    kind: "episode-description",
-    subject: subjectKey,
-    episode: withDesc.id,
+      kind: "episode-description",
+      subject: subjectKey,
+      episode: withDesc.id,
+      present: withDesc.hasDescription,
   });
   assert.equal(desc.kind, "present");
   console.log(`episode description ok (${withDesc.id})`);
@@ -79,8 +84,9 @@ if (withDesc) {
 
 if (entity.hasSummary) {
   const summary = await data.longText({
-    kind: "entity-summary",
-    entity: subjectKey,
+      kind: "entity-summary",
+      entity: subjectKey,
+      present: entity.hasSummary,
   });
   assert.equal(summary.kind, "present");
   console.log(
@@ -89,8 +95,9 @@ if (entity.hasSummary) {
 }
 if (entity.hasInfobox) {
   const infobox = await data.longText({
-    kind: "entity-infobox",
-    entity: subjectKey,
+      kind: "entity-infobox",
+      entity: subjectKey,
+      present: entity.hasInfobox,
   });
   assert.equal(infobox.kind, "present");
   assert.ok((infobox as { text: string }).text.includes("{{Infobox"));
@@ -108,11 +115,14 @@ const emptyOne = await (async () => {
   return null;
 })();
 if (emptyOne) {
+  const beforeEmpty = requests;
   const res = await data.longText({
     kind: "entity-summary",
     entity: emptyOne,
+    present: false,
   });
   assert.equal(res.kind, "empty");
+  assert.equal(requests, beforeEmpty);
   console.log("empty summary ok");
 }
 

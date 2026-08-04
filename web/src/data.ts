@@ -64,6 +64,16 @@ interface EpisodeEntry {
   op?: [number, number][];
 }
 
+/** 存在位为真时，索引或成员缺值是发布损坏，不能降级成源空值。 */
+export function requireLongTextValue(
+  kind: LongTextRef["kind"],
+  value: unknown,
+): LongTextResult {
+  if (typeof value === "string" && value)
+    return { kind: "present", text: value };
+  throw new Error(`${kind}: 存在位为真但文本侧车缺失`);
+}
+
 const FACT_ROLE_FIELDS: Record<FactKind, string[]> = {
   RELATES_TO: ["source", "target"],
   WORKED_ON: ["person", "subject"],
@@ -438,6 +448,7 @@ export class Data {
 
   /** 长文本按需读取;`empty` 表示源值为空,错误一律抛出。 */
   async longText(ref: LongTextRef): Promise<LongTextResult> {
+    if (!ref.present) return { kind: "empty" };
     const idx = await loadGzJson<{
       families: Record<string, TextFamily>;
     }>("text.idx");
@@ -449,13 +460,11 @@ export class Data {
       const ranges =
         (fam.ranges as Record<string, number[][]>)[String(kind)] ?? [];
       const row = findRange(ranges, id);
-      if (!row) return { kind: "empty" };
+      if (!row) return requireLongTextValue(ref.kind, undefined);
       const m = await this.textMember(fam, row);
       const pos = m.i.indexOf(id);
       const text = pos >= 0 ? m.t[pos] : undefined;
-      return typeof text === "string" && text
-        ? { kind: "present", text }
-        : { kind: "empty" };
+      return requireLongTextValue(ref.kind, text);
     }
     if (ref.kind === "episode-description") {
       const sid = ref.subject & 0xffffff;
@@ -472,18 +481,16 @@ export class Data {
         if (pos < 0) continue;
         const pairs = m.t[pos] as unknown as [number, string][];
         const hit = pairs.find(([epid]) => epid === ref.episode);
-        if (hit?.[1]) return { kind: "present", text: hit[1] };
+        if (hit?.[1]) return requireLongTextValue(ref.kind, hit[1]);
       }
-      return { kind: "empty" };
+      return requireLongTextValue(ref.kind, undefined);
     }
     const row = findRange(fam.ranges as number[][], ref.fact);
-    if (!row) return { kind: "empty" };
+    if (!row) return requireLongTextValue(ref.kind, undefined);
     const m = await this.textMember(fam, row);
     const pos = m.i.indexOf(ref.fact);
     const text = pos >= 0 ? m.t[pos] : undefined;
-    return typeof text === "string" && text
-      ? { kind: "present", text }
-      : { kind: "empty" };
+    return requireLongTextValue(ref.kind, text);
   }
 
   private textMember(
@@ -507,10 +514,4 @@ export class Data {
     );
   }
 
-  /** 选中后的低优先级 summary 预取(结构详情显示完成后调用)。 */
-  prefetchSummary(key: number): void {
-    void this.longText({ kind: "entity-summary", entity: key }).catch(
-      () => undefined,
-    );
-  }
 }

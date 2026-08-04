@@ -28,8 +28,8 @@ export class SiteDataContractError extends Error {
   }
 }
 
-/** 发布切换对活跃会话不是原子的:检测到数据与 manifest 不再一致
- * 时进入显式的更新状态,停止请求并要求刷新,不混用两个发布。 */
+/** manifest 可更新，但负载是不可变内容对象；旧对象消失或数据与
+ * manifest 不一致时停止请求并要求刷新，不混用两个发布。 */
 export class ReleaseChangedError extends Error {
   constructor(detail: string) {
     super(`站点数据已更新(${detail}),请刷新页面`);
@@ -60,10 +60,10 @@ function guard(): void {
   if (releaseChanged) throw new ReleaseChangedError("已停止数据请求");
 }
 
-/** manifest 之后的数据请求都以该文件自身摘要寻址。 */
+/** manifest 之后只请求完整摘要命名的不可变物理对象。 */
 function url(path: string): string {
-  const digest = manifestRef?.files[path]?.[1];
-  return digest ? `${BASE}/${path}?v=${digest.slice(0, 16)}` : `${BASE}/${path}`;
+  const meta = publishedMeta(path);
+  return `${BASE}/${meta[2]}`;
 }
 
 export type CacheFamily = "names" | "structure" | "search" | "text";
@@ -101,6 +101,26 @@ export async function loadManifest(): Promise<Manifest> {
     throw new SiteDataContractError(
       "manifest 不是 structural-site-v1/explorer-v1 契约",
     );
+  for (const [logicalName, rawMeta] of Object.entries(
+    m.files as Record<string, unknown>,
+  )) {
+    if (!Array.isArray(rawMeta) || rawMeta.length !== 3)
+      throw new SiteDataContractError(
+        `${logicalName} 缺少完整 SHA-256 内容寻址物理名`,
+      );
+    const [size, digest, physicalName] = rawMeta;
+    if (
+      !Number.isInteger(size) ||
+      size < 0 ||
+      !/^[0-9a-f]{64}$/.test(digest) ||
+      physicalName !== `${digest}-${logicalName}` ||
+      logicalName.includes("/") ||
+      logicalName.includes("\\")
+    )
+      throw new SiteDataContractError(
+        `${logicalName} 缺少完整 SHA-256 内容寻址物理名`,
+      );
+  }
   const positionBytes = m.files["positions.bin"]?.[0];
   const expectedPositionBytes = m.n_nodes * 12;
   if (positionBytes !== expectedPositionBytes)
@@ -141,10 +161,21 @@ export async function loadManifest(): Promise<Manifest> {
   return m;
 }
 
-function publishedMeta(path: string): [number, string] {
+function publishedMeta(path: string): [number, string, string] {
   const meta = manifestRef?.files[path];
   if (!meta) throw new Error(`${path}: missing manifest metadata`);
   return meta;
+}
+
+async function fetchPublished(
+  path: string,
+  init?: RequestInit,
+): Promise<Response> {
+  guard();
+  const res = await fetch(url(path), init);
+  if (res.status === 404 || res.status === 410)
+    enterReleaseChanged(`${path} 的旧内容对象已不存在`);
+  return res;
 }
 
 async function verifyWholeFile(
@@ -162,7 +193,7 @@ async function verifyWholeFile(
 /** Fetch and authenticate a complete JSON artifact from the manifest. */
 export async function loadPublishedJson<T>(path: string): Promise<T> {
   guard();
-  const res = await fetch(url(path));
+  const res = await fetchPublished(path);
   if (!res.ok) throw new Error(`${path}: ${res.status}`);
   const bytes = new Uint8Array(await res.arrayBuffer());
   await verifyWholeFile(path, bytes);
@@ -175,7 +206,7 @@ async function streamInto(
   onProgress: (bytes: number) => void,
   priority: "high" | "low" = "high",
 ): Promise<void> {
-  const res = await fetch(url(path), { priority } as RequestInit);
+  const res = await fetchPublished(path, { priority } as RequestInit);
   if (!res.ok || !res.body) throw new Error(`fetch ${path}: ${res.status}`);
   const reader = res.body.getReader();
   let offset = 0;
@@ -262,7 +293,7 @@ export function openGeometry(manifest: Manifest): GeometryStream {
 
 export async function loadEdges(): Promise<Uint32Array> {
   guard();
-  const res = await fetch(url("edges.bin"), {
+  const res = await fetchPublished("edges.bin", {
     priority: "low",
   } as RequestInit);
   if (!res.ok) throw new Error(`edges.bin: ${res.status}`);
@@ -284,7 +315,7 @@ async function rangeFetch(
   const [total] = publishedMeta(path);
   if (off < 0 || len <= 0 || off + len > total)
     throw new RangeError(`${path}: slice [${off}, ${off + len}) is invalid`);
-  const res = await fetch(url(path), {
+  const res = await fetchPublished(path, {
     headers: { Range: `bytes=${off}-${off + len - 1}` },
   });
   if (res.status === 206) {
@@ -376,7 +407,7 @@ const pinned = new AsyncMemo<string, unknown>();
 export function loadGzJson<T>(path: string): Promise<T> {
   return pinned.get(path, async () => {
     guard();
-    const res = await fetch(url(path));
+    const res = await fetchPublished(path);
     if (!res.ok) throw new Error(`${path}: ${res.status}`);
     const bytes = new Uint8Array(await res.arrayBuffer());
     await verifyWholeFile(path, bytes);
@@ -391,7 +422,7 @@ const idxCache = new AsyncMemo<string, Uint32Array>();
 function loadIdx(path: string): Promise<Uint32Array> {
   return idxCache.get(path, async () => {
     guard();
-    const res = await fetch(url(path));
+    const res = await fetchPublished(path);
     if (!res.ok) throw new Error(`${path}: ${res.status}`);
     const bytes = new Uint8Array(await res.arrayBuffer());
     await verifyWholeFile(path, bytes);
@@ -409,7 +440,7 @@ let rankPromise: Promise<void> | null = null;
 export function ensureRankIndex(): Promise<void> {
   rankPromise ??= (async () => {
     guard();
-    const res = await fetch(url("rank-by-key.bin"), {
+    const res = await fetchPublished("rank-by-key.bin", {
       priority: "low",
     } as RequestInit);
     if (!res.ok) throw new Error(`rank-by-key.bin: ${res.status}`);

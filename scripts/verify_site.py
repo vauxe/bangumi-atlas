@@ -28,6 +28,8 @@ SITE = ROOT / "site" / "data"
 SITE_ROOT = ROOT / "site"
 
 failures: list[str] = []
+artifact_files: dict[str, list[Any]] = {}
+member_spans: dict[str, set[tuple[int, int]]] = defaultdict(set)
 
 
 def log(msg: str) -> None:
@@ -54,7 +56,24 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_member(path: Path, off: int, length: int) -> Any:
+def site_file(logical_name: str) -> Path:
+    meta = artifact_files.get(logical_name)
+    if meta is None or len(meta) != 3:
+        raise ValueError(
+            f"manifest missing physical object for {logical_name}"
+        )
+    return SITE / meta[2]
+
+
+def load_member(logical_name: str, off: int, length: int) -> Any:
+    path = site_file(logical_name)
+    if length > sr.MEMBER_CAP:
+        check(
+            f"{logical_name} 成员硬上限",
+            False,
+            f"offset {off:,}, length {length:,}",
+        )
+    member_spans[logical_name].add((off, length))
     with open(path, "rb") as f:
         f.seek(off)
         raw = f.read(length)
@@ -64,7 +83,7 @@ def load_member(path: Path, off: int, length: int) -> Any:
 
 
 def load_idx(name: str) -> Any:
-    return orjson.loads(gzip.decompress((SITE / name).read_bytes()))
+    return orjson.loads(gzip.decompress(site_file(name).read_bytes()))
 
 
 def quantile(sizes: list[int], q: float) -> int:
@@ -75,8 +94,10 @@ def quantile(sizes: list[int], q: float) -> int:
 
 
 def main() -> None:  # noqa: PLR0915
+    global artifact_files
     t0 = time.time()
     manifest = orjson.loads((SITE / "manifest.json").read_bytes())
+    artifact_files = manifest["files"]
 
     # ---- manifest 自身:版本、schema、文件摘要 ----
     log("[1] manifest 与文件摘要")
@@ -90,15 +111,22 @@ def main() -> None:  # noqa: PLR0915
     reconcile("profile", sr.PROFILE, manifest["profile"])
     reconcile("schema_digest", sr.schema_digest(), manifest["schema_digest"])
     reconcile("field_policy", sr.FIELD_POLICY, manifest["field_policy"])
-    listed = set(manifest["files"])
+    listed = {meta[2] for meta in artifact_files.values()}
     on_disk = {
         p.name for p in SITE.iterdir()
         if p.is_file() and p.name != "manifest.json"
     }
     reconcile("manifest.files 覆盖全部数据文件", on_disk, listed)
     total = 0
-    for fname, (size, digest) in sorted(manifest["files"].items()):
-        p = SITE / fname
+    for fname, (size, digest, physical_name) in sorted(
+        artifact_files.items()
+    ):
+        reconcile(
+            f"{fname} 内容寻址物理名",
+            sr.published_object_name(fname, digest),
+            physical_name,
+        )
+        p = SITE / physical_name
         ok = p.stat().st_size == size and sha256_of(p) == digest
         if not ok:
             check(f"{fname} 字节数与 SHA-256", False)
@@ -117,11 +145,11 @@ def main() -> None:  # noqa: PLR0915
     # ---- 几何与 rank-by-key ----
     log("[2] 几何与反向索引")
     n = manifest["n_nodes"]
-    key_r = np.fromfile(SITE / "key.bin", dtype="<u4")
+    key_r = np.fromfile(site_file("key.bin"), dtype="<u4")
     reconcile("key.bin 记录数", n, len(key_r))
     check("key.bin 无重复键", len(np.unique(key_r)) == n)
     seg_meta = manifest["rank_index"]["segments"]
-    raw = np.frombuffer((SITE / "rank-by-key.bin").read_bytes(), np.uint8)
+    raw = np.frombuffer(site_file("rank-by-key.bin").read_bytes(), np.uint8)
     decoded: dict[int, np.ndarray] = {}
     for kind in sr.KINDS:
         seg = seg_meta[str(kind)]
@@ -151,7 +179,7 @@ def main() -> None:  # noqa: PLR0915
     for fam, members in vocab_dir.items():
         out: list[str] = []
         for off, length in members:
-            out.extend(load_member(SITE / "vocab.pack", off, length))
+            out.extend(load_member("vocab.pack", off, length))
         vocab[fam] = out
         reconcile(
             f"vocab.{fam} 摘要",
@@ -168,7 +196,7 @@ def main() -> None:  # noqa: PLR0915
 
     # ---- 实体结构 + 名称:与 parquet 的重复敏感指纹对账 ----
     log("[4] 实体结构与名称")
-    name_idx = np.fromfile(SITE / "names.idx", dtype="<u4")
+    name_idx = np.fromfile(site_file("names.idx"), dtype="<u4")
     block = manifest["name_block_size"]
     names_by_rank: list[list[Any]] = []
     name_sizes: list[int] = []
@@ -176,7 +204,7 @@ def main() -> None:  # noqa: PLR0915
         off, end = int(name_idx[bi]), int(name_idx[bi + 1])
         name_sizes.append(end - off)
         names_by_rank.extend(
-            load_member(SITE / "names.pack", off, end - off)
+            load_member("names.pack", off, end - off)
         )
     reconcile("names 行数", n, len(names_by_rank))
     check(
@@ -200,7 +228,7 @@ def main() -> None:  # noqa: PLR0915
         for row in ranges:
             start, end, off, length = row
             ent_sizes.append(length)
-            member = load_member(SITE / "entities.pack", off, length)
+            member = load_member("entities.pack", off, length)
             for sid, tup in zip(member["i"], member["r"], strict=True):
                 if sid < start or sid > end or sid in seen_ids:
                     check(f"entities kind={kind} 身份唯一且在范围内",
@@ -285,7 +313,7 @@ def main() -> None:  # noqa: PLR0915
         for kind_s, ranges in fam["ranges"].items():
             for start, end, fidx, off, length in ranges:
                 sizes.append(length)
-                m = load_member(SITE / fam["files"][fidx], off, length)
+                m = load_member(fam["files"][fidx], off, length)
                 for sid, text in zip(m["i"], m["t"], strict=True):
                     if (sid < start or sid > end
                             or sid in seen_by_kind[kind_s] or not text):
@@ -343,7 +371,7 @@ def main() -> None:  # noqa: PLR0915
     for row in fam["ranges"]:
         start, end, fidx, off, length = row[:5]
         sizes.append(length)
-        m = load_member(SITE / fam["files"][fidx], off, length)
+        m = load_member(fam["files"][fidx], off, length)
         for sid, pairs in zip(m["i"], m["t"], strict=True):
             for epid, text in pairs:
                 if (sid, epid) in desc_site or not text:
@@ -388,11 +416,11 @@ def main() -> None:  # noqa: PLR0915
     fam = text_idx["fact-summary"]
     fact_summary: dict[int, str] = {}
     for _start, _end, fidx, off, length in fam["ranges"]:
-        m = load_member(SITE / fam["files"][fidx], off, length)
+        m = load_member(fam["files"][fidx], off, length)
         for ref, text in zip(m["i"], m["t"], strict=True):
             fact_summary[ref] = text
     check("fact-summary 目录与 pack 存在",
-          all((SITE / f).exists() for f in fam["files"]))
+          all(site_file(f).exists() for f in fam["files"]))
     vo = pq.read_table(
         PARQUET / "voiced.parquet",
         columns=["summary"],
@@ -406,7 +434,7 @@ def main() -> None:  # noqa: PLR0915
     # ---- 分集结构 ----
     log("[6] 分集结构")
     eps_idx = load_idx("episodes.idx")
-    pages_path = SITE / "pages.pack"
+    pages_path = "pages.pack"
     site_ep_fp = RowFingerprint()
     ep_rows_seen = 0
     orphan_groups = 0
@@ -415,7 +443,7 @@ def main() -> None:  # noqa: PLR0915
     seen_sids: set[int] = set()
     for start, end, off, length in eps_idx["ranges"]:
         eps_sizes.append(length)
-        m = load_member(SITE / "episodes.pack", off, length)
+        m = load_member("episodes.pack", off, length)
         for sid, entry in zip(m["i"], m["g"], strict=True):
             if sid < start or sid > end or sid in seen_sids:
                 check("episodes 分组键唯一且在范围内", False, str(sid))
@@ -539,7 +567,7 @@ def main() -> None:  # noqa: PLR0915
     for bucket_i, members in enumerate(facts_idx["b"]):
         for off, length, _last_key in members:
             fact_sizes.append(length)
-            member = load_member(SITE / "facts.pack", off, length)
+            member = load_member("facts.pack", off, length)
             for key_s, entry in member.items():
                 key = int(key_s)
                 if key % sr.FACT_BUCKETS != bucket_i:
@@ -581,7 +609,7 @@ def main() -> None:  # noqa: PLR0915
 
     # ---- 搜索:自适应前缀树与全量排序一致 ----
     log("[8] 搜索索引")
-    charmap = orjson.loads((SITE / "charmap.json").read_bytes())
+    charmap = orjson.loads(site_file("charmap.json").read_bytes())
 
     def fold(text: str) -> str:
         t = text.strip().lower()
@@ -595,7 +623,7 @@ def main() -> None:  # noqa: PLR0915
             if nk:
                 entries.append((nk, text, rank))
     entries.sort(key=lambda e: e[2])
-    search_dir = orjson.loads((SITE / "search.idx.json").read_bytes())
+    search_dir = orjson.loads(site_file("search.idx.json").read_bytes())
     by_prefix: dict[str, list[list[Any]]] = defaultdict(list)
     for nk, text, rank in entries:
         for plen in range(1, len(nk) + 1):
@@ -609,25 +637,20 @@ def main() -> None:  # noqa: PLR0915
     for prefix, node in search_dir.items():
         exp_items = by_prefix.get(prefix, [])
         if "l" in node:
+            if set(node) != {"l"}:
+                ok_search = False
             off, length = node["l"]
             search_max = max(search_max, length)
-            got = load_member(SITE / "search.pack", off, length)
+            got = load_member("search.pack", off, length)
             if got != exp_items:
                 ok_search = False
         else:
+            if set(node) != {"t"}:
+                ok_search = False
             off, length = node["t"]
             search_max = max(search_max, length)
-            got = load_member(SITE / "search.pack", off, length)
+            got = load_member("search.pack", off, length)
             if got != exp_items[: sr.SEARCH_TOP]:
-                ok_search = False
-            terminals = [e for e in exp_items if e[0] == prefix]
-            paged: list[Any] = []
-            for off, length in node.get("p", []):
-                search_max = max(search_max, length)
-                paged.extend(
-                    load_member(SITE / "search.pack", off, length)
-                )
-            if paged != terminals:
                 ok_search = False
     check("搜索叶与内部 top-12 与全量排序一致", ok_search)
     check("搜索成员 <= 64,000", search_max <= sr.SEARCH_LEAF_CAP,
@@ -644,9 +667,27 @@ def main() -> None:  # noqa: PLR0915
             break
         covered.add(p)
 
+    for logical_name, (size, _digest, _physical_name) in (
+        artifact_files.items()
+    ):
+        if not logical_name.endswith(".pack"):
+            continue
+        cursor = 0
+        contiguous = True
+        for off, length in sorted(member_spans.get(logical_name, set())):
+            if off != cursor or length <= 0:
+                contiguous = False
+                break
+            cursor += length
+        check(
+            f"{logical_name} 成员边界完整覆盖 pack",
+            contiguous and cursor == size,
+            f"covered {cursor:,} / {size:,}",
+        )
+
     # ---- 显示映射 ----
     log("[9] 显示映射")
-    mappings = orjson.loads((SITE / "mappings.json").read_bytes())
+    mappings = orjson.loads(site_file("mappings.json").read_bytes())
     reconcile(
         "mappings.json 摘要",
         manifest["mapping_digests"]["mappings.json"],
