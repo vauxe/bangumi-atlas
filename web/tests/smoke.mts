@@ -1,0 +1,129 @@
+/** 真实数据端到端冒烟:对本地 Range 服务器上的完整 SiteRelease
+ * 走一遍 Data 契约(手动脚本,不进 CI;用法见 npm run smoke)。 */
+
+import assert from "node:assert/strict";
+
+import { Data } from "../src/data";
+import {
+  ensureRankIndex,
+  loadManifest,
+  openNames,
+} from "../src/loader";
+
+const BASE = process.env["SMOKE_BASE"] ?? "http://127.0.0.1:8391";
+const realFetch = globalThis.fetch;
+let requests = 0;
+globalThis.fetch = (async (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => {
+  requests++;
+  return realFetch(new URL(String(input), `${BASE}/`), init);
+}) as typeof fetch;
+
+const manifest = await loadManifest();
+console.log(
+  `manifest ok: ${manifest.profile}, ${manifest.n_nodes.toLocaleString()} nodes,`,
+  `${(manifest.total_bytes / 1e6).toFixed(0)}MB data`,
+);
+const names = openNames(manifest);
+const data = new Data(manifest, names);
+await ensureRankIndex();
+
+// 取一个高热度作品(rank 0 未必是 subject,扫描前几名)
+const keyBytes = await (await realFetch(`${BASE}/data/key.bin`)).arrayBuffer();
+const keys = new Uint32Array(keyBytes);
+const subjectKey = [...keys.slice(0, 50)].find((k) => k >>> 24 === 1);
+assert.ok(subjectKey);
+
+const rank = data.rankOf(subjectKey);
+assert.ok(rank !== null && rank < 50, "rankOf 与 key.bin 一致");
+
+const entity = await data.entity(subjectKey);
+assert.ok(entity && entity.kind === "subject");
+console.log(
+  `entity ok: ${entity.nameCn || entity.name} (score ${entity.score},`,
+  `${entity.tags.length} tags, summary=${entity.hasSummary},`,
+  `infobox=${entity.hasInfobox})`,
+);
+assert.ok(entity.name.length > 0);
+assert.ok(entity.metaTags.every((t) => typeof t === "string" && t !== ""));
+
+const facts = await data.factsFor(subjectKey);
+assert.ok(facts.total > 0 && facts.items.length > 0);
+console.log(
+  `facts ok: inline ${facts.items.length} / total ${facts.total},`,
+  `next=${facts.next}`,
+);
+if (facts.next) {
+  const page2 = await data.factsFor(subjectKey, facts.next);
+  assert.ok(page2.items.length > 0);
+  console.log(`facts page-2 ok: ${page2.items.length} items`);
+}
+
+const episodes = await data.episodesFor(subjectKey);
+console.log(`episodes ok: ${episodes.items.length} / ${episodes.total}`);
+for (const ep of episodes.items.slice(0, 200)) {
+  assert.equal(ep.subject, subjectKey);
+}
+const withDesc = episodes.items.find((e) => e.hasDescription);
+if (withDesc) {
+  const desc = await data.longText({
+    kind: "episode-description",
+    subject: subjectKey,
+    episode: withDesc.id,
+  });
+  assert.equal(desc.kind, "present");
+  console.log(`episode description ok (${withDesc.id})`);
+}
+
+if (entity.hasSummary) {
+  const summary = await data.longText({
+    kind: "entity-summary",
+    entity: subjectKey,
+  });
+  assert.equal(summary.kind, "present");
+  console.log(
+    `summary ok: ${(summary as { text: string }).text.slice(0, 40)}…`,
+  );
+}
+if (entity.hasInfobox) {
+  const infobox = await data.longText({
+    kind: "entity-infobox",
+    entity: subjectKey,
+  });
+  assert.equal(infobox.kind, "present");
+  assert.ok((infobox as { text: string }).text.includes("{{Infobox"));
+  console.log("infobox ok (raw wiki source preserved)");
+}
+
+// 存在位为假的实体:empty 不触发文本请求以外的失败
+const emptyOne = await (async () => {
+  for (let r = 0; r < 2000; r++) {
+    const k = keys[r] ?? 0;
+    if (k >>> 24 !== 1) continue;
+    const e = await data.entity(k);
+    if (e && !e.hasSummary) return k;
+  }
+  return null;
+})();
+if (emptyOne) {
+  const res = await data.longText({
+    kind: "entity-summary",
+    entity: emptyOne,
+  });
+  assert.equal(res.kind, "empty");
+  console.log("empty summary ok");
+}
+
+const mappings = await data.mappings();
+assert.ok(Object.keys(mappings.fact_labels["RELATES_TO"] ?? {}).length > 0);
+console.log("mappings ok");
+
+// 成员缓存命中不得产生网络请求
+const before = requests;
+await data.entity(subjectKey);
+await data.factsFor(subjectKey);
+assert.equal(requests, before, "缓存命中零请求");
+console.log(`cache ok (total ${requests} requests)`);
+console.log("SMOKE PASS");

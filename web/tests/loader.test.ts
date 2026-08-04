@@ -5,15 +5,18 @@ import { gzipSync } from "node:zlib";
 
 import {
   loadManifest,
+  member,
   openNames,
   openGeometry,
   pointByRank,
-  searchShard,
+  rankOfKey,
+  ensureRankIndex,
+  releaseWasReplaced,
+  ReleaseChangedError,
 } from "../src/loader";
-import type { Manifest, SearchEntry } from "../src/types";
+import type { Manifest, NameRow } from "../src/types";
 
 const originalFetch = globalThis.fetch;
-const encoder = new TextEncoder();
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -33,29 +36,64 @@ function testManifest(
     ...files,
   };
   return {
-    version: "test-content-version",
-    dump_version: "test-dump",
+    version: "0".repeat(64),
+    schema: "structural-site-v1",
+    profile: "explorer-v1",
+    source: { dump_version: "test-dump", dump_sha256: "0".repeat(64) },
+    schema_digest: "0".repeat(64),
+    field_policy: {},
+    mapping_digests: {},
+    vocab_digests: {},
+    owned_collections: {},
+    counts: {
+      entities: { subject: 1, person: 0, character: 0 },
+      facts: 0,
+      fact_source_rows: 0,
+      incidence: 0,
+      episodes: 0,
+      episode_orphan_groups: 0,
+      episode_orphan_rows: 0,
+      unresolved_voice_subject_context: 0,
+      text: {},
+    },
+    text_bytes: {},
+    text_layout: {},
+    limits: {
+      member_cap: 256_000,
+      pack_cap: 80_000_000,
+      fact_buckets: 8192,
+      fact_inline: 200,
+      episode_inline: 200,
+      page_size: 500,
+      entity_block_ids: 256,
+      episode_block_subjects: 128,
+      search_leaf_cap: 64_000,
+      search_top: 12,
+      cache_budget: {
+        total: 64_000_000,
+        names: 12_000_000,
+        structure: 24_000_000,
+        search: 8_000_000,
+        text: 20_000_000,
+      },
+    },
+    rank_index: {
+      encoding: "u24le",
+      sentinel: 0xffffff,
+      segments: { "1": { offset: 0, count: nNodes } },
+    },
     n_nodes: nNodes,
     n_edges_skeleton: 0,
     name_block_size: 2,
-    buckets: 1,
-    det_packs: 1,
-    adj_inline: 1,
-    eps_inline: 1,
     bbox: [
       [0, 0, 0],
       [1, 1, 1],
     ],
     year_range: [1900, 2035],
     tags: [],
-    labels: [],
-    hot_shards: [],
-    layout: {
-      dimensions: 3,
-      geometry: "topology-3d",
-      stub: false,
-    },
+    layout: { dimensions: 3, geometry: "topology-3d", stub: false },
     files: completeFiles,
+    core_bytes: 0,
     total_bytes: Object.values(completeFiles).reduce(
       (sum, [size]) => sum + size,
       0,
@@ -80,6 +118,17 @@ async function installFetch(
   await loadManifest();
 }
 
+test("rejects manifests from the obsolete det/adj generation", async () => {
+  const legacy = {
+    ...testManifest({}),
+    schema: undefined,
+    profile: undefined,
+  };
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(legacy))) as typeof fetch;
+  await assert.rejects(loadManifest(), /structural-site-v1/);
+});
+
 test("rejects obsolete geometry manifests before streaming", async () => {
   const obsoletePositions = testManifest({
     "positions.bin": [8, "0".repeat(64)],
@@ -94,22 +143,7 @@ test("rejects obsolete geometry manifests before streaming", async () => {
   };
   globalThis.fetch = (async () =>
     new Response(JSON.stringify(obsoleteLayout))) as typeof fetch;
-  await assert.rejects(loadManifest(), /布局应为 topology-3d\/3D.*重建站点数据/);
-});
-
-test("rejects manifests with the obsolete whole name table", async () => {
-  const current = testManifest({});
-  const obsolete = {
-    ...current,
-    name_block_size: undefined,
-    files: Object.fromEntries(
-      Object.entries(current.files).filter(([path]) => !path.startsWith("names.")),
-    ),
-  };
-  globalThis.fetch = (async () =>
-    new Response(JSON.stringify(obsolete))) as typeof fetch;
-
-  await assert.rejects(loadManifest(), /名字表应为按 rank 分块.*重建站点数据/);
+  await assert.rejects(loadManifest(), /布局应为 topology-3d.*重建站点数据/);
 });
 
 test("loads and caches only the requested name blocks", async () => {
@@ -139,7 +173,9 @@ test("loads and caches only the requested name blocks", async () => {
     const end = Number(match[2]);
     return new Response(pack.slice(start, end + 1), {
       status: 206,
-      headers: { "Content-Range": `bytes ${start}-${end}/${pack.byteLength}` },
+      headers: {
+        "Content-Range": `bytes ${start}-${end}/${pack.byteLength}`,
+      },
     });
   });
 
@@ -147,6 +183,7 @@ test("loads and caches only the requested name blocks", async () => {
   assert.equal(names.get(2), null);
   await names.load([2]);
   assert.equal(names.get(2), "丙");
+  assert.deepEqual(names.row(2), ["C", "丙"]);
   assert.equal(names.get(0), null);
   await names.load([2]);
   await names.load([0, 1]);
@@ -170,15 +207,43 @@ test("rejects a 206 response for the wrong byte range", async () => {
     if (path.endsWith("positions.bin"))
       return new Response(new Uint8Array(8), {
         status: 206,
-        headers: { "Content-Range": "bytes 0-7/16" },
+        headers: { "Content-Range": "bytes 0-7/24" },
       });
     return new Response(new Uint8Array(4), {
       status: 206,
-      headers: { "Content-Range": "bytes 0-3/8" },
+      headers: { "Content-Range": "bytes 4-7/8" },
     });
   });
 
   await assert.rejects(pointByRank(manifest, 1), /Content-Range/);
+});
+
+test("treats a changed Content-Range total as a replaced release", async () => {
+  const manifest = testManifest(
+    {
+      "positions.bin": [24, "0".repeat(64)],
+      "key.bin": [8, "0".repeat(64)],
+    },
+    2,
+  );
+  await installFetch(manifest, async () => {
+    return new Response(new Uint8Array(12), {
+      status: 206,
+      headers: { "Content-Range": "bytes 12-23/999" },
+    });
+  });
+
+  assert.equal(releaseWasReplaced(), false);
+  await assert.rejects(
+    pointByRank(manifest, 1),
+    (error: unknown) => error instanceof ReleaseChangedError,
+  );
+  assert.equal(releaseWasReplaced(), true);
+  // 判定发布已被替换后停止该发布的后续数据请求
+  await assert.rejects(
+    pointByRank(manifest, 0),
+    (error: unknown) => error instanceof ReleaseChangedError,
+  );
 });
 
 test("reads an exact xyz float32 position by rank", async () => {
@@ -233,36 +298,61 @@ test("streams complete xyz geometry without planar expansion", async () => {
   assert.deepEqual(Array.from(stream.geo.positions), [1, 2, 3, 4, 5, 6]);
 });
 
-test("shares one whole-pack fallback across concurrent slices", async () => {
-  const first: SearchEntry[] = [["a", "A", 1]];
-  const second: SearchEntry[] = [["b", "B", 2]];
+test("decodes the u24 rank-by-key reverse index", async () => {
+  // kind1 段:id0 = 哨兵,id1 = rank 5
+  const bytes = new Uint8Array([0xff, 0xff, 0xff, 5, 0, 0]);
+  const manifest = {
+    ...testManifest({
+      "rank-by-key.bin": [bytes.byteLength, hash(bytes)] as [
+        number,
+        string,
+      ],
+    }),
+    rank_index: {
+      encoding: "u24le",
+      sentinel: 0xffffff,
+      segments: { "1": { offset: 0, count: 2 } },
+    },
+  };
+  await installFetch(manifest, async () =>
+    new Response(bytes.buffer as ArrayBuffer),
+  );
+  await ensureRankIndex();
+
+  assert.equal(rankOfKey((1 << 24) | 0), null);
+  assert.equal(rankOfKey((1 << 24) | 1), 5);
+  assert.equal(rankOfKey((2 << 24) | 1), null);
+});
+
+test("shares one whole-pack fallback across concurrent members", async () => {
+  const first: NameRow[] = [["a", "A"]];
+  const second: NameRow[] = [["b", "B"]];
   const firstGzip = gzipSync(JSON.stringify(first));
   const secondGzip = gzipSync(JSON.stringify(second));
   const pack = new Uint8Array(Buffer.concat([firstGzip, secondGzip]));
-  const index = encoder.encode(
-    JSON.stringify({
-      "61": [0, firstGzip.byteLength],
-      "62": [firstGzip.byteLength, secondGzip.byteLength],
-    }),
-  );
   const manifest = testManifest({
-    "search.idx.json": [index.byteLength, hash(index)],
-    "search.pack": [pack.byteLength, hash(pack)],
+    "facts.pack": [pack.byteLength, hash(pack)],
   });
   let packRequests = 0;
-  await installFetch(manifest, async (path) => {
-    if (path.endsWith("search.idx.json"))
-      return new Response(index, { status: 200 });
+  await installFetch(manifest, async () => {
     packRequests++;
     return new Response(pack, { status: 200 });
   });
 
   const [loadedFirst, loadedSecond] = await Promise.all([
-    searchShard("a"),
-    searchShard("b"),
+    member("structure", "facts.pack", 0, firstGzip.byteLength),
+    member(
+      "structure",
+      "facts.pack",
+      firstGzip.byteLength,
+      secondGzip.byteLength,
+    ),
   ]);
 
   assert.deepEqual(loadedFirst, first);
   assert.deepEqual(loadedSecond, second);
+  assert.equal(packRequests, 1);
+  // 成员缓存命中不得产生网络请求
+  await member("structure", "facts.pack", 0, firstGzip.byteLength);
   assert.equal(packRequests, 1);
 });

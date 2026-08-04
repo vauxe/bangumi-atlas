@@ -60,19 +60,8 @@ jobs:
       - name: Bake site data (row-level reconciliation inside)
         run: uv run python scripts/bake_site.py
 
-      - name: Enforce size / file-count budgets
-        run: |
-          uv run python - <<'EOF'
-          import json, sys
-          m = json.load(open("site/data/manifest.json"))
-          print(f"site: {m['total_bytes'] / 1e6:,.0f} MB, {m['n_files']:,} files")
-          if m["total_bytes"] > 1_000_000_000:
-              sys.exit("site exceeds GH Pages 1GB hard limit -> migrate to R2")
-          if m["total_bytes"] > 900_000_000:
-              print("::warning::site size within 10% of the 1GB Pages limit")
-          if m["n_files"] > 20_000:
-              print("::warning::file count exceeds CF Pages 20k limit; migration must target R2")
-          EOF
+      - name: Verify SiteRelease against parquet (independent)
+        run: uv run python scripts/verify_site.py
 
       - name: Build client
         run: |
@@ -81,6 +70,23 @@ jobs:
           npm run test
           npm run check
           npm run build
+
+      # GitHub 门禁统计 staging site/ 下包括 manifest、客户端和全部
+      # 数据在内的所有普通文件,不用 manifest total_bytes 代替。
+      - name: Enforce size / file-count budgets on the full staging site
+        run: |
+          uv run python - <<'EOF'
+          import pathlib, sys
+          files = [p for p in pathlib.Path("site").rglob("*") if p.is_file()]
+          total = sum(p.stat().st_size for p in files)
+          print(f"staging site/: {total:,} bytes, {len(files):,} files")
+          if total > 1_000_000_000:
+              sys.exit("site exceeds GH Pages 1GB hard limit -> migrate to R2")
+          if total > 900_000_000:
+              print("::warning::site size within 10% of the 1GB Pages limit")
+          if len(files) > 20_000:
+              print("::warning::file count exceeds CF Pages 20k limit; migration must target R2")
+          EOF
 
       - uses: actions/upload-pages-artifact@v5
         with:

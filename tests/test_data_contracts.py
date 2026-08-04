@@ -6,47 +6,114 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts import site_release as sr
 from scripts.content_fingerprint import RowFingerprint
 from scripts.site_contracts import (
-    artifact_version,
-    gzip_json,
     read_dump_version,
-    reverse_navigation_label,
     validate_layout_report,
     validate_name_pack,
 )
 
 
-class SiteContractTests(unittest.TestCase):
-    def test_reverse_navigation_never_reuses_forward_label(self) -> None:
-        self.assertEqual(reverse_navigation_label("单恋"), "← 单恋")
-        self.assertEqual(reverse_navigation_label(""), "← 关联")
+class SiteReleaseContractTests(unittest.TestCase):
+    def test_entity_key_packs_kind_and_source_id(self) -> None:
+        self.assertEqual(sr.entity_key(1, 42), (1 << 24) | 42)
+        self.assertEqual(sr.entity_key(3, 0), 3 << 24)
 
-    def test_gzip_json_is_reproducible(self) -> None:
-        first = gzip_json({"b": 2, "a": 1})
-        second = gzip_json({"a": 1, "b": 2})
+    def test_entity_key_refuses_truncation(self) -> None:
+        with self.assertRaisesRegex(ValueError, "24-bit"):
+            sr.entity_key(1, 1 << 24)
+        with self.assertRaisesRegex(ValueError, "unknown entity kind"):
+            sr.entity_key(4, 1)
+
+    def test_gzip_member_is_reproducible(self) -> None:
+        first = sr.gzip_member({"b": 2, "a": 1}, 6)
+        second = sr.gzip_member({"a": 1, "b": 2}, 6)
 
         self.assertEqual(first, second)
         self.assertEqual(gzip.decompress(first), b'{"a":1,"b":2}')
 
-    def test_artifact_version_tracks_content_not_mapping_order(self) -> None:
-        first = artifact_version(
-            "dump-2026-07-28",
-            {"files": {"a.bin": {"sha256": "aaa", "size": 3}}},
+    def test_canonical_fact_keeps_text_attributes(self) -> None:
+        base = sr.canonical_fact(
+            "VOICE_CREDIT", ((2 << 24) | 1, (3 << 24) | 2, (1 << 24) | 3),
+            (0, ""),
         )
-        reordered = artifact_version(
-            "dump-2026-07-28",
-            {"files": {"a.bin": {"size": 3, "sha256": "aaa"}}},
+        with_text = sr.canonical_fact(
+            "VOICE_CREDIT", ((2 << 24) | 1, (3 << 24) | 2, (1 << 24) | 3),
+            (0, "备注"),
         )
-        changed = artifact_version(
-            "dump-2026-07-28",
-            {"files": {"a.bin": {"sha256": "bbb", "size": 3}}},
+        # 仅文本不同的两行是两个事实,不能因侧车另存而合并
+        self.assertNotEqual(base, with_text)
+
+    def test_canonical_fact_validates_shape(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown fact kind"):
+            sr.canonical_fact("EPISODE_OF", (1, 2), ())
+        with self.assertRaisesRegex(ValueError, "participant count"):
+            sr.canonical_fact("RELATES_TO", ((1 << 24) | 1,), (1, 0))
+
+    def test_incidence_roundtrip_restores_participants(self) -> None:
+        participants = ((2 << 24) | 1, (3 << 24) | 2, (1 << 24) | 3)
+        for key in participants:
+            tup = sr.incidence_tuple(7, 2, key, participants, (0, 1))
+            ref, mult, role_bits, others, *attrs = tup
+            self.assertEqual((ref, mult, attrs), (7, 2, [0, 1]))
+            self.assertEqual(
+                sr.participants_from_incidence(
+                    "VOICE_CREDIT", key, role_bits, others
+                ),
+                participants,
+            )
+
+    def test_incidence_self_loop_uses_role_bits(self) -> None:
+        key = (1 << 24) | 9
+        tup = sr.incidence_tuple(1, 1, key, (key, key), (1, 0))
+        _ref, _mult, role_bits, others, *_attrs = tup
+        self.assertEqual(role_bits, 0b11)
+        self.assertEqual(others, [])
+        self.assertEqual(
+            sr.participants_from_incidence(
+                "RELATES_TO", key, role_bits, others
+            ),
+            (key, key),
         )
 
-        self.assertEqual(first, reordered)
-        self.assertNotEqual(first, changed)
-        self.assertTrue(first.startswith("dump-2026-07-28-"))
+    def test_incidence_rejects_non_participants(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not a participant"):
+            sr.incidence_tuple(
+                1, 1, (1 << 24) | 5, ((1 << 24) | 1, (1 << 24) | 2), (1, 0)
+            )
 
+    def test_manifest_version_covers_content_not_itself(self) -> None:
+        body = {"schema": sr.SCHEMA, "files": {"a.bin": [3, "aaa"]}}
+        version = sr.manifest_version(body)
+        reordered = sr.manifest_version(
+            {"files": {"a.bin": [3, "aaa"]}, "schema": sr.SCHEMA}
+        )
+        changed = sr.manifest_version(
+            {"schema": sr.SCHEMA, "files": {"a.bin": [3, "bbb"]}}
+        )
+
+        self.assertEqual(version, reordered)
+        self.assertNotEqual(version, changed)
+        with self.assertRaisesRegex(ValueError, "must not contain itself"):
+            sr.manifest_version({"version": "x"})
+
+    def test_field_policy_declares_every_source_field(self) -> None:
+        for table, fields in sr.FIELD_POLICY.items():
+            for field, policy in fields.items():
+                self.assertIn(
+                    policy,
+                    ("core", "sidecar", "omitted"),
+                    f"{table}.{field}",
+                )
+        # explorer-v1 不省略任何字段
+        self.assertNotIn(
+            "omitted",
+            {p for f in sr.FIELD_POLICY.values() for p in f.values()},
+        )
+
+
+class SiteContractTests(unittest.TestCase):
     def test_dump_version_is_required_instead_of_using_build_time(
         self,
     ) -> None:
@@ -90,8 +157,8 @@ class SiteContractTests(unittest.TestCase):
     def test_name_pack_validation_reads_every_published_block(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            first = gzip_json([["A", None], ["B", "乙"]])
-            second = bytearray(gzip_json([["C", "丙"]]))
+            first = sr.gzip_member([["A", None], ["B", "乙"]], 6)
+            second = bytearray(sr.gzip_member([["C", "丙"]], 6))
             second[-1] ^= 0xFF
             pack = first + second
             (root / "names.pack").write_bytes(pack)
@@ -110,7 +177,7 @@ class SiteContractTests(unittest.TestCase):
     def test_name_pack_validation_reconciles_pack_with_index(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            block = gzip_json([["A", None]])
+            block = sr.gzip_member([["A", None]], 6)
             (root / "names.pack").write_bytes(block + b"trailing")
             (root / "names.idx").write_bytes(struct.pack("<II", 0, len(block)))
 
@@ -125,7 +192,7 @@ class SiteContractTests(unittest.TestCase):
     def test_name_pack_validation_reconciles_published_row_count(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            block = gzip_json([["A", None]])
+            block = sr.gzip_member([["A", None]], 6)
             (root / "names.pack").write_bytes(block)
             (root / "names.idx").write_bytes(struct.pack("<II", 0, len(block)))
 
@@ -142,7 +209,7 @@ class SiteContractTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            block = gzip_json([["A", None, "unexpected"]])
+            block = sr.gzip_member([["A", None, "unexpected"]], 6)
             (root / "names.pack").write_bytes(block)
             (root / "names.idx").write_bytes(struct.pack("<II", 0, len(block)))
 

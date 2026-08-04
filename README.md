@@ -29,7 +29,7 @@ npm --prefix web run dev
 - [数据管道与图模型](docs/DATA_ARCHITECTURE.md)：输入契约、图结构、字段转换和验证策略。
 - [探索应用架构](docs/EXPLORER_ARCHITECTURE.md)：产品边界、浏览器架构、交互和发布门禁。
 - [结构化站点数据与按需长文本设计](docs/STRUCTURAL_SITE_DATA_DESIGN.md)：分层发布完整
-  结构语义和可随机读取的长文本侧车（尚未实现）。
+  结构语义和可随机读取的长文本侧车（SiteRelease 格式契约）。
 
 ## 许可
 

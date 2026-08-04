@@ -6,7 +6,8 @@
     "build": "esbuild src/main.ts --bundle --minify --format=iife --outfile=../site/app.js",
     "dev": "esbuild src/main.ts --bundle --format=iife --outfile=../site/app.js --watch=forever & http-server ../site -p 8300 -c-1 --silent",
     "check": "tsc --noEmit",
-    "test": "node -e \"require('node:fs').rmSync('.test-dist',{recursive:true,force:true})\" && esbuild tests/*.test.ts --bundle --platform=node --format=esm --outdir=.test-dist && node --test .test-dist/*.test.js"
+    "test": "node -e \"require('node:fs').rmSync('.test-dist',{recursive:true,force:true})\" && esbuild tests/*.test.ts --bundle --platform=node --format=esm --outdir=.test-dist && node --test .test-dist/*.test.js",
+    "smoke": "esbuild tests/smoke.mts --bundle --platform=node --format=esm --outfile=.test-dist/smoke.mjs && node .test-dist/smoke.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.0.0",

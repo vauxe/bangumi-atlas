@@ -1,25 +1,28 @@
-/** 启动序列与交互接线；整体契约见 docs/EXPLORER_ARCHITECTURE.md。
- * 关键次序:场景先于几何流建立 → 首块即渲;名字按 rank 块读取;
- * 边/标签/热分片后台补齐。历史栈:离散导航 pushState,相机/过滤
- * replaceState;popstate 完整还原(每个操作可逆)。 */
+/** 启动序列与交互接线;整体契约见 docs/STRUCTURAL_SITE_DATA_DESIGN.md。
+ * 加载优先级:manifest 后立即启动几何流,首块即渲;骨架边、反向
+ * 索引与标签低优先级补齐;搜索目录在聚焦时读取;text.idx 在首次
+ * 结构画面后空闲读取;悬停名字按需、稳定 150ms 才预取结构,
+ * 不预取 Episode 或任何文本。 */
 
 import { Drawer } from "./drawer";
+import { Data } from "./data";
 import { findCommon, findPath } from "./graph";
 import { esc } from "./html";
 import { Results } from "./results";
 import {
-  loadAdj,
-  loadCharmap,
+  ensureRankIndex,
   loadEdges,
+  loadGzJson,
   loadManifest,
   openNames,
   openGeometry,
   pointByRank,
-  prefetch,
-  prefetchHotShards,
+  rankOfKey,
+  watchReleaseChange,
   SiteDataContractError,
 } from "./loader";
 import { loadLabels } from "./labels";
+import { relationNeighbors } from "./neighbors";
 import { Scene } from "./scene";
 import { Search } from "./search";
 import { notify, state, subscribe } from "./store";
@@ -28,11 +31,21 @@ import { MEDIA_NAMES, TYPE_NAMES, etype } from "./types";
 import { decode, encode } from "./url";
 import { locateStableTarget, resolveUrlSelection } from "./url-restore";
 
+const HOVER_PREFETCH_MS = 150;
+
 const $ = <T extends HTMLElement>(sel: string): T => {
   const el = document.querySelector<T>(sel);
   if (!el) throw new Error(`missing ${sel}`);
   return el;
 };
+
+/** 节省流量模式下跳过所有推测预取(不支持该能力则按需读取)。 */
+function saveData(): boolean {
+  const nav = navigator as Navigator & {
+    connection?: { saveData?: boolean };
+  };
+  return nav.connection?.saveData === true;
+}
 
 async function boot(): Promise<void> {
   const hud = $("#hud");
@@ -43,6 +56,9 @@ async function boot(): Promise<void> {
   const runTask = (task: Promise<unknown>, context: string): void => {
     void task.catch((error: unknown) => reportError(context, error));
   };
+  watchReleaseChange(() => {
+    hud.textContent = "站点数据已更新,请刷新页面继续浏览";
+  });
   hud.textContent = "加载清单…";
   const manifest = await loadManifest();
 
@@ -50,12 +66,15 @@ async function boot(): Promise<void> {
   const gstream = openGeometry(manifest);
   const geo = gstream.geo;
   const names = openNames(manifest);
+  const data = new Data(manifest, names);
 
   const drawer = new Drawer($("#drawer"), {
     geo,
     names,
     manifest,
+    data,
     reportError,
+    saveData,
     walk: (rank) => runTask(select(rank, "fly"), "节点加载"),
     arm: (kind, fromRank, fromKey) => {
       pendingLink = { kind, fromRank, fromKey };
@@ -68,7 +87,13 @@ async function boot(): Promise<void> {
 
   const tooltip = $("#tooltip");
   let hoveredNode: { rank: number; x: number; y: number } | null = null;
-  const showTooltip = (text: string, sub: string, x: number, y: number): void => {
+  let hoverTimer = 0;
+  const showTooltip = (
+    text: string,
+    sub: string,
+    x: number,
+    y: number,
+  ): void => {
     tooltip.style.display = "block";
     tooltip.style.left = `${x + 12}px`;
     tooltip.style.top = `${y + 12}px`;
@@ -99,7 +124,7 @@ async function boot(): Promise<void> {
     history.pushState(null, "", currentUrl());
   };
 
-  // ---- 场景先建，确保首块几何到达即可渲染 ----
+  // ---- 场景先建,确保首块几何到达即可渲染 ----
   const scene: Scene = new Scene($<HTMLDivElement>("#map"), geo, manifest.bbox, {
     onPick: (rank) => {
       if (rank === null) {
@@ -107,13 +132,22 @@ async function boot(): Promise<void> {
       } else runTask(select(rank, "center"), "节点加载");
     },
     onHover: (rank, x, y) => {
+      clearTimeout(hoverTimer);
       if (rank === null || rank >= geo.loaded) {
         hoveredNode = null;
         tooltip.style.display = "none";
         return;
       }
       hoveredNode = { rank, x, y };
-      prefetch(geo.key[rank] ?? 0, manifest.buckets);
+      // 名称立即按需;结构预取要求指针在同一节点稳定 150ms,
+      // 离开即取消;悬停不读取 Episode 或任何文本。
+      if (!saveData()) {
+        const key = geo.key[rank] ?? 0;
+        hoverTimer = window.setTimeout(() => {
+          if (hoveredNode?.rank === rank && key)
+            data.prefetchStructure(key);
+        }, HOVER_PREFETCH_MS);
+      }
       const name = names.get(rank);
       showTooltip(
         name ?? "…",
@@ -136,45 +170,48 @@ async function boot(): Promise<void> {
           "名字加载",
         );
     },
-    onHoverEdge: (labelId, x, y) => {
+    onHoverEdge: (label, x, y) => {
       hoveredNode = null;
-      if (labelId === null) {
+      if (label === null) {
         tooltip.style.display = "none";
         return;
       }
-      showTooltip(manifest.labels[labelId] ?? "关联", "关系", x, y);
+      showTooltip(label, "关系", x, y);
     },
     onViewChange: replaceUrl,
   });
-  // ---- 几何流：场景已就绪，首块回调即可渲染 ----
+  // ---- 几何流:场景已就绪,首块回调即可渲染 ----
   let geometryComplete = false;
   let pendingUrlHash: string | null = null;
+  let backgroundStarted = false;
+  const idle =
+    "requestIdleCallback" in window
+      ? (fn: () => void) => requestIdleCallback(fn, { timeout: 4000 })
+      : (fn: () => void) => setTimeout(fn, 1500);
   const geoDone = gstream.start((loaded) => {
     hud.textContent =
       loaded === manifest.n_nodes
         ? ""
         : `渲染 ${loaded.toLocaleString()} / ${manifest.n_nodes.toLocaleString()} 节点`;
     scene.geometryGrew();
+    // 第一批节点绘制后,低优先级补齐骨架边与反向索引
+    if (!backgroundStarted && loaded > 0) {
+      backgroundStarted = true;
+      runTask(loadEdges().then((e) => scene.setEdges(e)), "骨架边加载");
+      runTask(ensureRankIndex(), "反向索引加载");
+      idle(() => {
+        runTask(loadLabels().then((l) => scene.setLabels(l)), "标签加载");
+      });
+    }
   });
 
-  // ---- 后台补齐(不阻塞首帧;标签延迟到空闲,SDF 图集不占首屏)----
-  runTask(loadCharmap(), "搜索字表加载");
-  prefetchHotShards(manifest);
-  runTask(loadEdges().then((e) => scene.setEdges(e)), "骨架边加载");
-  const idle =
-    "requestIdleCallback" in window
-      ? (fn: () => void) => requestIdleCallback(fn, { timeout: 4000 })
-      : (fn: () => void) => setTimeout(fn, 1500);
-  idle(() => {
-    runTask(loadLabels().then((l) => scene.setLabels(l)), "标签加载");
-  });
   runTask(
     geoDone.then(() => {
       geometryComplete = true;
       hud.textContent = "";
       scene.geometryGrew();
-      // 稳定 key 在流式未覆盖时挂起整个 URL。全量就绪后从原 URL
-      // 重新解析两端与相机，避免把 common/path 悄悄降级成普通选中。
+      // 稳定 key 未解析时挂起整个 URL。全量就绪后从原 URL
+      // 重新解析两端与相机,避免把 common/path 悄悄降级成普通选中。
       const hash = pendingUrlHash;
       pendingUrlHash = null;
       if (hash !== null && location.hash === hash)
@@ -183,22 +220,35 @@ async function boot(): Promise<void> {
     "几何数据加载",
   );
 
-  const rankOfKey = (key: number): number | null => {
+  const sparseRankByKey = new Map<number, number>();
+  const rankOfKeyLocal = (key: number): number | null => {
     const sparse = sparseRankByKey.get(key);
     if (sparse !== undefined) return sparse;
+    const indexed = rankOfKey(key);
+    if (indexed !== null) return indexed;
     for (let i = 0; i < geo.loaded; i++)
       if (geo.key[i] === key) return i;
     return null;
   };
-  const sparseRankByKey = new Map<number, number>();
   let pendingLink: LinkState | null = null;
   let navigationEpoch = 0;
+  let firstStructuralPaint = false;
+
+  /** 首次结构画面完成后空闲读取 text.idx,消除冷文本展开的
+   * “先取索引、再取成员”串行瀑布(节省流量模式跳过)。 */
+  const warmTextIndex = (): void => {
+    if (firstStructuralPaint || saveData()) return;
+    firstStructuralPaint = true;
+    idle(() => {
+      runTask(loadGzJson("text.idx"), "文本索引预热");
+    });
+  };
 
   const locateUrlTarget = (
     key: number | null,
     rankHint: number | null,
   ): Promise<{ key: number; rank: number } | null> =>
-    locateStableTarget(key, rankHint, rankOfKey, async (rank) => {
+    locateStableTarget(key, rankHint, rankOfKeyLocal, async (rank) => {
       const point = await pointByRank(manifest, rank);
       if (point) {
         geo.sparse.set(rank, point.pos);
@@ -233,7 +283,7 @@ async function boot(): Promise<void> {
         link.fromRank,
         bRank,
         geo,
-        manifest.buckets,
+        data,
       );
       if (epoch !== navigationEpoch) return;
       state.selection = bRank;
@@ -244,15 +294,10 @@ async function boot(): Promise<void> {
       state.pathLabels = [];
       const top = items.slice(0, 49);
       state.neighbors = [link.fromRank, ...top.map((i) => i.rank)];
-      state.neighborLabels = [-1, ...top.map((i) => i.lb)];
+      state.neighborLabels = ["", ...top.map((i) => i.lb)];
       await drawer.showCompare(link.fromRank, bRank, items, direct);
     } else {
-      const res = await findPath(
-        link.fromRank,
-        bRank,
-        geo,
-        manifest.buckets,
-      );
+      const res = await findPath(link.fromRank, bRank, geo, data);
       if (epoch !== navigationEpoch) return;
       if (!res) {
         hud.textContent = "6 跳内未找到路径(受热度宽度上限约束)";
@@ -266,18 +311,18 @@ async function boot(): Promise<void> {
       state.path = res.ranks;
       state.pathLabels = res.labels;
       state.neighbors = res.ranks.filter((r) => r !== bRank);
-      state.neighborLabels = state.neighbors.map(() => -1);
+      state.neighborLabels = state.neighbors.map(() => "");
       await drawer.showPath(res);
       if (cam === "fly") scene.flyTo(bRank);
     }
     if (epoch !== navigationEpoch) return;
     notify();
+    warmTextIndex();
     if (push) pushUrl();
     hud.textContent = "";
   }
 
-  /** 相机语义:fly = 飞行聚焦(搜索/骰子/行走);center = 枢轴
-   * 滑移到节点、保持缩放(单击选中——此后滚轮推向它、右键绕它转);
+  /** 相机语义:fly = 飞行聚焦;center = 枢轴滑移保持缩放;
    * none = 不动相机(URL 还原,尊重链接机位)。 */
   async function select(
     rank: number,
@@ -288,14 +333,13 @@ async function boot(): Promise<void> {
     const epoch = ++navigationEpoch;
     const link = pendingLink;
     pendingLink = null;
-    // 普通选中即退出对比/路径视图
     state.compareWith = null;
     state.path = [];
     state.pathLabels = [];
     state.link = null;
     state.selection = rank;
     state.selectionKey = keyHint;
-    // 落点未流式覆盖时，一次 Range 点查同时解析坐标与 key。
+    // 落点未流式覆盖时,一次 Range 点查同时解析坐标与 key。
     let key = keyHint ?? geo.key[rank] ?? 0;
     if (rank >= geo.loaded && (!geo.sparse.has(rank) || !key)) {
       const pt = await pointByRank(manifest, rank);
@@ -313,23 +357,27 @@ async function boot(): Promise<void> {
     }
     state.selectionKey = key;
     if (link && link.fromRank !== rank) {
-      await handleLink(
-        link,
-        rank,
-        push,
-        cam === "none" ? "none" : "fly",
-      );
+      await handleLink(link, rank, push, cam === "none" ? "none" : "fly");
       return;
     }
     if (cam === "fly") scene.flyTo(rank);
     else if (cam === "center")
       scene.flyTo(rank, scene.getViewState().zoom);
-    const adj = await loadAdj(key, manifest.buckets);
+    const [factsPage, mappings] = await Promise.all([
+      data.factsFor(key),
+      data.mappings(),
+    ]);
     if (epoch !== navigationEpoch || state.selection !== rank) return;
-    const nb = drawer.neighborsOf(adj, 50);
+    const nb = relationNeighbors(
+      factsPage.items,
+      key,
+      mappings,
+      (k) => rankOfKeyLocal(k),
+      50,
+    );
     state.neighbors = nb.ranks;
     state.neighborLabels = nb.labels;
-    runTask(drawer.show(rank, key), "详情加载");
+    runTask(drawer.show(rank, key).then(warmTextIndex), "详情加载");
     notify();
     if (push) pushUrl();
   }
@@ -379,6 +427,9 @@ async function boot(): Promise<void> {
         pendingUrlHash = null;
         if (state.selection !== null || initial) deselect(false);
       } else {
+        // 稳定键优先经 rank-by-key 反向索引解析
+        if (st.key !== null)
+          await ensureRankIndex().catch(() => undefined);
         const resolved = await resolveUrlSelection(st, locateUrlTarget);
         if (epoch !== navigationEpoch) return;
         if (resolved) {
@@ -408,7 +459,6 @@ async function boot(): Promise<void> {
       syncControls(); // 工具栏随 store 还原(操作可逆性)
     } finally {
       historyApplications--;
-      // 最后完成的恢复立即按实际相机状态规范化 URL。
       if (historyApplications === 0)
         history.replaceState(null, "", currentUrl());
     }
@@ -447,7 +497,6 @@ async function boot(): Promise<void> {
     if (ev.key === "Escape" && state.selection !== null) deselect(true);
   });
 
-  // ---- 媒介 chips:即时调暗 ----
   // ---- 标签过滤 chips(AND 语义)+ 评分下限滑块 ----
   const tagBox = $("#tag-chips");
   tagBox.innerHTML = manifest.tags
@@ -544,18 +593,16 @@ async function boot(): Promise<void> {
   /** 工具栏 UI ← store:深链与 popstate 后控件不脱钩。 */
   function syncControls(): void {
     const f = state.filters;
-    for (const b of mediaBox.querySelectorAll("[data-media]"))
-      {
-        const active = f.media.has(Number(b.getAttribute("data-media")));
-        b.classList.toggle("on", active);
-        b.setAttribute("aria-pressed", String(active));
-      }
-    for (const b of tagBox.querySelectorAll("[data-tag]"))
-      {
-        const active = f.tags.has(Number(b.getAttribute("data-tag")));
-        b.classList.toggle("on", active);
-        b.setAttribute("aria-pressed", String(active));
-      }
+    for (const b of mediaBox.querySelectorAll("[data-media]")) {
+      const active = f.media.has(Number(b.getAttribute("data-media")));
+      b.classList.toggle("on", active);
+      b.setAttribute("aria-pressed", String(active));
+    }
+    for (const b of tagBox.querySelectorAll("[data-tag]")) {
+      const active = f.tags.has(Number(b.getAttribute("data-tag")));
+      b.classList.toggle("on", active);
+      b.setAttribute("aria-pressed", String(active));
+    }
     sMin.value = String(f.scoreMin);
     scoreLabel.textContent =
       f.scoreMin > 0 ? `≥ ${(f.scoreMin / 10).toFixed(1)}` : "不限";

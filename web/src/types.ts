@@ -1,58 +1,96 @@
-/** 浏览器数据契约；与烘焙侧 Python 手写镜像，变更须同步。 */
+/** 浏览器数据契约;与烘焙侧 scripts/site_release.py 手写镜像,
+ * 变更须同步(participants/attrs 顺序即磁盘元组顺序)。 */
 
 export type Bounds3D = [
   [number, number, number],
   [number, number, number],
 ];
 
+export interface TextLayout {
+  width: number;
+  gzip: number;
+  p50: number;
+  p90: number;
+  p99: number;
+  max: number;
+  members: number;
+}
+
 export interface Manifest {
-  /** 内容寻址版本(dump-YYYY-MM-DD-<hash>);全部数据请求以 ?v= 携带。 */
+  /** 除自身外规范 manifest 内容的 SHA-256(内容身份)。 */
   version: string;
-  /** 上游归档版本,仅用于来源追踪,不可单独作为缓存身份。 */
-  dump_version: string;
+  schema: string;
+  profile: string;
+  source: { dump_version: string; dump_sha256: string };
+  schema_digest: string;
+  field_policy: Record<string, Record<string, string>>;
+  mapping_digests: Record<string, string>;
+  vocab_digests: Record<string, string>;
+  owned_collections: Record<string, { parent: string; via: string }>;
+  counts: {
+    entities: { subject: number; person: number; character: number };
+    facts: number;
+    fact_source_rows: number;
+    incidence: number;
+    episodes: number;
+    episode_orphan_groups: number;
+    episode_orphan_rows: number;
+    unresolved_voice_subject_context: number;
+    text: Record<string, { non_empty: number; empty: number }>;
+  };
+  text_bytes: Record<string, { raw: number; compressed: number }>;
+  text_layout: Record<string, TextLayout>;
+  limits: {
+    member_cap: number;
+    pack_cap: number;
+    fact_buckets: number;
+    fact_inline: number;
+    episode_inline: number;
+    page_size: number;
+    entity_block_ids: number;
+    episode_block_subjects: number;
+    search_leaf_cap: number;
+    search_top: number;
+    cache_budget: {
+      total: number;
+      names: number;
+      structure: number;
+      search: number;
+      text: number;
+    };
+  };
+  rank_index: {
+    encoding: string;
+    sentinel: number;
+    segments: Record<string, { offset: number; count: number }>;
+  };
   n_nodes: number;
   n_edges_skeleton: number;
-  /** names.pack 每个独立 gzip 块包含的连续 rank 数。 */
+  /** names.pack 每个独立 gzip 成员包含的连续 rank 数。 */
   name_block_size: number;
-  buckets: number;
-  /** 详情 pack 均分文件数(det-{p}.pack,p = bucket / (buckets/det_packs))。 */
-  det_packs: number;
-  adj_inline: number;
-  eps_inline: number;
   bbox: Bounds3D;
-  /** 时间滑块窗口:非零年份钳制到 [1900, 2035](上游有脏值);
-   * 滑块拉满 = 不过滤,窗口外脏年份节点不受影响。 */
   year_range: [number, number];
   /** top-32 元标签名,下标 = tags.bin 位图的 bit 序。 */
   tags: string[];
-  labels: string[];
-  /** 高频首字搜索分片(hex 码点),随首块预取。 */
-  hot_shards: string[];
-  /** 当前快照的布局算法与几何质量报告。 */
   layout: Record<string, unknown> | null;
-  /** 文件名 -> [bytes, sha256](分片已打包,产物全为顶层文件)。 */
+  /** 文件名 -> [bytes, sha256];数据 URL 以该文件自身摘要寻址。 */
   files: Record<string, [number, string]>;
+  core_bytes: number;
   total_bytes: number;
   n_files: number;
 }
 
 /** 几何 SoA(rank 有序)。 */
 export interface Geometry {
-  /** 完整 xyz 世界坐标,长度 3n(流式填充)。 */
   positions: Float32Array;
   year: Uint16Array;
   key: Uint32Array;
   size: Uint8Array;
-  /** bit0 nsfw(保留于数据,渲染不使用)、bit1 孤立外环、
-   * bit2-4 媒介(1书籍…6三次元),余位 0。 */
+  /** bit0 nsfw、bit1 孤立外环、bit2-4 媒介,余位 0。 */
   flags: Uint8Array;
-  /** 评分×10(u8,无评分/非作品 = 0),属性过滤用。 */
   score: Uint8Array;
-  /** top-32 元标签位图(u32,bit 序 = manifest.tags 下标)。 */
   tags: Uint32Array;
-  /** 已就绪的节点数(流式期间 < n)。 */
   loaded: number;
-  /** Range 点查得到的零散坐标(深链/行走落点在流式未覆盖时)。 */
   sparse: Map<number, [number, number, number]>;
 }
 
@@ -60,48 +98,179 @@ export type NameRow = [original: string, chinese: string | null];
 
 /** 按 rank 分块、按需填充的名字缓存。 */
 export interface Names {
-  /** 未加载时返回 null；中文名优先。 */
+  /** 未加载时返回 null;中文名优先。 */
   get(rank: number): string | null;
-  /** 加载 ranks 涉及的去重块；已加载和并发请求均复用。 */
+  /** 原名与中文名的完整行(Data.entity 组合结构实体用)。 */
+  row(rank: number): NameRow | null;
   load(ranks: Iterable<number>): Promise<void>;
 }
 
-/** 邻接分片条目:g = [labelId, 组总数, inline ranks][],n = 总数,
- * op = 溢出页在 pages.pack 中的 [offset, len](逐片 gzip)。 */
-export interface AdjEntry {
-  g: [number, number, number[]][];
-  n: number;
-  op?: [number, number][];
+// ---- 结构语义契约(设计 §7)----
+
+export type FactKind =
+  | "RELATES_TO"
+  | "WORKED_ON"
+  | "APPEARS_IN"
+  | "VOICE_CREDIT"
+  | "PERSON_REL"
+  | "CHARACTER_REL";
+
+export const FACT_TAGS: Record<string, FactKind> = {
+  R: "RELATES_TO",
+  W: "WORKED_ON",
+  A: "APPEARS_IN",
+  V: "VOICE_CREDIT",
+  P: "PERSON_REL",
+  C: "CHARACTER_REL",
+};
+
+interface FactBase {
+  ref: number;
+  multiplicity: number;
 }
 
-/** 溢出页条目:[labelId, rank]。 */
-export type AdjPage = [number, number][];
+/** 完整类型化事实:方向由角色字段表达,不编码为展示字符串。 */
+export type Fact =
+  | (FactBase & {
+      kind: "RELATES_TO";
+      source: number;
+      target: number;
+      relationType: number;
+      sortOrder: number;
+    })
+  | (FactBase & {
+      kind: "WORKED_ON";
+      person: number;
+      subject: number;
+      position: number;
+      appearEps: string;
+    })
+  | (FactBase & {
+      kind: "APPEARS_IN";
+      character: number;
+      subject: number;
+      type: number;
+      sortOrder: number;
+    })
+  | (FactBase & {
+      kind: "VOICE_CREDIT";
+      person: number;
+      character: number;
+      subjectContext: number;
+      type: number;
+      hasSummary: boolean;
+    })
+  | (FactBase & {
+      kind: "PERSON_REL";
+      source: number;
+      target: number;
+      relationType: number;
+      spoiler: boolean;
+      ended: boolean;
+    })
+  | (FactBase & {
+      kind: "CHARACTER_REL";
+      source: number;
+      target: number;
+      relationType: number;
+      spoiler: boolean;
+      ended: boolean;
+    });
 
-/** 分集行:[type, sort, name, name_cn, airdate]。 */
-export type EpisodeRow = [number, number, string, string, string];
-
-/** 详情分片条目(字段与烘焙侧一致,宽松索引)。 */
-export interface Detail {
-  t: string;
-  st?: string;
+export interface SubjectEntity {
+  kind: "subject";
+  key: number;
   name: string;
-  cn: string;
-  r: number;
-  sum: string;
-  date?: string;
-  score?: number | null;
-  bgm_rank?: number | null;
-  fav?: number[];
-  tags?: string[];
-  career?: string[];
-  collects?: number;
-  ne?: number;
-  eps?: EpisodeRow[];
-  /** 分集溢出页在 pages.pack 中的 [offset, len]。 */
-  eo?: [number, number][];
+  nameCn: string;
+  type: number;
+  platformCode: number | null;
+  date: string;
+  score: number | null;
+  /** 源字段 Subject.rank;与 VisualRank 不能混用。 */
+  bgmRank: number | null;
+  nsfw: boolean;
+  favorite: [number, number, number, number, number];
+  series: boolean;
+  scoreDetails: number[];
+  metaTags: string[];
+  tags: [string, number][];
+  hasSummary: boolean;
+  hasInfobox: boolean;
+}
+
+export interface PersonEntity {
+  kind: "person";
+  key: number;
+  name: string;
+  nameCn: string;
+  type: number;
+  career: string[];
+  comments: number;
+  collects: number;
+  hasSummary: boolean;
+  hasInfobox: boolean;
+}
+
+export interface CharacterEntity {
+  kind: "character";
+  key: number;
+  name: string;
+  nameCn: string;
+  role: number;
+  comments: number;
+  collects: number;
+  hasSummary: boolean;
+  hasInfobox: boolean;
+}
+
+export type StructuralEntity =
+  | SubjectEntity
+  | PersonEntity
+  | CharacterEntity;
+
+export interface EpisodeRecord {
+  id: number;
+  subject: number;
+  name: string;
+  nameCn: string;
+  airdate: string;
+  disc: number;
+  duration: string;
+  sort: number | null;
+  type: number;
+  hasDescription: boolean;
+}
+
+export interface Page<T> {
+  items: T[];
+  total: number;
+  next: string | null;
+}
+
+export type LongTextRef =
+  | { kind: "entity-summary"; entity: number }
+  | { kind: "entity-infobox"; entity: number }
+  | { kind: "episode-description"; subject: number; episode: number }
+  | { kind: "fact-summary"; fact: number };
+
+export type LongTextResult =
+  | { kind: "present"; text: string }
+  | { kind: "empty" };
+
+/** 原始枚举码 -> 显示文本(mappings.json;未知码按数值显示)。 */
+export interface Mappings {
+  fact_labels: Record<string, Record<string, string>>;
+  subject_type: Record<string, string>;
+  platform: Record<string, string>;
+  person_type: Record<string, string>;
+  character_role: Record<string, string>;
 }
 
 export type SearchEntry = [norm: string, display: string, rank: number];
+
+export type SearchNode =
+  | { l: [number, number] }
+  | { t: [number, number]; p?: [number, number][] };
 
 export const TYPE_NAMES = ["", "作品", "人物", "角色"] as const;
 // 萌系三色(天蓝/珊瑚/薄荷),暗紫底 #181226 上通过
