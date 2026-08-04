@@ -224,6 +224,44 @@ class ParquetProjectionTests(unittest.TestCase):
             self.assertEqual(dict(second), expected)
 
 
+class EnumAnomalyGateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.previous_codes = build_db.unknown_codes.copy()
+        build_db.unknown_codes.clear()
+
+    def tearDown(self) -> None:
+        build_db.unknown_codes.clear()
+        build_db.unknown_codes.update(self.previous_codes)
+
+    def test_exact_historical_baseline_is_accepted(self) -> None:
+        build_db.unknown_codes.update(
+            {
+                ("Person.type", "*", 0): 1,
+                ("RELATES_TO", 4, 4013): 6,
+            }
+        )
+
+        with redirect_stdout(StringIO()):
+            build_db.report_unknown_codes()
+
+    def test_new_or_growing_anomaly_stops_the_build(self) -> None:
+        cases = (
+            {("Character.role", "*", 7): 1},
+            {("Person.type", "*", 0): 2},
+        )
+        for codes in cases:
+            with self.subTest(codes=codes):
+                build_db.unknown_codes.clear()
+                build_db.unknown_codes.update(codes)
+                with (
+                    redirect_stdout(StringIO()),
+                    self.assertRaisesRegex(
+                        RuntimeError, "enum anomaly baseline exceeded"
+                    ),
+                ):
+                    build_db.report_unknown_codes()
+
+
 class DatabaseReplacementTests(unittest.TestCase):
     def test_failed_rebuild_preserves_live_database(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -103,6 +103,17 @@ def source_enum_anomalies() -> dict[str, Counter[int | None]]:
     return anomalies
 
 
+def enum_anomaly_growth(
+    anomalies: dict[str, Counter[int | None]],
+) -> dict[str, int]:
+    return {
+        label: total - ENUM_ANOMALY_BASELINES.get(label, 0)
+        for label, counts in anomalies.items()
+        if (total := sum(counts.values()))
+        > ENUM_ANOMALY_BASELINES.get(label, 0)
+    }
+
+
 def parquet_fingerprint(name: str) -> RowFingerprint:
     path = PARQUET / f"{name}.parquet"
     parquet = pq.ParquetFile(path)
@@ -260,16 +271,18 @@ def main() -> None:
 
     print("[3/4] decode coverage + smoke queries")
     enum_anomalies = source_enum_anomalies()
+    enum_growth = enum_anomaly_growth(enum_anomalies)
     for _, _, label, _ in SOURCE_ENUM_CONTRACTS:
         counts = enum_anomalies.get(label, Counter())
         total = sum(counts.values())
         baseline = ENUM_ANOMALY_BASELINES.get(label, 0)
         if total == 0:
             level = "ok"
-        elif total <= baseline:
+        elif label not in enum_growth:
             level = "info"
         else:
-            level = "WARNING"
+            level = "MISMATCH"
+            failures.append(f"{label} enum anomaly growth")
         details = ", ".join(
             f"{code}={count:,}"
             for code, count in sorted(
@@ -293,7 +306,11 @@ def main() -> None:
         undecoded = count(
             f"MATCH ()-[r:{table}]->() WHERE r.{col} = '' RETURN count(r)"
         )
-        level = "info" if undecoded <= baseline else "WARNING"
+        if undecoded <= baseline:
+            level = "info"
+        else:
+            level = "MISMATCH"
+            failures.append(f"{table}.{col} undecoded growth")
         print(
             f"  {level:8s} {table}.{col} undecoded: {undecoded:,} "
             f"(baseline {baseline}; growth means stale mappings)"
