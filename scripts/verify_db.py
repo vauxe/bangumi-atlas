@@ -8,6 +8,7 @@ exits non-zero.
 """
 
 import sys
+from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -40,6 +41,28 @@ EDGE_TABLES = {
 
 failures: list[str] = []
 
+# Official node/episode contracts:
+# https://bangumi.github.io/api/dist.json
+# https://github.com/bangumi/Archive/blob/master/README.md
+# Relationship contracts:
+# https://github.com/bangumi/common/blob/master/person_relations.yml
+SOURCE_ENUM_CONTRACTS = (
+    ("subject", "type", "Subject.type", frozenset({1, 2, 3, 4, 6})),
+    ("person", "type", "Person.type", frozenset({1, 2, 3})),
+    ("character", "role", "Character.role", frozenset({1, 2, 3, 4})),
+    ("episode", "type", "Episode.type", frozenset(range(7))),
+    (
+        "subject-characters",
+        "type",
+        "APPEARS_IN.type",
+        frozenset(range(1, 7)),
+    ),
+    ("person-characters", "type", "VOICED.type", frozenset(range(7))),
+)
+ENUM_ANOMALY_BASELINES = {
+    "Person.type": 1,  # Archive 中保留的历史脏记录 id=22, type=0
+}
+
 
 def check(label: str, expected: int, actual: int) -> None:
     ok = expected == actual
@@ -65,6 +88,19 @@ def rows(name: str) -> Iterator[dict[str, Any]]:
     with open(DUMP / f"{name}.jsonlines", "rb") as f:
         for line in f:
             yield orjson.loads(line)
+
+
+def source_enum_anomalies() -> dict[str, Counter[int | None]]:
+    anomalies: dict[str, Counter[int | None]] = {}
+    for source, field, label, allowed in SOURCE_ENUM_CONTRACTS:
+        counts = Counter(
+            record.get(field)
+            for record in rows(source)
+            if record.get(field) not in allowed
+        )
+        if counts:
+            anomalies[label] = counts
+    return anomalies
 
 
 def parquet_fingerprint(name: str) -> RowFingerprint:
@@ -223,6 +259,28 @@ def main() -> None:
     )
 
     print("[3/4] decode coverage + smoke queries")
+    enum_anomalies = source_enum_anomalies()
+    for _, _, label, _ in SOURCE_ENUM_CONTRACTS:
+        counts = enum_anomalies.get(label, Counter())
+        total = sum(counts.values())
+        baseline = ENUM_ANOMALY_BASELINES.get(label, 0)
+        if total == 0:
+            level = "ok"
+        elif total <= baseline:
+            level = "info"
+        else:
+            level = "WARNING"
+        details = ", ".join(
+            f"{code}={count:,}"
+            for code, count in sorted(
+                counts.items(), key=lambda item: str(item[0])
+            )
+        )
+        suffix = f"; codes {details}" if details else ""
+        print(
+            f"  {level:8s} {label} outside contract: {total:,} "
+            f"(baseline {baseline}{suffix})"
+        )
     # 全部解码列的失配量；超过显式基线说明映射表可能陈旧。
     baselines = {
         ("RELATES_TO", "relation"): 6,  # 上游已删的历史码
