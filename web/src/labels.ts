@@ -1,129 +1,243 @@
-/** 标签层:节点标签(碰撞剔除)+ 社区标签(远景),分级淡入。
- * 节点标签随可见性过滤(年份过滤时不显示被滤节点的名字);
- * SDF 图集由 deck.gl 运行时生成,标签层整体延迟到首帧之后挂载,
- * 不占首屏；字符集仍由烘焙期离线给定。
- * data 数组按 (zoom 档位, 过滤版本) 缓存:相机连续移动时不重建、
- * 不触发碰撞检测重算。 */
+/** 工作集标签:默认无任何标签;选中节点后为工作集(选中节点 +
+ * 相连节点)显示节点名与关系名,不设 zoom 门槛——远距离也可读
+ * (像素字号)。两类名字三重区分:节点名亮白、12px、悬于节点
+ * 上方;关系名品红、10px、位于边中点。定向关系的文案带 "← "
+ * 前缀(指向选中节点),与边的亮度梯度(亮端 = 目标端)互证。
+ * 去重叠在 CPU 端按优先级贪心完成(选中名 > 邻居名 > 关系名);
+ * GPU CollisionFilterExtension 对"数据后到"的图层会拿旧碰撞图
+ * 整批误剔(实测多种失效形态),工作集标签量级小,不需要它。
+ * SDF 字符集由当前显示的字符串即时生成;缺失的节点名由调用方
+ * 批量补载后重绘。 */
 
-import { CollisionFilterExtension } from "@deck.gl/extensions";
 import { TextLayer } from "@deck.gl/layers";
-import { loadPublishedJson } from "./loader";
-import type { Geometry } from "./types";
-
-export interface LabelData {
-  nodes: [number, string][];
-  comm: Record<string, [string, number[]]>;
-  charset: string;
-}
+import { FOCUS_ZOOM } from "./camera";
 
 // 圆体优先(macOS 圆体 / Windows 幼圆);canvas font 字符串不能含
 // ui-rounded 这类新 CSS 泛型,否则整串被忽略
 const LABEL_FONT = '"Yuanti SC", "YouYuan", "PingFang SC", sans-serif';
-const COMMUNITY_LABEL_MAX_ZOOM = 1.9;
-const NODE_LABEL_MIN_ZOOM = COMMUNITY_LABEL_MAX_ZOOM;
+const LABEL_DEPTH = {
+  depthWriteEnabled: false,
+  depthCompare: "always",
+} as const;
+// 基准字号(聚焦层级下的屏显像素);字号随 zoom 缩放:
+// 远处钳制在基准值保持可读,拉近时随节点一起放大,封顶 2 倍——
+// 固定像素字号会在节点放大时显得"越缩放字越小"。
+// 注意必须用像素单位 + CPU 逐帧算值:deck 的 min/maxPixels 钳制
+// 发生在透视除法之前,common 字号会随标签自身深度被再压小
+// (朝空白缩放把工作集甩到枢轴平面之后时,字会莫名变小)。
+const NODE_NAME_SIZE = 14;
+const EDGE_NAME_SIZE = 12;
 
-/** 由 Scene 持有的缓存槽。 */
-export interface LabelCache {
-  capBucket?: number;
-  version?: number;
-  loaded?: number;
-  nodesData?: [number, string][];
-  commData?: [string, number[]][];
-  chars?: string;
+export interface WorkingMember {
+  rank: number;
+  pos: [number, number, number];
 }
 
-export function loadLabels(): Promise<LabelData> {
-  return loadPublishedJson<LabelData>("labels.json");
+export interface WorkingEdge {
+  a: [number, number, number];
+  b: [number, number, number];
+  label: string;
 }
 
-export function labelLayers(
-  labels: LabelData,
-  geo: Geometry,
+/** 世界坐标 → 屏幕像素;视口未就绪时返回 null。 */
+export type ScreenProjector = (
+  pos: [number, number, number],
+) => [number, number] | null;
+
+interface LabelItem {
+  position: [number, number, number];
+  text: string;
+  /** 去重叠顺位:选中节点名 > 邻居名 > 关系名。 */
+  priority: number;
+}
+
+export interface WorkingLabelData {
+  nodes: LabelItem[];
+  edges: LabelItem[];
+  charset: string;
+  /** 名字未就绪的 rank,调用方补载后重绘。 */
+  missing: number[];
+}
+
+/** 纯数据装配:节点名(可缺)、关系名(边中点)与即时字符集。 */
+export function buildWorkingLabels(
+  members: WorkingMember[],
+  edges: WorkingEdge[],
+  nameOf: (rank: number) => string | null,
+): WorkingLabelData {
+  const nodes: LabelItem[] = [];
+  const missing: number[] = [];
+  members.forEach((m, i) => {
+    const text = nameOf(m.rank);
+    // members[0] 是选中节点:任何拥挤程度下它的名字都保留
+    if (text)
+      nodes.push({ position: m.pos, text, priority: i === 0 ? 100 : 10 });
+    else missing.push(m.rank);
+  });
+  const edgeItems: LabelItem[] = [];
+  for (const e of edges) {
+    if (!e.label) continue;
+    edgeItems.push({
+      position: [
+        (e.a[0] + e.b[0]) / 2,
+        (e.a[1] + e.b[1]) / 2,
+        (e.a[2] + e.b[2]) / 2,
+      ],
+      text: e.label,
+      priority: 0,
+    });
+  }
+  const chars = new Set("←▶0123456789…");
+  for (const n of nodes) for (const ch of n.text) chars.add(ch);
+  for (const e of edgeItems) for (const ch of e.text) chars.add(ch);
+  return {
+    nodes,
+    edges: edgeItems,
+    charset: [...chars].join(""),
+    missing,
+  };
+}
+
+interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+const overlaps = (a: Box, b: Box): boolean =>
+  a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+/** 估算文本像素宽:CJK ≈ 字号,拉丁/数字 ≈ 0.55 字号。 */
+const estWidth = (text: string, size: number): number => {
+  let w = 0;
+  for (const ch of text)
+    w += (ch.codePointAt(0) ?? 0) > 0x2e80 ? size : size * 0.55;
+  return w;
+};
+
+/** 屏幕空间贪心去重叠:按 priority 降序占格,与已占格重叠则剔除。 */
+export function declutter(
+  items: LabelItem[],
+  project: ScreenProjector,
+  size: number,
+  occupied: Box[],
+): LabelItem[] {
+  const kept: LabelItem[] = [];
+  for (const it of [...items].sort((a, b) => b.priority - a.priority)) {
+    const p = project(it.position);
+    if (!p) continue;
+    const w = estWidth(it.text, size);
+    const h = size * 1.4;
+    const box = { x: p[0] - w / 2, y: p[1] - h, w, h: h * 2 };
+    if (occupied.some((o) => overlaps(o, box))) continue;
+    occupied.push(box);
+    kept.push(it);
+  }
+  return kept;
+}
+
+/** 工作集的两个文本图层(节点名 / 关系名),已在 CPU 端去重叠。 */
+export function workingLabelLayers(
+  members: WorkingMember[],
+  edges: WorkingEdge[],
+  nameOf: (rank: number) => string | null,
+  project: ScreenProjector,
   zoom: number,
-  isVisible: (rank: number) => boolean,
-  version: number,
-  cache: LabelCache,
-): unknown[] {
-  cache.chars ??= [...new Set(labels.charset + "0123456789…")].join("");
-  cache.commData ??= Object.values(labels.comm);
-  const out: unknown[] = [];
-  if (zoom < COMMUNITY_LABEL_MAX_ZOOM) {
-    out.push(
+): { layers: unknown[]; missing: number[] } {
+  const data = buildWorkingLabels(members, edges, nameOf);
+  // 当前实际屏显字号(去重叠的占格与名字-节点间距都按它算)
+  const scale = 2 ** (zoom - FOCUS_ZOOM);
+  const clampPx = (base: number): number =>
+    Math.min(base * 2, Math.max(base, base * scale));
+  const nodePx = clampPx(NODE_NAME_SIZE);
+  const edgePx = clampPx(EDGE_NAME_SIZE);
+  // 名字悬于节点光晕之上:间距随节点屏显半径自适应
+  const nodeRadiusPx = Math.max(7, 9 * scale);
+  const offsetY = -Math.min(48, Math.round(nodeRadiusPx) + 9);
+  const occupied: Box[] = [];
+  const nodes = declutter(data.nodes, project, nodePx, occupied);
+  const edgeNames = declutter(data.edges, project, edgePx, occupied);
+  // 方向箭头:位于边 72% 处、指向关系目标端("← " = 指向选中侧),
+  // 屏幕空间角度逐帧由投影推出,随相机旋转保持朝向正确
+  const arrows: { position: [number, number, number]; angle: number }[] = [];
+  for (const e of edges) {
+    if (!e.label) continue; // 无方向语义(对比扇)不画箭头
+    const toSelf = e.label.startsWith("← ");
+    const from = toSelf ? e.b : e.a;
+    const to = toSelf ? e.a : e.b;
+    const pf = project(from);
+    const pt = project(to);
+    if (!pf || !pt) continue;
+    const dx = pt[0] - pf[0];
+    const dy = pt[1] - pf[1];
+    if (Math.hypot(dx, dy) < 36) continue; // 屏显太短,箭头徒增噪声
+    const k = 0.72;
+    arrows.push({
+      position: [
+        from[0] + (to[0] - from[0]) * k,
+        from[1] + (to[1] - from[1]) * k,
+        from[2] + (to[2] - from[2]) * k,
+      ],
+      angle: (Math.atan2(-dy, dx) * 180) / Math.PI,
+    });
+  }
+  const layers: unknown[] = [];
+  const common = {
+    characterSet: data.charset,
+    fontFamily: LABEL_FONT,
+    sizeUnits: "pixels" as const,
+    // 32px 源字号 SDF:工作集字符集很小,图集远低于 GPU 纹理上限
+    fontSettings: { sdf: true, fontSize: 32, buffer: 4 },
+    billboard: true,
+    parameters: LABEL_DEPTH,
+    getPosition: (d: LabelItem) => d.position,
+    getText: (d: LabelItem) => d.text,
+  };
+  if (nodes.length) {
+    layers.push(
       new TextLayer({
-        id: "labels-comm",
-        data: cache.commData,
-        characterSet: cache.chars,
-        getPosition: (d: [string, number[]]) => [
-          d[1][0] ?? 0,
-          d[1][1] ?? 0,
-          d[1][2] ?? 0,
-        ],
-        getText: (d: [string, number[]]) => d[0],
-        getSize: 15,
-        fontFamily: LABEL_FONT,
-        sizeUnits: "pixels",
-        getColor: [200, 205, 220, 190],
+        ...common,
+        id: "ws-node-names",
+        data: nodes,
+        getSize: nodePx,
+        getPixelOffset: [0, offsetY],
+        getColor: [240, 242, 246, 245],
+        outlineWidth: 2,
+        outlineColor: [11, 14, 26, 235],
+      }),
+    );
+  }
+  if (edgeNames.length) {
+    layers.push(
+      new TextLayer({
+        ...common,
+        id: "ws-edge-names",
+        data: edgeNames,
+        getSize: edgePx,
+        getPixelOffset: [0, 0],
+        getColor: [242, 160, 205, 235], // 品红系:与节点名区分
         outlineWidth: 2,
         outlineColor: [11, 14, 26, 220],
-        // 32px 源字号:4.7k 字的图集控制在 GPU 纹理上限内
-        // (64px 默认值实测超 max texture size,字形全变实心块),
-        // 屏显 12-15px 的 SDF 质量不受影响
-        fontSettings: { sdf: true, fontSize: 32, buffer: 4 },
-        billboard: true,
-        extensions: [new CollisionFilterExtension()],
-        collisionTestProps: { sizeScale: 2 },
       }),
     );
   }
-  if (zoom >= NODE_LABEL_MIN_ZOOM) {
-    // 节点标签:zoom 越深显示越多;cap 量化到 2 的幂档位,
-    // 同档 + 同过滤版本 + 同加载进度时复用 data 引用
-    const rawCap = Math.floor(90 * Math.pow(4, Math.max(0, zoom)));
-    const capBucket = Math.min(
-      labels.nodes.length,
-      Math.pow(2, Math.ceil(Math.log2(Math.max(rawCap, 60)))),
-    );
-    if (
-      cache.capBucket !== capBucket ||
-      cache.version !== version ||
-      cache.loaded !== geo.loaded ||
-      !cache.nodesData
-    ) {
-      cache.capBucket = capBucket;
-      cache.version = version;
-      cache.loaded = geo.loaded;
-      cache.nodesData = labels.nodes
-        .slice(0, capBucket)
-        .filter((d) => d[0] < geo.loaded && isVisible(d[0]));
-    }
-    out.push(
+  if (arrows.length) {
+    layers.push(
       new TextLayer({
-        id: "labels-nodes",
-        data: cache.nodesData,
-        characterSet: cache.chars,
-        getPosition: (d: [number, string]) => [
-          geo.positions[d[0] * 3] ?? 0,
-          geo.positions[d[0] * 3 + 1] ?? 0,
-          geo.positions[d[0] * 3 + 2] ?? 0,
-        ],
-        getText: (d: [number, string]) => d[1],
-        getSize: 12,
-        fontFamily: LABEL_FONT,
-        sizeUnits: "pixels",
-        getPixelOffset: [0, -12],
-        getColor: [232, 233, 236, 210],
-        outlineWidth: 2,
+        ...common,
+        id: "ws-edge-arrows",
+        data: arrows,
+        getPosition: (d: { position: [number, number, number] }) =>
+          d.position,
+        getText: () => "▶",
+        getSize: Math.min(18, Math.max(10, 10 * scale)),
+        getAngle: (d: { angle: number }) => d.angle,
+        getColor: [242, 160, 205, 230],
+        outlineWidth: 1,
         outlineColor: [11, 14, 26, 200],
-        // 32px 源字号:4.7k 字的图集控制在 GPU 纹理上限内
-        // (64px 默认值实测超 max texture size,字形全变实心块),
-        // 屏显 12-15px 的 SDF 质量不受影响
-        fontSettings: { sdf: true, fontSize: 32, buffer: 4 },
-        billboard: true,
-        extensions: [new CollisionFilterExtension()],
-        collisionTestProps: { sizeScale: 1.6 },
-        getCollisionPriority: (d: [number, string]) => -d[0],
       }),
     );
   }
-  return out;
+  return { layers, missing: data.missing };
 }

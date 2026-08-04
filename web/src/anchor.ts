@@ -27,8 +27,13 @@ export function cursorRay(
 }
 
 /** 射线前方、夹角正切小于 tanCutoff 且夹角最小的节点 rank；
- * 无候选返回 -1。accept 惰性调用：仅当候选优于当前最优时执行，
- * 过滤代价与命中数而非节点数成正比（positions 为百万级 SoA）。 */
+ * 无候选返回 -1。
+ *
+ * 两段式选择:先取锥内沿射线最近的命中深度 t_min,再在近深度组
+ * (t ≤ 2·t_min)内按夹角选最优。纯夹角度量不看远近——正对射线
+ * 但位于眼前目标身后很远的节点会胜出,把缩放枢轴拽穿目标飞向
+ * 深处("瞬移到节点背后")。accept 按夹角升序惰性调用,通常
+ * 只判定一两个候选。 */
 export function nearestAlongRay(
   positions: Float32Array,
   count: number,
@@ -39,8 +44,10 @@ export function nearestAlongRay(
 ): number {
   const [ox, oy, oz] = origin;
   const [ux, uy, uz] = dir;
-  let best = -1;
-  let bestScore = tanCutoff * tanCutoff;
+  const cut2 = tanCutoff * tanCutoff;
+  // [t, 夹角平方, rank]
+  const candidates: [number, number, number][] = [];
+  let tMin = Infinity;
   for (let i = 0; i < count; i++) {
     const vx = (positions[i * 3] ?? 0) - ox;
     const vy = (positions[i * 3 + 1] ?? 0) - oy;
@@ -48,10 +55,16 @@ export function nearestAlongRay(
     const t = vx * ux + vy * uy + vz * uz;
     if (t <= 1e-9) continue; // 相机侧后方
     const score = (vx * vx + vy * vy + vz * vz - t * t) / (t * t);
-    if (score >= bestScore) continue;
-    if (accept && !accept(i)) continue;
-    best = i;
-    bestScore = score;
+    if (score >= cut2) continue;
+    candidates.push([t, score, i]);
+    if (t < tMin) tMin = t;
   }
-  return best;
+  const tCap = tMin * 2;
+  candidates.sort((a, b) => a[1] - b[1]);
+  for (const [t, , rank] of candidates) {
+    if (t > tCap) continue;
+    if (accept && !accept(rank)) continue;
+    return rank;
+  }
+  return -1;
 }

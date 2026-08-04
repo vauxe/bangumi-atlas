@@ -11,7 +11,6 @@ import { esc } from "./html";
 import { Results } from "./results";
 import {
   ensureRankIndex,
-  loadEdges,
   loadGzJson,
   loadManifest,
   openNames,
@@ -21,7 +20,6 @@ import {
   watchReleaseChange,
   SiteDataContractError,
 } from "./loader";
-import { loadLabels } from "./labels";
 import { relationNeighbors } from "./neighbors";
 import { Scene } from "./scene";
 import { Search } from "./search";
@@ -178,6 +176,9 @@ async function boot(): Promise<void> {
       showTooltip(label, "关系", x, y);
     },
     onViewChange: replaceUrl,
+    // 近场动态标签:冷区(如孤立外环)凑近时按需补载名字
+    nameOf: (rank) => names.get(rank),
+    loadNames: (ranks) => names.load(ranks),
   });
   // ---- 几何流:场景已就绪,首块回调即可渲染 ----
   let geometryComplete = false;
@@ -193,14 +194,11 @@ async function boot(): Promise<void> {
         ? ""
         : `渲染 ${loaded.toLocaleString()} / ${manifest.n_nodes.toLocaleString()} 节点`;
     scene.geometryGrew();
-    // 第一批节点绘制后,低优先级补齐骨架边与反向索引
+    // 第一批节点绘制后,低优先级补齐反向索引
+    // (骨架边与标签表不再预载:边和名字都只在选中态由工作集呈现)
     if (!backgroundStarted && loaded > 0) {
       backgroundStarted = true;
-      runTask(loadEdges().then((e) => scene.setEdges(e)), "骨架边加载");
       runTask(ensureRankIndex(), "反向索引加载");
-      idle(() => {
-        runTask(loadLabels().then((l) => scene.setLabels(l)), "标签加载");
-      });
     }
   });
 
@@ -398,6 +396,22 @@ async function boot(): Promise<void> {
   }
 
   subscribe(() => scene.recolor());
+
+  // ---- 上下文提示栏:随选中状态切换操作提示 ----
+  const hint = $("#hint");
+  const HINT_DEFAULT =
+    "左键拖 平移 · 滚轮 飞向光标 · 右键或 Shift+拖 旋转 · " +
+    "单击选中 · 双击聚焦 · R 复位 · T 俯视 · S 搜索";
+  const HINT_SELECTED =
+    "Esc 取消选中 · 双击节点 聚焦 · ▶ 指向关系目标 · " +
+    "悬停边看关系 · 单击关系条目 前往 · R 复位";
+  let hintSelected: boolean | null = null;
+  subscribe(() => {
+    const sel = state.selection !== null;
+    if (sel === hintSelected) return;
+    hintSelected = sel;
+    hint.textContent = sel ? HINT_SELECTED : HINT_DEFAULT;
+  });
 
   // ---- 结果面板:过滤谓词 + 枚举 = 完整查询 ----
   const results = new Results($("#results"), {

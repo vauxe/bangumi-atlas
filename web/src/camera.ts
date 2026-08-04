@@ -74,44 +74,159 @@ export type ZoomAnchorQuery = (
   py: number,
 ) => [number, number, number] | null;
 
+/** 巡航前进:滚轮越过缩放上限后,滚动量转为等速位移——锚点
+ * 仍在前方时朝它飞(到达后穿过),否则沿视线直进,相机永不停。 */
+export function cruiseTarget(
+  target: readonly [number, number, number],
+  anchor: readonly [number, number, number] | null,
+  forward: readonly [number, number, number],
+  step: number,
+): [number, number, number] {
+  let dx = forward[0];
+  let dy = forward[1];
+  let dz = forward[2];
+  if (anchor) {
+    const ax = anchor[0] - target[0];
+    const ay = anchor[1] - target[1];
+    const az = anchor[2] - target[2];
+    const ahead = ax * dx + ay * dy + az * dz;
+    const len = Math.hypot(ax, ay, az);
+    if (ahead > 0 && len > 1e-6) {
+      dx = ax / len;
+      dy = ay / len;
+      dz = az / len;
+    }
+  }
+  return [
+    target[0] + dx * step,
+    target[1] + dy * step,
+    target[2] + dz * step,
+  ];
+}
+
+/** 滚轮手势的锚点锁定:连续事件（≤400ms、光标 ≤24px）沿用同一
+ * 锚点，一次滚动向同一点平滑收敛。逐事件重新解析会在近/远节点
+ * 间跳变——每格位移 ∝ 到锚点距离，表现为深度突进忽大忽小。 */
+export class WheelAnchorLatch {
+  private at = -Infinity;
+  private x = 0;
+  private y = 0;
+  private anchor: [number, number, number] | null = null;
+
+  resolve(
+    now: number,
+    x: number,
+    y: number,
+    lookup: () => [number, number, number] | null,
+  ): [number, number, number] | null {
+    const held =
+      now - this.at < 400 &&
+      Math.abs(x - this.x) <= 24 &&
+      Math.abs(y - this.y) <= 24;
+    if (!held) {
+      this.anchor = lookup();
+      this.x = x;
+      this.y = y;
+    }
+    this.at = now;
+    return this.anchor;
+  }
+}
+
 /** 放大朝真实内容收敛：光标下有节点用 GPU 拾取，脱靶时退回
- * zoomAnchor 视线锚点；都没有才原地缩放。缩小保持原语义——
- * 只改变缩放，关注点不漂移，空平面永远不会成为新关注点。 */
+ * zoomAnchor 视线锚点，手势内锁定同一锚点；都没有才原地缩放。
+ * 缩小保持原语义——只改变缩放，关注点不漂移，空平面永远不会
+ * 成为新关注点。 */
 export class AtlasOrbitController extends OrbitController {
+  private latch = new WheelAnchorLatch();
+
   protected override _onWheel(event: MjolnirWheelEvent): boolean {
     if (!this.scrollZoom) return false;
     const pos = this.getCenter(event);
     if (!this.isPointInBounds(pos, event)) return false;
 
-    const { x = 0, y = 0, zoomAnchor } = this.props as {
+    const {
+      x = 0,
+      y = 0,
+      zoomAnchor,
+      onWheelAnchor,
+      minZoom = -Infinity,
+      maxZoom = Infinity,
+    } = this.props as {
       x?: number;
       y?: number;
       zoomAnchor?: ZoomAnchorQuery;
+      /** 手势锁定新锚点时的反馈回调(scene 画淡出环)。 */
+      onWheelAnchor?: (pos: [number, number, number] | null) => void;
+      minZoom?: number;
+      maxZoom?: number;
     };
-    const picked = this.pickPosition?.(x + pos[0], y + pos[1]);
     event.srcEvent.preventDefault();
     const { speed = 0.01 } =
       this.scrollZoom === true ? {} : this.scrollZoom;
     const state =
       this.controllerState.getViewportProps() as unknown as OrbitState;
-    const dz = wheelDeltaToZoom(event.delta, speed);
-    const anchor =
-      dz > 0
-        ? ((picked?.coordinate as [number, number, number] | undefined) ??
-          zoomAnchor?.(x + pos[0], y + pos[1]) ??
-          null)
-        : null;
+    const dzRaw = wheelDeltaToZoom(event.delta, speed);
     let nextState;
-    if (anchor) {
-      const next = zoomTowardAnchor(state, anchor, dz);
-      nextState = this.controllerState._getUpdatedState({
-        zoom: next.zoom,
-        target: next.target,
-      });
+    if (dzRaw > 0) {
+      // 放大拆两段:先把 zoom 提升到巡航上限(锚点像素钉住),
+      // 越过上限的滚动量转为等速前进——相机持续深入,永不停住
+      const dzZoom = Math.min(dzRaw, Math.max(0, maxZoom - state.zoom));
+      const dzFly = dzRaw - dzZoom;
+      const anchor = this.latch.resolve(
+        performance.now(),
+        pos[0],
+        pos[1],
+        () => {
+          const a =
+            (this.pickPosition?.(x + pos[0], y + pos[1])?.coordinate as
+              | [number, number, number]
+              | undefined) ??
+            zoomAnchor?.(x + pos[0], y + pos[1]) ??
+            null;
+          onWheelAnchor?.(a); // 只在手势起点触发,滚动途中不重复
+          return a;
+        },
+      );
+      let zoom = state.zoom;
+      let target: [number, number, number] = [
+        state.target[0],
+        state.target[1],
+        state.target[2],
+      ];
+      if (dzZoom > 0) {
+        const next = anchor
+          ? zoomTowardAnchor({ ...state, target, zoom }, anchor, dzZoom)
+          : { target, zoom: zoom + dzZoom };
+        zoom = next.zoom;
+        target = next.target;
+      }
+      if (dzFly > 0) {
+        const viewport = this.controllerState.makeViewport(
+          this.controllerState.getViewportProps(),
+        ) as { cameraPosition: number[] };
+        const cam = viewport.cameraPosition;
+        const fx = target[0] - (cam[0] ?? 0);
+        const fy = target[1] - (cam[1] ?? 0);
+        const fz = target[2] - (cam[2] ?? 0);
+        const dist = Math.hypot(fx, fy, fz);
+        if (dist > 1e-9) {
+          target = cruiseTarget(
+            target,
+            anchor,
+            [fx / dist, fy / dist, fz / dist],
+            dist * (1 - 2 ** -dzFly),
+          );
+        }
+      }
+      nextState = this.controllerState._getUpdatedState({ zoom, target });
     } else {
+      const dz = Math.max(dzRaw, minZoom - state.zoom);
+      if (dz === 0) return true;
       nextState = this.controllerState._getUpdatedState({
         zoom: state.zoom + dz,
       });
+      const picked = this.pickPosition?.(x + pos[0], y + pos[1]);
       if (picked?.coordinate) {
         const viewport = nextState.makeViewport(nextState.getViewportProps());
         nextState = nextState._getUpdatedState(
