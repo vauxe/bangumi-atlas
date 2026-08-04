@@ -1,5 +1,5 @@
 # 每周烘焙与发布；门禁契约见 docs/EXPLORER_ARCHITECTURE.md。
-# dump 周三 05:00 GMT+8 更新;本 workflow 周三 08:00 GMT+8 运行。
+# dump 周三 05:00 Asia/Singapore 更新;本 workflow 周三 08:00 Asia/Singapore 运行。
 name: bake-and-deploy
 
 on:
