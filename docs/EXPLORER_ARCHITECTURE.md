@@ -291,10 +291,15 @@ Pages 只接收 Actions 生成的构建产物；上游数据和中间产物不�
 
 | 触发 | 门禁 |
 |---|---|
-| Push / Pull Request | Python 测试、Ruff、mypy、Web 单测、TypeScript、生产构建 |
-| 每周发布 | 上述门禁，以及真实三维布局报告、内容指纹和体积 |
+| Push | Python 测试、Ruff lint/格式、mypy、Web 单测、TypeScript、生产构建 |
+| Pull Request | Push 门禁，以及新增依赖的 high/critical 漏洞审查 |
+| 每周发布 | 上述构建门禁、源枚举漂移、数据库与 SiteRelease 独立对账、真实三维布局报告、本地 HTTP 端到端 smoke 和完整 staging 体积 |
 
 `bake_site.py` 默认拒绝随机测试布局；`--allow-stub` 只用于本地预览。
+
+仓库设置应保护 `main`：必须经 Pull Request 并要求 `python`、`web` 和
+`dependency-review` 状态通过，禁止 force push；CodeQL 使用 GitHub 默认设置扫描
+Python 和 JavaScript/TypeScript。这两项属于 GitHub 仓库设置，不由工作流文件自行开启。
 
 这些门禁验证数据与构建正确性，但不包含真实浏览器性能和可访问性测试。相关目标只能
 通过独立测量验证，报告必须注明设备、数据版本和方法。不能仅凭单元测试通过，就认定

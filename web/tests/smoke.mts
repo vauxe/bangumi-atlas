@@ -1,5 +1,5 @@
 /** 真实数据端到端冒烟:对本地 Range 服务器上的完整 SiteRelease
- * 走一遍 Data 契约(手动脚本,不进 CI;用法见 npm run smoke)。 */
+ * 走一遍 Data 契约(weekly 发布门禁;本地用法见 npm run smoke)。 */
 
 import assert from "node:assert/strict";
 
