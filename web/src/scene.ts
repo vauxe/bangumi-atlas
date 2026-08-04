@@ -1,5 +1,6 @@
-/** deck.gl 场景:语境层(点+近景视锥内骨架边)、工作集聚光/X-ray、
- * GPU 拾取。
+/** deck.gl 场景:语境层(点)、工作集聚光/X-ray、GPU 拾取。
+ * 默认不显示任何边与名字;选中节点后由工作集显示相连关系边、
+ * 节点名与关系名(方向 = 文案箭头 + 边亮度梯度,亮端为目标端)。
  *
  * 性能架构:节点的颜色/亮度/可见性全部在 shader 里由静态实例属性
  * (style、year)+ 少量 uniform 推导——年份滑块、媒介 chips、
@@ -27,25 +28,22 @@ import {
 import type { OrbitState } from "./camera";
 import { COVER_SIZES, coverItems, coverUrl } from "./covers";
 import type { CoverItem } from "./covers";
-import { labelLayers } from "./labels";
-import type { LabelCache, LabelData } from "./labels";
+import { workingLabelLayers } from "./labels";
 import { state } from "./store";
 import { TYPE_COLORS, etype } from "./types";
 import type { Bounds3D, Geometry } from "./types";
 
 export type { OrbitState } from "./camera";
 
-const EDGE_ZOOM = 1.2;
-const EDGE_CAP = 120_000; // 可见边上限(spike:边是填充率杀手)
-const EDGE_FADE_MS = 250;
 export const EDGE_WIDTHS = {
-  context: 0.5,
+  context: 0.5, // 语境骨架边已默认停用,保留宽度契约供将来开关
   relation: 1,
   path: 1.5,
 } as const;
 const CASCADE_STEP_MS = 30;
 const CASCADE_FADE_MS = 200;
 const PULSE_MS = 500;
+const ANCHOR_FLASH_MS = 500;
 // 持久节点使用世界尺寸：在标准聚焦层级保持原有屏幕观感，继续靠近时
 // 则遵循 3D 投影自然放大。只保留远景最小像素尺寸，不设近景上限。
 const FOCUS_SCALE = 2 ** FOCUS_ZOOM;
@@ -181,7 +179,7 @@ in vec2 atlas_tags;`,
   if (mediaMask != 0 && a_media > 0 &&
       (mediaMask & (1 << a_media)) == 0) visibility = 40.0 / 255.0;
   if (atlas.spotlight > 0.5)
-    visibility = min(visibility, 38.0 / 255.0);
+    visibility = min(visibility, 80.0 / 255.0);
   vec3 stableRgb = mix(vec3(15.0, 26.0, 28.0), rgb, visibility);
   // 入参 color.a 只携带圆边平滑因子(SDF AA)，中心像素固定为不透明。
   color = vec4(stableRgb / 255.0, color.a);
@@ -262,17 +260,15 @@ export interface SceneCallbacks {
   /** 工作集边悬停:解码后的关系显示文本(语境骨架边不出 tooltip)。 */
   onHoverEdge: (label: string | null, x: number, y: number) => void;
   onViewChange: (vs: OrbitState) => void;
+  /** 近场动态标签:同步读已载名字 / 批量补载缺失名字。 */
+  nameOf?: (rank: number) => string | null;
+  loadNames?: (ranks: number[]) => Promise<void>;
 }
 
 export class Scene {
   readonly camera: Camera;
   private deck: Deck<OrbitView>;
   private geo: Geometry;
-  private labels: LabelData | null = null;
-  private labelCache: LabelCache = {};
-  private styleVersion = 0; // 标签可见性相关过滤的变化计数(缓存键)
-  private labelFilterKey = "";
-
   // 静态实例属性(随几何流一次性填充,之后永不重算)
   private styleBuf: Uint8Array; // [flags, etype, sizeLog, 0] × n
   private yearBuf: Uint16Array; // year × n
@@ -290,16 +286,6 @@ export class Scene {
   private contextData: ContextData | null = null;
   private contextLength = -1;
 
-  private edges: Uint32Array | null = null;
-  private edgePos: Float32Array | null = null; // 预分配 EDGE_CAP*6
-  private edgeData: ContextData | null = null;
-  private edgeCount = 0;
-  private edgeOpacity = 0;
-  private edgeFadeRaf = 0;
-  private edgeRebuildTimer = 0;
-  private edgeRebuildForce = false;
-  private edgeCamKey = ""; // 相机静止时跳过重建
-
   private wsAnimStart = 0;
   private wsRaf = 0;
   private lastSelection: number | null = null;
@@ -307,6 +293,11 @@ export class Scene {
     null;
   private anchorCache: { x: number; y: number; rank: number; at: number } | null =
     null;
+  private anchorFlash: {
+    pos: [number, number, number];
+    at: number;
+  } | null = null;
+  private anchorFlashRaf = 0;
 
   constructor(
     parent: HTMLDivElement,
@@ -330,9 +321,18 @@ export class Scene {
         scrollZoom: { speed: 0.01, smooth: false },
         doubleClickZoom: false,
         dragMode: "pan",
+        // 巡航上限:滚轮把 zoom 提到此层级后,多余滚动量转为
+        // 等速前进(见 AtlasOrbitController)——放大倍率有顶,
+        // 前进没有顶。无上限的 zoom 会让交互步长 ∝ 每像素世界
+        // 距离,画面如同冻结
+        minZoom: -2,
+        maxZoom: 10,
         // 自定义选项经 view 的 controllerProps 原样透传给控制器,
         // deck 的 ControllerOptions 类型未涵盖
         zoomAnchor: (px: number, py: number) => this.rayAnchor(px, py),
+        // 飞行目标反馈:手势锁定锚点时在其上闪一个淡出环
+        onWheelAnchor: (pos: [number, number, number] | null) =>
+          this.flashAnchor(pos),
       } as DeckProps["controller"],
       initialViewState: this.camera.viewState,
       pickingRadius: 5,
@@ -403,10 +403,44 @@ export class Scene {
     this.cb.onViewChange(this.camera.viewState);
     queueMicrotask(() => {
       if (refreshView) this.deck.setProps({ views: this.camera.view() });
-      this.scheduleEdgeRebuild();
       this.render();
     });
     return { ...viewState, ...this.camera.viewState } as ViewStateT;
+  }
+
+  private labelNamesPending = false;
+
+  /** 工作集名字补载:同一时刻只跑一批;完成后重绘。 */
+  private requestLabelNames(ranks: number[]): void {
+    const load = this.cb.loadNames;
+    if (!load || this.labelNamesPending) return;
+    this.labelNamesPending = true;
+    load(ranks)
+      .then(() => this.render())
+      .catch(() => undefined)
+      .finally(() => {
+        this.labelNamesPending = false;
+      });
+  }
+
+  /** 飞行目标反馈:滚轮手势锁定新锚点时,在锚点上闪一个淡出环,
+   * 让"正朝这里飞"可见;真空手势(无锚)清除反馈。 */
+  private flashAnchor(pos: [number, number, number] | null): void {
+    if (!pos || prefersReducedMotion()) {
+      this.anchorFlash = null;
+      return;
+    }
+    this.anchorFlash = { pos, at: performance.now() };
+    cancelAnimationFrame(this.anchorFlashRaf);
+    const tick = (): void => {
+      this.render();
+      if (
+        this.anchorFlash &&
+        performance.now() - this.anchorFlash.at < ANCHOR_FLASH_MS
+      )
+        this.anchorFlashRaf = requestAnimationFrame(tick);
+    };
+    this.anchorFlashRaf = requestAnimationFrame(tick);
   }
 
   /** 滚轮放大的视线锚点：光标射线附近（60px 视锥角内）最近的可见
@@ -476,35 +510,12 @@ export class Scene {
     return true;
   }
 
-  /** 过滤/聚光/图层变化:现在只是 uniform 更新 + 边可见集重建。 */
+  /** 过滤/聚光/图层变化:现在只是 uniform 更新。 */
   recolor(): void {
     if (state.selection !== this.lastSelection) {
       this.lastSelection = state.selection;
       this.startWorkingSetAnim();
     }
-    // 标签 data 只在影响其可见性的过滤变化时重建;
-    // 纯选中/图层切换不触发碰撞检测重算
-    const f = state.filters;
-    const k = `${f.yearMin}|${f.yearMax}|${f.scoreMin}|${[...f.tags].join()}`;
-    if (k !== this.labelFilterKey) {
-      this.labelFilterKey = k;
-      this.styleVersion++;
-    }
-    this.rebuildEdgeSet(true);
-    this.render();
-  }
-
-  /** 骨架边(权重降序,客户端前缀优先)。 */
-  setEdges(edges: Uint32Array): void {
-    this.edges = edges;
-    this.edgePos = new Float32Array(EDGE_CAP * 6);
-    this.rebuildEdgeSet(true);
-    this.render();
-  }
-
-  setLabels(l: LabelData): void {
-    this.labels = l;
-    this.labelCache = {};
     this.render();
   }
 
@@ -520,7 +531,6 @@ export class Scene {
     }
     this.styled = geo.loaded;
     this.syncGpu();
-    this.scheduleEdgeRebuild(true); // 新到几何可能解锁新边,不依赖相机动
     this.render();
   }
 
@@ -543,7 +553,6 @@ export class Scene {
       initialViewState: next,
     });
     this.cb.onViewChange(this.camera.viewState);
-    this.scheduleEdgeRebuild();
     this.render();
   }
 
@@ -579,126 +588,7 @@ export class Scene {
       initialViewState: { ...this.camera.viewState },
     });
     this.cb.onViewChange(this.camera.viewState);
-    this.scheduleEdgeRebuild();
     this.render();
-  }
-
-  // ---- 骨架边可见集:CPU 毫秒级重建(实测 824k 边 3.5ms)----
-  private scheduleEdgeRebuild(force = false): void {
-    this.edgeRebuildForce ||= force;
-    if (this.edgeRebuildTimer) return;
-    this.edgeRebuildTimer = window.setTimeout(() => {
-      this.edgeRebuildTimer = 0;
-      const f = this.edgeRebuildForce;
-      this.edgeRebuildForce = false;
-      this.rebuildEdgeSet(f);
-      this.render();
-    }, 120);
-  }
-
-  private rebuildEdgeSet(force: boolean): void {
-    const { edges, edgePos, geo } = this;
-    if (!edges || !edgePos) return;
-    const vs = this.camera.viewState;
-    const wasOn = this.edgeCount > 0;
-    if (vs.zoom < EDGE_ZOOM) {
-      this.edgeCount = 0;
-      this.edgeData = null;
-      this.edgeCamKey = "";
-      return;
-    }
-    // 相机静止(量化位姿相同)且非强制时跳过:悬停等高频 render 不重扫
-    const camKey = `${vs.target.map((v) => v.toFixed(1)).join()},${vs.zoom.toFixed(2)}`;
-    if (!force && camKey === this.edgeCamKey) return;
-    this.edgeCamKey = camKey;
-    const f = state.filters;
-    const yMin = f.yearMin;
-    const yMax = f.yearMax;
-    const sMin = f.scoreMin;
-    let sel = 0;
-    for (const bIdx of f.tags) sel = (sel | (1 << bIdx)) >>> 0;
-    const yearOn = yMin > 0 || yMax < 9999;
-    const subjFilterOn = yearOn || sMin > 0 || sel !== 0;
-    const { year, key, score, tags } = geo;
-    // 与 isVisible 同判定,掩码预计算后内联(164 万次调用的热路径)
-    const passes = (i: number): boolean => {
-      if ((key[i] ?? 0) >>> 24 !== 1) return true;
-      if (yearOn) {
-        const y = year[i] ?? 0;
-        if (y === 0 || y < yMin || y > yMax) return false;
-      }
-      if (sMin > 0 && (score[i] ?? 0) < sMin) return false;
-      if (sel !== 0 && (((tags[i] ?? 0) & sel) >>> 0) !== sel)
-        return false;
-      return true;
-    };
-    const [tx, ty, tz] = vs.target;
-    // OrbitView 的 zoom=0 对应一世界单位/像素；直接由视口反推
-    // 当前可见世界范围，边搜索不再依赖全图 bbox。
-    const radius =
-      (Math.min(innerWidth, innerHeight) / Math.pow(2, vs.zoom)) * 1.5;
-    const r2 = radius * radius;
-    const pos = geo.positions;
-    let cnt = 0;
-    const n = edges.length / 2;
-    for (let e = 0; e < n && cnt < EDGE_CAP; e++) {
-      const a = edges[e * 2] ?? 0;
-      const b = edges[e * 2 + 1] ?? 0;
-      if (a >= geo.loaded || b >= geo.loaded) continue;
-      // 单端被滤除的边不进可见集
-      if (subjFilterOn && (!passes(a) || !passes(b))) continue;
-      const ax = pos[a * 3] ?? 0;
-      const ay = pos[a * 3 + 1] ?? 0;
-      const az = pos[a * 3 + 2] ?? 0;
-      const bx = pos[b * 3] ?? 0;
-      const by = pos[b * 3 + 1] ?? 0;
-      const bz = pos[b * 3 + 2] ?? 0;
-      const da =
-        (ax - tx) * (ax - tx) + (ay - ty) * (ay - ty) + (az - tz) * (az - tz);
-      const db =
-        (bx - tx) * (bx - tx) + (by - ty) * (by - ty) + (bz - tz) * (bz - tz);
-      if (Math.min(da, db) > r2) continue;
-      const o = cnt * 6;
-      edgePos[o] = ax;
-      edgePos[o + 1] = ay;
-      edgePos[o + 2] = az;
-      edgePos[o + 3] = bx;
-      edgePos[o + 4] = by;
-      edgePos[o + 5] = bz;
-      cnt++;
-    }
-    this.edgeCount = cnt;
-    // 上传量 ∝ 可见数(subarray),data 引用只在重建时更换
-    const view = edgePos.subarray(0, cnt * 6);
-    this.edgeData = {
-      length: cnt,
-      attributes: {
-        getSourcePosition: { value: view, size: 3, stride: 24 },
-        getTargetPosition: { value: view, size: 3, stride: 24, offset: 12 },
-      },
-    };
-    if (!wasOn && cnt > 0) this.startEdgeFade();
-  }
-
-  /** 骨架边淡入；prefers-reduced-motion 时直接到位。 */
-  private startEdgeFade(): void {
-    if (prefersReducedMotion()) {
-      this.edgeOpacity = 1;
-      return;
-    }
-    this.edgeOpacity = 0;
-    const t0 = performance.now();
-    cancelAnimationFrame(this.edgeFadeRaf);
-    const tick = (): void => {
-      this.edgeOpacity = Math.min(
-        1,
-        (performance.now() - t0) / EDGE_FADE_MS,
-      );
-      this.render();
-      if (this.edgeOpacity < 1)
-        this.edgeFadeRaf = requestAnimationFrame(tick);
-    };
-    this.edgeFadeRaf = requestAnimationFrame(tick);
   }
 
   // ---- 工作集动效：级联淡入 + 光环单脉冲 ----
@@ -791,7 +681,7 @@ export class Scene {
           a: selPos,
           b: s.pos,
           label: s.label,
-          alpha: Math.round(90 * k),
+          alpha: Math.round(160 * k),
         });
       });
       // 共同关联:从对比端再画一扇(标签属 A 侧,tooltip 不重复报)
@@ -803,18 +693,35 @@ export class Scene {
             edgeSegs.push({ a: cwPos, b: s.pos, label: "", alpha: 70 });
       }
     }
-    const linePos = new Float32Array(edgeSegs.length * 6);
-    const lineAlpha = new Uint8Array(edgeSegs.length * 4);
+    // 方向梯度:每条边拆成两个半段,亮端 = 关系的目标端。
+    // "← " 前缀表示选中侧是目标(指向选中节点);无标签的
+    // 对比扇没有方向语义,两端等亮。
+    const linePos = new Float32Array(edgeSegs.length * 12);
+    const lineAlpha = new Uint8Array(edgeSegs.length * 8);
     edgeSegs.forEach((sg, i) => {
-      linePos.set(sg.a, i * 6);
-      linePos.set(sg.b, i * 6 + 3);
-      lineAlpha.set([255, 255, 255, sg.alpha], i * 4);
+      const mid: [number, number, number] = [
+        (sg.a[0] + sg.b[0]) / 2,
+        (sg.a[1] + sg.b[1]) / 2,
+        (sg.a[2] + sg.b[2]) / 2,
+      ];
+      const hasDirection = sg.label !== "";
+      const towardSelf = sg.label.startsWith("← ");
+      const aBright = !hasDirection || towardSelf;
+      const bBright = !hasDirection || !towardSelf;
+      const o = i * 12;
+      linePos.set(sg.a, o);
+      linePos.set(mid, o + 3);
+      linePos.set(mid, o + 6);
+      linePos.set(sg.b, o + 9);
+      const dim = Math.round(sg.alpha * 0.2);
+      lineAlpha.set([255, 255, 255, aBright ? sg.alpha : dim], i * 8);
+      lineAlpha.set([255, 255, 255, bBright ? sg.alpha : dim], i * 8 + 4);
     });
     const layers: unknown[] = [
       new LineLayer({
         id: "ws-edges",
         data: {
-          length: edgeSegs.length,
+          length: edgeSegs.length * 2,
           attributes: {
             getSourcePosition: { value: linePos, size: 3, stride: 24 },
             getTargetPosition: {
@@ -830,9 +737,9 @@ export class Scene {
         widthUnits: "pixels",
         pickable: true, // 悬停工作集边时显示解码后的关系名
         onHover: (info: { index: number; x: number; y: number }) => {
-          const lbl =
-            info.index >= 0 ? (edgeSegs[info.index]?.label ?? "") : "";
-          this.cb.onHoverEdge(lbl || null, info.x, info.y);
+          const seg =
+            info.index >= 0 ? edgeSegs[info.index >> 1] : undefined;
+          this.cb.onHoverEdge(seg?.label || null, info.x, info.y);
         },
         parameters: { depthCompare: "always", depthWriteEnabled: false },
       }),
@@ -840,7 +747,7 @@ export class Scene {
       new ScatterplotLayer({
         id: "ws-glow",
         data: { length: 1, attributes: { getPosition: { value: pos, size: 3 } } },
-        getFillColor: [242, 91, 166, 46], // Miku 品红光晕
+        getFillColor: [242, 91, 166, 60], // Miku 品红光晕
         radiusUnits: "common",
         getRadius: WORKING_GLOW_RADIUS,
         radiusMinPixels: 12,
@@ -940,6 +847,28 @@ export class Scene {
           onIconError: () => undefined,
         }),
       );
+    }
+    // 名字最后绘制,浮于光晕/封面之上;任何距离都显示(像素字号)。
+    // 缺失的名字批量补载后重绘。
+    const { nameOf } = this.cb;
+    if (nameOf) {
+      const viewport = this.deck.getViewports()[0];
+      const { layers: nameLayers, missing } = workingLabelLayers(
+        [
+          { rank: sel, pos: selPos },
+          ...shown.map((s) => ({ rank: s.rank, pos: s.pos })),
+        ],
+        edgeSegs,
+        nameOf,
+        (p) => {
+          if (!viewport) return null;
+          const s = viewport.project(p) as number[];
+          return [s[0] ?? 0, s[1] ?? 0];
+        },
+        this.camera.viewState.zoom,
+      );
+      if (missing.length) this.requestLabelNames(missing);
+      layers.push(...nameLayers);
     }
     // 选中后只播放一次 500ms 扩散，避免持续动画干扰浏览。
     if (!reduced && t < PULSE_MS) {
@@ -1091,30 +1020,31 @@ export class Scene {
         },
       } as never),
     ];
-    if (this.edgeCount > 0 && this.edgeData) {
-      layers.push(
-        new LineLayer({
-          id: "context-edges",
-          data: this.edgeData as never,
-          getColor: [255, 255, 255, 16],
-          opacity: this.edgeOpacity,
-          getWidth: EDGE_WIDTHS.context,
-          widthUnits: "pixels",
-        }),
-      );
-    }
-    if (this.labels)
-      layers.push(
-        ...labelLayers(
-          this.labels,
-          this.geo,
-          this.camera.viewState.zoom,
-          (rank) => this.isVisible(rank),
-          this.styleVersion,
-          this.labelCache,
-        ),
-      );
     layers.push(...this.workingSetLayers());
+    const flash = this.anchorFlash;
+    if (flash) {
+      const k = (performance.now() - flash.at) / ANCHOR_FLASH_MS;
+      if (k < 1) {
+        layers.push(
+          new ScatterplotLayer({
+            id: "anchor-flash",
+            data: [flash],
+            getPosition: (d: { pos: [number, number, number] }) => d.pos,
+            filled: false,
+            stroked: true,
+            getLineColor: [170, 214, 255, Math.round(200 * (1 - k))],
+            getLineWidth: 1.5,
+            lineWidthUnits: "pixels",
+            radiusUnits: "pixels",
+            getRadius: 10 + 14 * k,
+            billboard: true,
+            parameters: { depthCompare: "always", depthWriteEnabled: false },
+          }),
+        );
+      } else {
+        this.anchorFlash = null;
+      }
+    }
     this.deck.setProps({ layers: layers as never[] });
   }
 

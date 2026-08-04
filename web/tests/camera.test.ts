@@ -3,6 +3,8 @@ import { test } from "node:test";
 
 import {
   Camera,
+  WheelAnchorLatch,
+  cruiseTarget,
   wheelDeltaToZoom,
   zoomTowardAnchor,
   zoomWithoutRetarget,
@@ -161,6 +163,60 @@ test("anchored zoom-in converges the pivot onto the anchor", () => {
     s.target[2] - anchor[2],
   );
   assert.ok(dist < 1e-4);
+});
+
+test("a wheel gesture latches one anchor for smooth convergence", () => {
+  const latch = new WheelAnchorLatch();
+  let lookups = 0;
+  const lookup =
+    (a: [number, number, number] | null) => (): typeof a => {
+      lookups++;
+      return a;
+    };
+
+  assert.deepEqual(latch.resolve(1000, 100, 100, lookup([1, 2, 3])), [1, 2, 3]);
+  // 同手势(≤400ms、≤24px):沿用首个锚点,不重新解析
+  assert.deepEqual(latch.resolve(1200, 110, 95, lookup([9, 9, 9])), [1, 2, 3]);
+  assert.equal(lookups, 1);
+  // 停顿超时 → 重新解析
+  assert.deepEqual(latch.resolve(1700, 110, 95, lookup([9, 9, 9])), [9, 9, 9]);
+  // 光标移开 → 重新解析
+  assert.deepEqual(latch.resolve(1800, 200, 95, lookup([5, 5, 5])), [5, 5, 5]);
+  assert.equal(lookups, 3);
+});
+
+test("a gesture that starts on the void stays un-anchored", () => {
+  const latch = new WheelAnchorLatch();
+  let lookups = 0;
+  assert.equal(
+    latch.resolve(1000, 0, 0, () => {
+      lookups++;
+      return null;
+    }),
+    null,
+  );
+  assert.equal(
+    latch.resolve(1100, 0, 0, () => {
+      lookups++;
+      return [1, 1, 1];
+    }),
+    null,
+  );
+  assert.equal(lookups, 1);
+});
+
+test("cruise keeps advancing: toward the anchor, through it, then straight", () => {
+  const forward: [number, number, number] = [0, 0, 1];
+  // 锚点在前方:朝锚点飞,步长恒定,可越过锚点
+  let t = cruiseTarget([0, 0, 0], [0, 0, 4], forward, 3);
+  assert.deepEqual(t, [0, 0, 3]);
+  t = cruiseTarget(t, [0, 0, 4], forward, 3);
+  assert.deepEqual(t, [0, 0, 6]);
+  // 锚点已在身后:沿视线直进,不回头
+  t = cruiseTarget(t, [0, 0, 4], forward, 3);
+  assert.deepEqual(t, [0, 0, 9]);
+  // 无锚点:沿视线直进
+  assert.deepEqual(cruiseTarget([1, 2, 3], null, forward, 2), [1, 2, 5]);
 });
 
 test("blank-space wheel zoom preserves the current focus", () => {

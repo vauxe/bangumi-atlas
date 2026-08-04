@@ -28,7 +28,6 @@ test("commits the final camera frame after the view callback returns", async () 
     },
     deck: { setProps: () => events.push("deck") },
     cb: { onViewChange: () => events.push("state") },
-    scheduleEdgeRebuild: () => events.push("edges"),
     render: () => events.push("layers"),
   });
   const handle = Reflect.get(scene, "handleViewStateChange") as (
@@ -46,7 +45,7 @@ test("commits the final camera frame after the view callback returns", async () 
   assert.deepEqual(events, ["state"]);
 
   await new Promise<void>((resolve) => queueMicrotask(resolve));
-  assert.deepEqual(events, ["state", "view", "deck", "edges", "layers"]);
+  assert.deepEqual(events, ["state", "view", "deck", "layers"]);
 });
 
 test("keeps node connections visually subordinate to nodes", () => {

@@ -12,11 +12,14 @@ const FORWARD: [number, number, number] = [0, 0, 1];
 const pack = (...nodes: [number, number, number][]): Float32Array =>
   Float32Array.from(nodes.flat());
 
-test("picks the node with the smallest angle, not the nearest one", () => {
-  // A 距离远但几乎正对射线,B 更近却偏出 26°
-  const positions = pack([2, 0, 4], [0.5, 0, 10]);
-  const rank = nearestAlongRay(positions, 2, ORIGIN, FORWARD, 0.6);
-  assert.equal(rank, 1);
+test("picks the best-aligned node within the nearest depth group", () => {
+  // 同一深度组内(t 相近):夹角小者胜
+  const sameDepth = pack([2, 0, 10], [0.5, 0, 10]);
+  assert.equal(nearestAlongRay(sameDepth, 2, ORIGIN, FORWARD, 0.6), 1);
+  // 正对射线但位于近处目标身后很远的节点不得胜出——
+  // 否则缩放枢轴会被拽穿目标飞向深处("瞬移到节点背后")
+  const behind = pack([2, 0, 4], [0.05, 0, 100]);
+  assert.equal(nearestAlongRay(behind, 2, ORIGIN, FORWARD, 0.6), 0);
 });
 
 test("ignores nodes behind the camera and beyond the cutoff cone", () => {
