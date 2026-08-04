@@ -109,6 +109,7 @@ FACT_ATTRS: dict[str, tuple[str, ...]] = {
 
 # 磁盘元组布局(参与 schema_digest;两端解码器的唯一权威)
 TUPLE_SCHEMAS: dict[str, Any] = {
+    "file": ["bytes", "sha256", "content_addressed_name"],
     "name": ["name", "name_cn|null"],
     "entity": {
         "subject": [
@@ -144,6 +145,10 @@ TUPLE_SCHEMAS: dict[str, Any] = {
     "episode_text_member": {"i": "subject_ids",
                             "t": "[[episode_id, text]]"},
     "search_entry": ["norm", "display", "rank"],
+    "search_node": {
+        "leaf": ["offset", "length"],
+        "internal": ["top_offset", "top_length"],
+    },
 }
 
 
@@ -156,6 +161,54 @@ def canonical_json(value: Any) -> bytes:
 def gzip_member(value: Any, level: int) -> bytes:
     """可复现的独立 gzip 成员(mtime=0,键序规范)。"""
     return gzip.compress(canonical_json(value), compresslevel=level, mtime=0)
+
+
+def require_member_size(
+    member: bytes, label: str, cap: int = MEMBER_CAP
+) -> None:
+    """所有 gzip 成员共用的硬门禁；调用方可用更严格的族上限。"""
+    if len(member) > cap:
+        raise ValueError(
+            f"{label}: gzip member {len(member):,} exceeds member cap "
+            f"{cap:,}"
+        )
+
+
+def gzip_pages(
+    rows: list[Any],
+    level: int,
+    max_rows: int,
+    cap: int = MEMBER_CAP,
+) -> list[bytes]:
+    """按固定行数起步，超限时在行边界确定性二分 gzip 页。"""
+    if max_rows <= 0 or cap <= 0:
+        raise ValueError("gzip page limits must be positive")
+    members: list[bytes] = []
+
+    def emit(chunk: list[Any]) -> None:
+        member = gzip_member(chunk, level)
+        if len(member) > cap and len(chunk) > 1:
+            mid = len(chunk) // 2
+            emit(chunk[:mid])
+            emit(chunk[mid:])
+            return
+        require_member_size(member, "paged rows", cap)
+        members.append(member)
+
+    for start in range(0, len(rows), max_rows):
+        emit(rows[start : start + max_rows])
+    return members
+
+
+def published_object_name(logical_name: str, digest: str) -> str:
+    """把逻辑产物名映射为不可变的完整 SHA-256 物理文件名。"""
+    if "/" in logical_name or "\\" in logical_name:
+        raise ValueError(
+            "published artifacts must use a top-level logical name"
+        )
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ValueError("published artifact digest must be lowercase SHA-256")
+    return f"{digest}-{logical_name}"
 
 
 def entity_key(kind: int, source_id: int) -> int:

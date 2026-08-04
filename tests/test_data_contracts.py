@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 import struct
 import tempfile
 import unittest
@@ -97,6 +98,56 @@ class SiteReleaseContractTests(unittest.TestCase):
         self.assertNotEqual(version, changed)
         with self.assertRaisesRegex(ValueError, "must not contain itself"):
             sr.manifest_version({"version": "x"})
+
+    def test_published_object_name_contains_the_complete_file_digest(
+        self,
+    ) -> None:
+        digest = "ab" * 32
+
+        self.assertEqual(
+            sr.published_object_name("facts.pack", digest),
+            f"{digest}-facts.pack",
+        )
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            sr.published_object_name("facts.pack", "ab")
+        with self.assertRaisesRegex(ValueError, "top-level"):
+            sr.published_object_name("nested/facts.pack", digest)
+
+    def test_member_gate_rejects_every_oversized_gzip_member(self) -> None:
+        sr.require_member_size(b"x" * sr.MEMBER_CAP, "boundary")
+
+        with self.assertRaisesRegex(ValueError, "member cap"):
+            sr.require_member_size(
+                b"x" * (sr.MEMBER_CAP + 1),
+                "oversized page",
+            )
+
+    def test_gzip_pages_split_deterministically_at_the_member_cap(
+        self,
+    ) -> None:
+        rows = [[i, f"row-{i:04d}-" * 8] for i in range(16)]
+
+        members = sr.gzip_pages(rows, level=6, max_rows=16, cap=100)
+        decoded = [
+            row
+            for member in members
+            for row in json.loads(gzip.decompress(member))
+        ]
+
+        self.assertGreater(len(members), 1)
+        self.assertTrue(all(len(member) <= 100 for member in members))
+        self.assertEqual(decoded, rows)
+
+    def test_search_internal_node_is_only_a_bounded_autocomplete_projection(
+        self,
+    ) -> None:
+        self.assertEqual(
+            sr.TUPLE_SCHEMAS["search_node"],
+            {
+                "leaf": ["offset", "length"],
+                "internal": ["top_offset", "top_length"],
+            },
+        )
 
     def test_field_policy_declares_every_source_field(self) -> None:
         for table, fields in sr.FIELD_POLICY.items():

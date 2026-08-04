@@ -74,7 +74,6 @@ async function boot(): Promise<void> {
     manifest,
     data,
     reportError,
-    saveData,
     walk: (rank) => runTask(select(rank, "fly"), "节点加载"),
     arm: (kind, fromRank, fromKey) => {
       pendingLink = { kind, fromRank, fromKey };

@@ -87,7 +87,6 @@ function makeDrawer(
         character_role: {},
       }),
     },
-    saveData: () => true,
     walk: () => undefined,
     arm: () => undefined,
     reportError: () => undefined,
@@ -200,6 +199,57 @@ test("reports asynchronous drawer failures through the page error channel", asyn
   await new Promise<void>((resolve) => queueMicrotask(resolve));
 
   assert.deepEqual(failures, [["关系分页", failure]]);
+});
+
+test("keeps an expanded summary out of the DOM until each segment is requested", () => {
+  const element = new FakeDrawerElement();
+  const drawer = makeDrawer(element);
+  Reflect.set(drawer, "cur", {
+    rank: 0,
+    key: (2 << 24) | 1,
+    entity: {
+      kind: "person",
+      key: (2 << 24) | 1,
+      name: "测试人物",
+      nameCn: "",
+      type: 1,
+      career: [],
+      comments: 0,
+      collects: 0,
+      hasSummary: true,
+      hasInfobox: false,
+    },
+    mappings: {
+      fact_labels: {},
+      subject_type: {},
+      platform: {},
+      person_type: { "1": "个人" },
+      character_role: {},
+    },
+    facts: [],
+    factsTotal: 0,
+    factsNext: null,
+    expanded: false,
+    loading: false,
+    eps: null,
+    epsTotal: 0,
+    epsNext: null,
+    epsExpanded: false,
+    summary: {
+      s: "ready",
+      text: `${"a".repeat(10_001)}TAIL`,
+      shown: 10_000,
+    },
+    summaryOpen: true,
+    infobox: { s: "idle" },
+    descs: new Map(),
+  });
+
+  const rerender = Reflect.get(drawer, "rerender") as () => void;
+  rerender.call(drawer);
+
+  assert.doesNotMatch(element.innerHTML, /TAIL/);
+  assert.match(element.innerHTML, /继续显示/);
 });
 
 test("renders every published common neighbor instead of dropping the tail", async () => {

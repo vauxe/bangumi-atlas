@@ -73,8 +73,8 @@ export interface Manifest {
   /** top-32 元标签名,下标 = tags.bin 位图的 bit 序。 */
   tags: string[];
   layout: Record<string, unknown> | null;
-  /** 文件名 -> [bytes, sha256];数据 URL 以该文件自身摘要寻址。 */
-  files: Record<string, [number, string]>;
+  /** 逻辑文件名 -> [bytes, sha256, 不可变物理文件名]。 */
+  files: Record<string, [number, string, string]>;
   core_bytes: number;
   total_bytes: number;
   n_files: number;
@@ -248,10 +248,15 @@ export interface Page<T> {
 }
 
 export type LongTextRef =
-  | { kind: "entity-summary"; entity: number }
-  | { kind: "entity-infobox"; entity: number }
-  | { kind: "episode-description"; subject: number; episode: number }
-  | { kind: "fact-summary"; fact: number };
+  | { kind: "entity-summary"; entity: number; present: boolean }
+  | { kind: "entity-infobox"; entity: number; present: boolean }
+  | {
+      kind: "episode-description";
+      subject: number;
+      episode: number;
+      present: boolean;
+    }
+  | { kind: "fact-summary"; fact: number; present: boolean };
 
 export type LongTextResult =
   | { kind: "present"; text: string }
@@ -270,7 +275,7 @@ export type SearchEntry = [norm: string, display: string, rank: number];
 
 export type SearchNode =
   | { l: [number, number] }
-  | { t: [number, number]; p?: [number, number][] };
+  | { t: [number, number] };
 
 export const TYPE_NAMES = ["", "作品", "人物", "角色"] as const;
 // 萌系三色(天蓝/珊瑚/薄荷),暗紫底 #181226 上通过

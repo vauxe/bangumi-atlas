@@ -29,12 +29,18 @@ function testManifest(
   files: Record<string, [number, string]>,
   nNodes = 1,
 ): Manifest {
-  const completeFiles = {
+  const logicalFiles = {
     "positions.bin": [nNodes * 12, "0".repeat(64)] as [number, string],
     "names.idx": [8, "0".repeat(64)] as [number, string],
     "names.pack": [1, hash(new Uint8Array([0]))] as [number, string],
     ...files,
   };
+  const completeFiles = Object.fromEntries(
+    Object.entries(logicalFiles).map(([name, [size, digest]]) => [
+      name,
+      [size, digest, `${digest}-${name}`],
+    ]),
+  ) as unknown as Manifest["files"];
   return {
     version: "0".repeat(64),
     schema: "structural-site-v1",
@@ -127,6 +133,15 @@ test("rejects manifests from the obsolete det/adj generation", async () => {
   globalThis.fetch = (async () =>
     new Response(JSON.stringify(legacy))) as typeof fetch;
   await assert.rejects(loadManifest(), /structural-site-v1/);
+});
+
+test("rejects a malformed physical-file tuple at the manifest boundary", async () => {
+  const malformed = testManifest({});
+  (malformed.files as Record<string, unknown>)["key.bin"] = null;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(malformed))) as typeof fetch;
+
+  await assert.rejects(loadManifest(), /完整 SHA-256 内容寻址物理名/);
 });
 
 test("rejects obsolete geometry manifests before streaming", async () => {
@@ -246,6 +261,27 @@ test("treats a changed Content-Range total as a replaced release", async () => {
   );
 });
 
+test("uses immutable object names and stops when an old object disappears", async () => {
+  const value: NameRow[] = [["old", null]];
+  const compressed = gzipSync(JSON.stringify(value));
+  const digest = hash(compressed);
+  const manifest = testManifest({
+    "facts.pack": [compressed.byteLength, digest],
+  });
+  let requestedPath = "";
+  await installFetch(manifest, async (path) => {
+    requestedPath = path;
+    return new Response(null, { status: 404 });
+  });
+
+  await assert.rejects(
+    member("structure", "facts.pack", 0, compressed.byteLength),
+    (error: unknown) => error instanceof ReleaseChangedError,
+  );
+  assert.equal(requestedPath, `/data/${digest}-facts.pack`);
+  assert.equal(releaseWasReplaced(), true);
+});
+
 test("reads an exact xyz float32 position by rank", async () => {
   const positions = new Uint8Array(
     new Float32Array([1.25, -2.5, 3.5, 4.75, 5.25, -6.5]).buffer,
@@ -285,8 +321,11 @@ test("streams complete xyz geometry without planar expansion", async () => {
     metadata[path] = [bytes.byteLength, hash(bytes)];
   const manifest = testManifest(metadata, 2);
   await installFetch(manifest, async (path) => {
-    const name = path.slice(path.lastIndexOf("/") + 1);
-    const bytes = artifacts[name];
+    const physicalName = path.slice(path.lastIndexOf("/") + 1);
+    const logicalName = Object.entries(manifest.files).find(
+      ([, meta]) => meta[2] === physicalName,
+    )?.[0];
+    const bytes = logicalName ? artifacts[logicalName] : undefined;
     assert.ok(bytes);
     return new Response(bytes.buffer as ArrayBuffer);
   });
