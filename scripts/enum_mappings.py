@@ -98,9 +98,7 @@ def validate_mapping_snapshot(mappings: Path) -> str:
     ):
         raise ValueError(f"{MAPPING_MANIFEST} has invalid revision")
     digests = manifest.get("files")
-    if not isinstance(digests, dict) or set(digests) != set(
-        MAPPING_FILENAMES
-    ):
+    if not isinstance(digests, dict) or set(digests) != set(MAPPING_FILENAMES):
         raise ValueError(
             f"{MAPPING_MANIFEST} does not list the exact mapping set"
         )

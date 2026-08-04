@@ -36,11 +36,13 @@ class SiteReleaseContractTests(unittest.TestCase):
 
     def test_canonical_fact_keeps_text_attributes(self) -> None:
         base = sr.canonical_fact(
-            "VOICE_CREDIT", ((2 << 24) | 1, (3 << 24) | 2, (1 << 24) | 3),
+            "VOICE_CREDIT",
+            ((2 << 24) | 1, (3 << 24) | 2, (1 << 24) | 3),
             (0, ""),
         )
         with_text = sr.canonical_fact(
-            "VOICE_CREDIT", ((2 << 24) | 1, (3 << 24) | 2, (1 << 24) | 3),
+            "VOICE_CREDIT",
+            ((2 << 24) | 1, (3 << 24) | 2, (1 << 24) | 3),
             (0, "备注"),
         )
         # 仅文本不同的两行是两个事实,不能因侧车另存而合并
@@ -195,9 +197,9 @@ class SiteContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stub"):
             validate_layout_report({**report, "stub": True})
         self.assertIs(
-            validate_layout_report(
-                {**report, "stub": True}, allow_stub=True
-            )["stub"],
+            validate_layout_report({**report, "stub": True}, allow_stub=True)[
+                "stub"
+            ],
             True,
         )
         with self.assertRaisesRegex(ValueError, "three-dimensional"):

@@ -74,9 +74,7 @@ def main() -> None:
                 sys.exit(f"zip member escapes extract dir: {m}")
         zf.extractall(DUMP_DIR)
     # 数据版本落盘,烘焙 manifest 以此为缓存寻址依据
-    (DUMP_DIR / "VERSION").write_text(
-        Path(latest["name"]).stem + "\n"
-    )
+    (DUMP_DIR / "VERSION").write_text(Path(latest["name"]).stem + "\n")
     print("done; next: uv run python scripts/build_db.py")
 
 

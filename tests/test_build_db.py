@@ -183,9 +183,7 @@ class ParquetProjectionTests(unittest.TestCase):
             dump.mkdir()
             for name in build_db.EXPECTED_FIELDS:
                 (dump / f"{name}.jsonlines").write_bytes(b"")
-            (dump / "subject.jsonlines").write_text(
-                '{"id":1,"type":1}\n'
-            )
+            (dump / "subject.jsonlines").write_text('{"id":1,"type":1}\n')
             (dump / "person.jsonlines").write_text(
                 '{"id":2,"name":"legacy","type":0}\n'
             )
@@ -196,8 +194,7 @@ class ParquetProjectionTests(unittest.TestCase):
                 '{"id":4,"subject_id":1,"type":7}\n'
             )
             (dump / "person-characters.jsonlines").write_text(
-                '{"person_id":2,"subject_id":1,"character_id":3,'
-                '"type":7}\n'
+                '{"person_id":2,"subject_id":1,"character_id":3,"type":7}\n'
             )
             mappings = (
                 {"*": {}},

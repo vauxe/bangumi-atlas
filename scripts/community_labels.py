@@ -22,16 +22,13 @@ def build_community_labels(
         raise ValueError("community label arrays must align")
 
     valid = communities != 0xFFFF
-    community_ids, inverse = np.unique(
-        communities[valid], return_inverse=True
-    )
+    community_ids, inverse = np.unique(communities[valid], return_inverse=True)
     sums = np.zeros((len(community_ids), 3), dtype=np.float64)
     np.add.at(sums, inverse, coordinates[valid])
     counts = np.bincount(inverse)
     centers = {
         int(community): [
-            round(float(value), 1)
-            for value in sums[index] / counts[index]
+            round(float(value), 1) for value in sums[index] / counts[index]
         ]
         for index, community in enumerate(community_ids)
     }
