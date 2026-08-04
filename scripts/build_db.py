@@ -9,16 +9,15 @@ import argparse
 import shutil
 import sys
 import time
-import urllib.request
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any, cast
 
+import enum_mappings
 import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
-import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 DUMP = ROOT / "data" / "dump"
@@ -27,6 +26,11 @@ PARQUET = ROOT / "data" / "parquet"
 DB_PATH = ROOT / "db" / "bangumi.lb"
 
 SUBJECT_TYPES = {1: "书籍", 2: "动画", 3: "音乐", 4: "游戏", 6: "三次元"}
+# Source: https://bangumi.github.io/api/dist.json
+PERSON_TYPES = {1, 2, 3}
+CHARACTER_ROLES = {1, 2, 3, 4}
+# Source: https://github.com/bangumi/Archive/blob/master/README.md
+EPISODE_TYPES = set(range(7))
 # 4-6 未见于 Archive README,经公开 API 实测确认(api.bgm.tv relation 字段)
 CHARACTER_APPEAR_TYPES = {
     1: "主角",
@@ -37,63 +41,20 @@ CHARACTER_APPEAR_TYPES = {
     6: "声库",
 }
 
-MAPPING_FILES = (
-    "subject_relations",
-    "subject_staffs",
-    "person_relations",
-    "subject_platforms",
-)
-MAPPING_URL = "https://raw.githubusercontent.com/bangumi/common/master/{}.yml"
-
-# enum codes that fail to decode, keyed by (edge_table, subject_type, code);
+# enum codes outside the current contract, keyed by (scope, namespace, code);
 # reported at the end of the parquet stage so mapping staleness is loud
-unknown_codes: Counter[tuple[str, int | str, int]] = Counter()
+unknown_codes: Counter[tuple[str, int | str, int | None]] = Counter()
 
-# subject_type (or '*' / prsn / crt) -> enum code -> {cn/en/...}
-EnumMap = dict[Any, dict[Any, dict[str, Any]]]
-
-
-def fetch_mappings() -> None:
-    """Refresh enum mapping snapshots from bangumi/common.
-
-    A failed or invalid download keeps the existing snapshot, so offline
-    builds still work — but never silently: every outcome is printed.
-    """
-    MAPPINGS.mkdir(parents=True, exist_ok=True)
-    for name in MAPPING_FILES:
-        path = MAPPINGS / f"{name}.yml"
-        try:
-            with urllib.request.urlopen(
-                MAPPING_URL.format(name), timeout=15
-            ) as resp:
-                data = resp.read()
-            yaml.safe_load(data)  # reject truncated/invalid downloads
-            changed = not path.exists() or path.read_bytes() != data
-            path.write_bytes(data)
-            print(f"  {name}.yml: {'updated' if changed else 'unchanged'}")
-        except (OSError, yaml.YAMLError) as e:
-            if not path.exists():
-                sys.exit(
-                    f"  {name}.yml: download failed and no local "
-                    f"snapshot exists: {e}"
-                )
-            print(f"  {name}.yml: fetch failed ({e}), using local snapshot")
+def validate_mapping_snapshot() -> str:
+    return enum_mappings.validate_mapping_snapshot(MAPPINGS)
 
 
-def load_mappings() -> tuple[EnumMap, EnumMap, EnumMap, EnumMap]:
-    def load(name: str) -> dict[str, Any]:
-        return yaml.safe_load((MAPPINGS / f"{name}.yml").read_text())
+def fetch_mappings() -> str:
+    return enum_mappings.fetch_mappings(MAPPINGS)
 
-    relations = load("subject_relations")["relations"]
-    staffs = load("subject_staffs")["staffs"]
-    platforms = load("subject_platforms")["platforms"]
-    person_relations = load("person_relations")["relations"]
-    # codes are namespaced by subject type, but cross-media edges (e.g.
-    # anime -> artbook) carry codes from the target type's namespace, so
-    # keep a merged table as fallback
-    relations["*"] = {k: v for m in relations.values() for k, v in m.items()}
-    staffs["*"] = {k: v for m in staffs.values() for k, v in m.items()}
-    return relations, staffs, platforms, person_relations
+
+def load_mappings() -> enum_mappings.MappingTables:
+    return enum_mappings.load_mappings(MAPPINGS)
 
 
 # Fields this script imports, per source file. Anything beyond this contract
@@ -244,7 +205,10 @@ def write_parquet(
 
 
 def build_parquet() -> dict[str, int]:
-    relations, staffs, platforms, person_relations = load_mappings()
+    unknown_codes.clear()
+    relations, staffs, platforms, person_relations, voice_roles = (
+        load_mappings()
+    )
     PARQUET.mkdir(parents=True, exist_ok=True)
     stats: dict[str, int] = {}
 
@@ -291,7 +255,7 @@ def build_parquet() -> dict[str, int]:
         if plat_ns is not None and r.get("platform") and not plat:
             unknown_codes[("Subject.platform", stype, r["platform"])] += 1
         if stype not in SUBJECT_TYPES:
-            unknown_codes[("Subject.type_name", stype, stype)] += 1
+            unknown_codes[("Subject.type", "*", stype)] += 1
         cols["id"].append(sid)
         cols["type"].append(stype)
         cols["type_name"].append(SUBJECT_TYPES.get(stype, str(stype)))
@@ -363,9 +327,12 @@ def build_parquet() -> dict[str, int]:
         if r["id"] in person_ids:
             continue
         person_ids.add(r["id"])
+        person_type = r.get("type")
+        if person_type not in PERSON_TYPES:
+            unknown_codes[("Person.type", "*", person_type)] += 1
         cols["id"].append(r["id"])
         cols["name"].append(r.get("name") or "")
-        cols["type"].append(r.get("type"))
+        cols["type"].append(person_type)
         cols["career"].append(r.get("career") or [])
         cols["comments"].append(r.get("comments", 0))
         cols["collects"].append(r.get("collects", 0))
@@ -402,9 +369,12 @@ def build_parquet() -> dict[str, int]:
         if r["id"] in character_ids:
             continue
         character_ids.add(r["id"])
+        role = r.get("role")
+        if role not in CHARACTER_ROLES:
+            unknown_codes[("Character.role", "*", role)] += 1
         cols["id"].append(r["id"])
         cols["name"].append(r.get("name") or "")
-        cols["role"].append(r.get("role"))
+        cols["role"].append(role)
         cols["comments"].append(r.get("comments", 0))
         cols["collects"].append(r.get("collects", 0))
         cols["summary"].append(r.get("summary") or "")
@@ -444,6 +414,9 @@ def build_parquet() -> dict[str, int]:
         if r["id"] in episode_ids:
             continue
         episode_ids.add(r["id"])
+        episode_type = r.get("type")
+        if episode_type not in EPISODE_TYPES:
+            unknown_codes[("Episode.type", "*", episode_type)] += 1
         cols["id"].append(r["id"])
         cols["name"].append(r.get("name") or "")
         cols["name_cn"].append(r.get("name_cn") or "")
@@ -453,7 +426,7 @@ def build_parquet() -> dict[str, int]:
         cols["duration"].append(r.get("duration") or "")
         sort = r.get("sort")
         cols["sort"].append(float(sort) if sort is not None else None)
-        cols["type"].append(r.get("type"))
+        cols["type"].append(episode_type)
         # kept on the node too: for orphan episodes (subject deleted) the
         # edge below is skipped and this is the only record of ownership
         cols["subject_id"].append(r["subject_id"])
@@ -606,11 +579,14 @@ def build_parquet() -> dict[str, int]:
                 continue
             if r["subject_id"] not in subject_type:
                 voiced_dangling_subject += 1
+            voice_type = r.get("type", 0)
+            if voice_type not in voice_roles:
+                unknown_codes[("VOICED.type", "prsn_cv", voice_type)] += 1
             yield (
                 pid,
                 cid,
                 r["subject_id"],
-                r.get("type", 0),
+                voice_type,
                 r.get("summary") or "",
             )
 
@@ -800,11 +776,18 @@ def report_unknown_codes() -> None:
         return
     total = sum(unknown_codes.values())
     print(
-        f"  WARNING: {total:,} edges with undecodable enum codes "
-        f"(stale data/mappings/ snapshot or legacy dirty data):"
+        f"  WARNING: {total:,} records with enum codes outside the current "
+        f"contract (stale mappings or legacy dirty data):"
     )
-    for (table, stype, code), n in sorted(unknown_codes.items()):
-        print(f"    {table} subject_type={stype} code={code}: {n:,} edges")
+    entries = sorted(
+        unknown_codes.items(),
+        key=lambda item: tuple(str(part) for part in item[0]),
+    )
+    for (scope, namespace, code), count in entries:
+        print(
+            f"    {scope} namespace={namespace} code={code}: "
+            f"{count:,} records"
+        )
 
 
 if __name__ == "__main__":
@@ -828,17 +811,17 @@ if __name__ == "__main__":
     t0 = time.time()
     if not cli.skip_parquet:
         if cli.offline:
-            missing = [
-                f"{name}.yml"
-                for name in MAPPING_FILES
-                if not (MAPPINGS / f"{name}.yml").exists()
-            ]
-            if missing:
+            try:
+                revision = validate_mapping_snapshot()
+            except ValueError as error:
                 sys.exit(
-                    f"--offline 需要本地映射快照,缺失:{missing};"
-                    f"先联网跑一次(不带 --offline)生成 data/mappings/"
+                    "--offline requires a verified mapping snapshot: "
+                    f"{error}; run once without --offline to refresh it"
                 )
-            print("[阶段 0] mappings: --offline, using local snapshot")
+            print(
+                "[阶段 0] mappings: --offline, using verified "
+                f"bangumi/common revision {revision}"
+            )
         else:
             print("[阶段 0] refresh enum mappings from bangumi/common")
             fetch_mappings()

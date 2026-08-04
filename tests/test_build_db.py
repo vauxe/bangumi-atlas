@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -11,7 +14,52 @@ import ladybug as lb
 import orjson
 import pyarrow.parquet as pq
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+
 from scripts import build_db
+
+
+def write_mapping_snapshot(directory: Path) -> None:
+    files = {
+        "subject_relations.yml": b"relations: {}\n",
+        "subject_staffs.yml": b"staffs: {}\n",
+        "subject_platforms.yml": b"platforms: {}\n",
+        "person_relations.yml": (
+            b"relations:\n  prsn: {}\n  prsn_cv: {}\n  crt: {}\n"
+        ),
+    }
+    for name, data in files.items():
+        (directory / name).write_bytes(data)
+    manifest = {
+        "schema_version": 1,
+        "source": "https://github.com/bangumi/common",
+        "revision": "a" * 40,
+        "files": {
+            name: hashlib.sha256(data).hexdigest()
+            for name, data in files.items()
+        },
+    }
+    (directory / "manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+
+class MappingSnapshotTests(unittest.TestCase):
+    def test_snapshot_digest_detects_stale_or_mixed_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mappings = Path(directory)
+            write_mapping_snapshot(mappings)
+
+            with patch.object(build_db, "MAPPINGS", mappings):
+                revision = build_db.validate_mapping_snapshot()
+                self.assertEqual(revision, "a" * 40)
+                (mappings / "subject_staffs.yml").write_text(
+                    "staffs: {1: {}}\n"
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "subject_staffs.yml.*digest mismatch"
+                ):
+                    build_db.validate_mapping_snapshot()
 
 
 class SourceSchemaTests(unittest.TestCase):
@@ -90,6 +138,7 @@ class ParquetProjectionTests(unittest.TestCase):
                 {"*": {}},
                 {1: {1002: {"type_cn": "小说"}}},
                 {},
+                {},
             )
 
             with (
@@ -125,6 +174,57 @@ class ParquetProjectionTests(unittest.TestCase):
             finally:
                 connection.close()
                 database.close()
+
+    def test_all_raw_enum_fields_report_values_outside_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dump = root / "dump"
+            parquet = root / "parquet"
+            dump.mkdir()
+            for name in build_db.EXPECTED_FIELDS:
+                (dump / f"{name}.jsonlines").write_bytes(b"")
+            (dump / "subject.jsonlines").write_text(
+                '{"id":1,"type":1}\n'
+            )
+            (dump / "person.jsonlines").write_text(
+                '{"id":2,"name":"legacy","type":0}\n'
+            )
+            (dump / "character.jsonlines").write_text(
+                '{"id":3,"name":"unknown","role":7}\n'
+            )
+            (dump / "episode.jsonlines").write_text(
+                '{"id":4,"subject_id":1,"type":7}\n'
+            )
+            (dump / "person-characters.jsonlines").write_text(
+                '{"person_id":2,"subject_id":1,"character_id":3,'
+                '"type":7}\n'
+            )
+            mappings = (
+                {"*": {}},
+                {"*": {}},
+                {},
+                {},
+                {code: {"cn": str(code)} for code in range(7)},
+            )
+
+            with (
+                patch.object(build_db, "DUMP", dump),
+                patch.object(build_db, "PARQUET", parquet),
+                patch.object(build_db, "load_mappings", return_value=mappings),
+            ):
+                build_db.build_parquet()
+                first = build_db.unknown_codes.copy()
+                build_db.build_parquet()
+                second = build_db.unknown_codes.copy()
+
+            expected = {
+                ("Person.type", "*", 0): 1,
+                ("Character.role", "*", 7): 1,
+                ("Episode.type", "*", 7): 1,
+                ("VOICED.type", "prsn_cv", 7): 1,
+            }
+            self.assertEqual(dict(first), expected)
+            self.assertEqual(dict(second), expected)
 
 
 class DatabaseReplacementTests(unittest.TestCase):

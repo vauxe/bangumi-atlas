@@ -1,0 +1,11 @@
+{
+  "files": {
+    "person_relations.yml": "d9c56dc55836440010fec5eb384aaa2eeb2bae78063e6a41cf047890d800108e",
+    "subject_platforms.yml": "74a64b22ffcce7b63d5fa1e1cfaf84bc4635fc3a8f1c84a08820e027906aa9a2",
+    "subject_relations.yml": "f3cd4438f70be42f2886cfc54a2cdb6588ad72c015267e1b8446b900db47a92c",
+    "subject_staffs.yml": "d12e575c0f28f2b9793027bced2ecc6d3857ecd080839d5917023f7eca9d8547"
+  },
+  "revision": "2ee87b9995353f77cf02e390e8635bf97dbc1fa2",
+  "schema_version": 1,
+  "source": "https://github.com/bangumi/common"
+}
