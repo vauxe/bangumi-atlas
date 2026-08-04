@@ -32,6 +32,7 @@ from site_contracts import (
     validate_layout_report,
     validate_name_pack,
 )
+from world_scale import CANONICAL_WORLD_SPAN, normalize_world_scale
 
 ROOT = Path(__file__).resolve().parent.parent
 PARQUET = ROOT / "data" / "parquet"
@@ -321,8 +322,14 @@ def main() -> None:  # noqa: PLR0915
     coords_r = np.stack(
         [lay["x"][order], lay["y"][order], lay["z"][order]], axis=1
     )
+    # UMAP 输出尺度任意;发布坐标归一到规范世界跨度,保证探索端
+    # 绝对 zoom 档位(标签切换/骨架边显隐/聚焦层级)的既定语义
+    coords_r, world_scale = normalize_world_scale(coords_r)
     rank_of_key: dict[int, int] = {int(k): i for i, k in enumerate(key_r)}
-    log(f"节点 {n:,},rank 排序完成(dump 版本 {dump_version})")
+    log(
+        f"节点 {n:,},rank 排序完成(dump 版本 {dump_version}),"
+        f"世界尺度 ×{world_scale:.3f} → 跨度 {CANONICAL_WORLD_SPAN:g}"
+    )
 
     # ---- 实体结构列(文本只取存在位;字符串本体走侧车流程)----
     sub_t = pq.read_table(
