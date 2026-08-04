@@ -1,9 +1,12 @@
-"""Stable contracts shared by the site-data baker and its tests."""
+"""Stable contracts shared by the site-data baker and its tests.
+
+SiteRelease 的格式契约(元组、成员、门禁)在 scripts/site_release.py;
+这里只保留布局报告、名字表和来源版本这类跨阶段的通用校验。
+"""
 
 from __future__ import annotations
 
 import gzip
-import hashlib
 import struct
 import zlib
 from itertools import pairwise
@@ -11,37 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import orjson
-
-
-def _canonical_json(value: Any) -> bytes:
-    return orjson.dumps(
-        value,
-        option=orjson.OPT_NON_STR_KEYS | orjson.OPT_SORT_KEYS,
-    )
-
-
-def reverse_navigation_label(label: str) -> str:
-    """Label a synthesized reverse adjacency without inventing reciprocity."""
-
-    return f"← {label or '关联'}"
-
-
-def gzip_json(value: Any, compresslevel: int = 6) -> bytes:
-    """Encode JSON into reproducible gzip bytes."""
-
-    return gzip.compress(
-        _canonical_json(value),
-        compresslevel=compresslevel,
-        mtime=0,
-    )
-
-
-def artifact_version(dump_version: str, contract: dict[str, Any]) -> str:
-    """Derive the cache identity from the complete published contract."""
-
-    payload = {"dump_version": dump_version, "contract": contract}
-    digest = hashlib.sha256(_canonical_json(payload)).hexdigest()[:16]
-    return f"{dump_version}-{digest}"
 
 
 def validate_layout_report(

@@ -22,14 +22,15 @@ export interface State {
   /** 与 selection 配对的稳定全局身份;绝不从未完成的流式缓冲反推。 */
   selectionKey: number | null;
   neighbors: number[]; // 工作集邻居 ranks(top-50 已亮)
-  /** 与 neighbors 对齐的解码关系 labelId(工作集边 tooltip 用)。 */
-  neighborLabels: number[];
+  /** 与 neighbors 对齐的解码关系显示文本(工作集边 tooltip 用);
+   * 反向文案与颜色是 Scene Model 显示规则,不是数据事实。 */
+  neighborLabels: string[];
   /** 共同关联的另一端(场景从它向邻居画第二扇边)。 */
   compareWith: number | null;
   /** 最短路径链(场景画链式边并抑制默认扇形)。 */
   path: number[];
-  /** path 相邻两点间的关系 labelId(链边 tooltip)。 */
-  pathLabels: number[];
+  /** path 相邻两点间的关系显示文本(链边 tooltip)。 */
+  pathLabels: string[];
   /** 当前共同关联/路径查询的稳定起点身份。 */
   link: LinkState | null;
   filters: Filters;

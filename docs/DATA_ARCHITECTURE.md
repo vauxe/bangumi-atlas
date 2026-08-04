@@ -6,9 +6,9 @@
 [EXPLORER_ARCHITECTURE.md](EXPLORER_ARCHITECTURE.md)。数据版本、规模和耗时只记录在
 生成产物与构建日志中，不在设计文档中维护。
 
-分层发布完整结构语义和按需长文本的后续方案见
-[结构化站点数据与按需长文本设计](STRUCTURAL_SITE_DATA_DESIGN.md)。该方案尚未实现；
-本文继续描述当前管道与产物。
+站点数据层（SiteRelease：结构核心 + 按需长文本侧车）的完整格式契约与
+容量预算见
+[结构化站点数据与按需长文本设计](STRUCTURAL_SITE_DATA_DESIGN.md)。
 
 ## 1. 架构概览
 
@@ -158,13 +158,14 @@ Parquet 是面向建图的类型化投影，不能反向还原为原始 JSONL。
   重新解释数据时，以这两个产物为来源。
 - `data/parquet` 和 LadybugDB 保存已声明 schema 的建图投影。重复记录和悬空关系会被
   筛选，`null` 与默认值的区别也可能被归一，因此不能将这些产物视为无损原始快照。
-- `site/data` 是面向探索器的有损投影，只发布搜索、过滤、布局、详情和关系导航所需内容。
-  例如 Episode 不进入 Canvas，`infobox` 和部分关系属性不进入站点数据。
-- `edges.bin` 是全局语境用的抽样骨架；完整的已发布邻接通过 `adj.pack` 按需读取。
+- `site/data` 是 SiteRelease：结构核心保留类型化 Parquet 的全部实体、事实和分集
+  字段语义，简介、`infobox`、分集介绍等长字符串进入按需文本侧车。Episode 仍不进入
+  Canvas；字段级 core/sidecar 策略由 manifest `field_policy` 声明。
+- `edges.bin` 是全局语境用的抽样骨架；完整的类型化事实通过 `facts.pack` 按需读取。
 
-因此，“原始数据仍可取得”和“浏览器可查询全部原始字段”是两个不同承诺；本项目只承诺
-前者，站点投影的具体边界由
-[EXPLORER_ARCHITECTURE.md](EXPLORER_ARCHITECTURE.md) 定义。
+SiteRelease 能恢复类型化 Parquet 的字段语义，但不是原始快照的字节级副本；重新解释
+数据仍以原始快照为准。站点格式与浏览器契约由
+[STRUCTURAL_SITE_DATA_DESIGN.md](STRUCTURAL_SITE_DATA_DESIGN.md) 定义。
 
 节点的主要查询字段：
 
@@ -183,7 +184,8 @@ Parquet 是面向建图的类型化投影，不能反向还原为原始 JSONL。
 | `scripts/build_db.py` | 生成 Parquet，在临时路径 COPY 全量建库，完成后原子替换正式数据库 |
 | `scripts/verify_db.py` | 执行独立计数、全字段内容核验和查询冒烟测试 |
 | `scripts/layout.py` | 从 Parquet 生成 Canvas 3D 拓扑布局 |
-| `scripts/bake_site.py` | 从 Parquet 和布局生成静态站点数据 |
+| `scripts/bake_site.py` | 从 Parquet 和布局生成 SiteRelease 静态站点数据 |
+| `scripts/verify_site.py` | 独立对账 SiteRelease 与 Parquet 的内容与门禁 |
 
 `build_db.py` 包含三个阶段：
 

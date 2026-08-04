@@ -1,18 +1,17 @@
-/** 数据加载:几何 SoA 流式渐进、名字按 rank 分块、分片按需 fetch(带缓存)、
- * Range 按 rank 点查、热分片预取。全部数据请求携带 ?v=(防缓存错配)。 */
+/** 数据加载:几何 SoA 流式渐进、gzip 成员按 Range 点查、分族计权
+ * LRU 缓存、发布切换检测。全部数据请求以该文件自身 SHA-256 寻址,
+ * 字节未变的文件可跨发布复用缓存。 */
 
 import type {
-  AdjEntry,
-  AdjPage,
-  Detail,
-  EpisodeRow,
   Geometry,
   Manifest,
   NameRow,
   Names,
   SearchEntry,
+  SearchNode,
 } from "./types";
 import { AsyncMemo } from "./async-memo";
+import { WeightedLru } from "./cache";
 import {
   assertByteLength,
   assertContentRange,
@@ -20,7 +19,6 @@ import {
 } from "./data-integrity";
 
 const BASE = "data";
-let version = "";
 let manifestRef: Manifest | null = null;
 
 export class SiteDataContractError extends Error {
@@ -30,11 +28,60 @@ export class SiteDataContractError extends Error {
   }
 }
 
-/** manifest 之后的一切数据请求都以数据版本寻址，避免跨发布缓存错配。 */
+/** 发布切换对活跃会话不是原子的:检测到数据与 manifest 不再一致
+ * 时进入显式的更新状态,停止请求并要求刷新,不混用两个发布。 */
+export class ReleaseChangedError extends Error {
+  constructor(detail: string) {
+    super(`站点数据已更新(${detail}),请刷新页面`);
+    this.name = "ReleaseChangedError";
+  }
+}
+
+let releaseChanged = false;
+let onReleaseChanged: (() => void) | null = null;
+
+export function watchReleaseChange(cb: () => void): void {
+  onReleaseChanged = cb;
+}
+
+export function releaseWasReplaced(): boolean {
+  return releaseChanged;
+}
+
+function enterReleaseChanged(detail: string): never {
+  if (!releaseChanged) {
+    releaseChanged = true;
+    onReleaseChanged?.();
+  }
+  throw new ReleaseChangedError(detail);
+}
+
+function guard(): void {
+  if (releaseChanged) throw new ReleaseChangedError("已停止数据请求");
+}
+
+/** manifest 之后的数据请求都以该文件自身摘要寻址。 */
 function url(path: string): string {
-  return version
-    ? `${BASE}/${path}?v=${encodeURIComponent(version)}`
-    : `${BASE}/${path}`;
+  const digest = manifestRef?.files[path]?.[1];
+  return digest ? `${BASE}/${path}?v=${digest.slice(0, 16)}` : `${BASE}/${path}`;
+}
+
+export type CacheFamily = "names" | "structure" | "search" | "text";
+
+const caches: Record<CacheFamily, WeightedLru<string, unknown>> = {
+  names: new WeightedLru(12_000_000),
+  structure: new WeightedLru(24_000_000),
+  search: new WeightedLru(8_000_000),
+  text: new WeightedLru(20_000_000),
+};
+
+export function cacheUsage(): Record<CacheFamily, number> {
+  return {
+    names: caches.names.usedWeight,
+    structure: caches.structure.usedWeight,
+    search: caches.search.usedWeight,
+    text: caches.text.usedWeight,
+  };
 }
 
 export async function loadManifest(): Promise<Manifest> {
@@ -43,11 +90,17 @@ export async function loadManifest(): Promise<Manifest> {
   const m = (await res.json()) as Manifest;
   if (
     !m.version ||
+    m.schema !== "structural-site-v1" ||
+    m.profile !== "explorer-v1" ||
     !Number.isInteger(m.n_nodes) ||
     m.n_nodes <= 0 ||
-    !m.files
+    !m.files ||
+    !m.limits ||
+    !m.rank_index?.segments
   )
-    throw new Error("manifest.json: invalid data contract");
+    throw new SiteDataContractError(
+      "manifest 不是 structural-site-v1/explorer-v1 契约",
+    );
   const positionBytes = m.files["positions.bin"]?.[0];
   const expectedPositionBytes = m.n_nodes * 12;
   if (positionBytes !== expectedPositionBytes)
@@ -55,31 +108,35 @@ export async function loadManifest(): Promise<Manifest> {
       `positions.bin 应为 ${expectedPositionBytes} 字节,实际为 ` +
         `${positionBytes ?? "缺失"}`,
     );
-  if (
-    m.layout?.dimensions !== 3 ||
-    m.layout?.geometry !== "topology-3d"
-  )
+  if (m.layout?.dimensions !== 3 || m.layout?.geometry !== "topology-3d")
     throw new SiteDataContractError(
       "布局应为 topology-3d/3D,实际为 " +
-        `${m.layout?.geometry ?? "缺失"}/${m.layout?.dimensions ?? "缺失"}D`,
+        `${String(m.layout?.geometry ?? "缺失")}`,
     );
   const nameBlockSize = m.name_block_size;
   if (
     !Number.isInteger(nameBlockSize) ||
     nameBlockSize <= 0 ||
     !m.files["names.idx"] ||
-    !m.files["names.pack"] ||
-    m.files["names.pack"][0] <= 0
+    !m.files["names.pack"]
   )
-    throw new SiteDataContractError("名字表应为按 rank 分块的 names.idx/names.pack");
-  const expectedNameIndexBytes =
-    (Math.ceil(m.n_nodes / nameBlockSize) + 1) * 4;
-  if (m.files["names.idx"]?.[0] !== expectedNameIndexBytes)
-    throw new SiteDataContractError(
-      `names.idx 应为 ${expectedNameIndexBytes} 字节,实际为 ` +
-        `${m.files["names.idx"]?.[0] ?? "缺失"}`,
-    );
-  version = m.version;
+    throw new SiteDataContractError("名字表 names.idx/names.pack 缺失");
+  const budget = m.limits.cache_budget;
+  caches.names.setBudget(budget.names);
+  caches.structure.setBudget(budget.structure);
+  caches.search.setBudget(budget.search);
+  caches.text.setBudget(budget.text);
+  // 新 SiteRelease:清空不再被当前文件摘要引用的条目与更新状态
+  releaseChanged = false;
+  for (const cache of Object.values(caches)) cache.clear();
+  memberMemo.clear();
+  pinned.clear();
+  idxCache.clear();
+  packAccess.clear();
+  rankBytes = null;
+  rankPromise = null;
+  charmap = null;
+  charmapPromise = null;
   manifestRef = m;
   return m;
 }
@@ -95,17 +152,16 @@ async function verifyWholeFile(
   bytes: Uint8Array,
 ): Promise<void> {
   const [size, expectedHash] = publishedMeta(path);
-  assertByteLength(path, bytes.byteLength, size);
+  if (bytes.byteLength !== size)
+    enterReleaseChanged(`${path} 字节数 ${bytes.byteLength} != ${size}`);
   const actualHash = await sha256Hex(bytes);
   if (actualHash !== expectedHash)
-    throw new Error(
-      `${path}: sha256 mismatch (${actualHash.slice(0, 12)} != ` +
-        `${expectedHash.slice(0, 12)})`,
-    );
+    enterReleaseChanged(`${path} 摘要不符`);
 }
 
 /** Fetch and authenticate a complete JSON artifact from the manifest. */
 export async function loadPublishedJson<T>(path: string): Promise<T> {
+  guard();
   const res = await fetch(url(path));
   if (!res.ok) throw new Error(`${path}: ${res.status}`);
   const bytes = new Uint8Array(await res.arrayBuffer());
@@ -119,7 +175,6 @@ async function streamInto(
   onProgress: (bytes: number) => void,
   priority: "high" | "low" = "high",
 ): Promise<void> {
-  // 几何七件 high，确保首块尽快进入场景。
   const res = await fetch(url(path), { priority } as RequestInit);
   if (!res.ok || !res.body) throw new Error(`fetch ${path}: ${res.status}`);
   const reader = res.body.getReader();
@@ -139,9 +194,6 @@ async function streamInto(
 
 export interface GeometryStream {
   geo: Geometry;
-  /** 启动七个 SoA 文件的并行流式填充;onChunk(loaded) 以 ~250ms
-   * 节流回调。分配与启动分离:调用方先建场景再 start,
-   * 首块回调必然晚于场景就绪(首块即渲的前提)。 */
   start(onChunk: (loaded: number) => void): Promise<void>;
 }
 
@@ -183,12 +235,11 @@ export function openGeometry(manifest: Manifest): GeometryStream {
   const start = (onChunk: (loaded: number) => void): Promise<void> => {
     const update = (): void => {
       const loaded = Math.min(
-        ...Object.entries(raw).map(([k, buf]) => {
-          void buf;
-          return Math.floor(
+        ...Object.keys(raw).map((k) =>
+          Math.floor(
             (progress[k] ?? 0) / stride[k as keyof typeof raw],
-          );
-        }),
+          ),
+        ),
       );
       geo.loaded = loaded;
       const now = performance.now();
@@ -210,7 +261,10 @@ export function openGeometry(manifest: Manifest): GeometryStream {
 }
 
 export async function loadEdges(): Promise<Uint32Array> {
-  const res = await fetch(url("edges.bin"));
+  guard();
+  const res = await fetch(url("edges.bin"), {
+    priority: "low",
+  } as RequestInit);
   if (!res.ok) throw new Error(`edges.bin: ${res.status}`);
   const buf = new Uint8Array(await res.arrayBuffer());
   await verifyWholeFile("edges.bin", buf);
@@ -219,210 +273,124 @@ export async function loadEdges(): Promise<Uint32Array> {
   return new Uint32Array(buf.buffer);
 }
 
-/** Range 点查：深链或行走落点未被流式覆盖时，先读取定长坐标记录。
- * 开发环境等不支持 Range 的服务器会回整文件,这里做兼容切片。 */
-export async function pointByRank(
-  manifest: Manifest,
-  rank: number,
-): Promise<{ pos: [number, number, number]; key: number } | null> {
-  if (!Number.isInteger(rank) || rank < 0 || rank >= manifest.n_nodes)
-    throw new RangeError(`rank ${rank} is outside geometry`);
-  const range = async (
-    path: string,
-    start: number,
-    len: number,
-  ): Promise<ArrayBuffer | null> => {
-    const [total] = publishedMeta(path);
-    if (start + len > total)
-      throw new RangeError(`${path}: byte range exceeds published file`);
-    const res = await fetch(url(path), {
-      headers: { Range: `bytes=${start}-${start + len - 1}` },
-    });
-    if (!res.ok) throw new Error(`${path}: ${res.status}`);
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    if (res.status === 206) {
-      assertContentRange(
-        path,
-        res.headers.get("Content-Range"),
-        start,
-        len,
-        total,
+/** 精确 Range 读取;总长度与 manifest 不符判定发布已被替换。
+ * 不支持 Range 的服务器回退整文件校验后本地切片(至多一个 pack)。 */
+async function rangeFetch(
+  path: string,
+  off: number,
+  len: number,
+): Promise<PackAccess> {
+  guard();
+  const [total] = publishedMeta(path);
+  if (off < 0 || len <= 0 || off + len > total)
+    throw new RangeError(`${path}: slice [${off}, ${off + len}) is invalid`);
+  const res = await fetch(url(path), {
+    headers: { Range: `bytes=${off}-${off + len - 1}` },
+  });
+  if (res.status === 206) {
+    const header = res.headers.get("Content-Range");
+    const match = header?.match(/^bytes (\d+)-(\d+)\/(\d+)$/i);
+    if (match && Number(match[3]) !== total)
+      enterReleaseChanged(
+        `${path} 总长度 ${match[3]} != manifest ${total}`,
       );
-      assertByteLength(`${path} range`, bytes.byteLength, len);
-      return bytes.buffer;
-    }
-    await verifyWholeFile(path, bytes);
-    return bytes.buffer.slice(start, start + len);
-  };
-  const [posBuf, keyBuf] = await Promise.all([
-    range("positions.bin", rank * 12, 12),
-    range("key.bin", rank * 4, 4),
-  ]);
-  if (!posBuf || !keyBuf || posBuf.byteLength < 12 || keyBuf.byteLength < 4)
-    return null;
-  const xyz = new Float32Array(posBuf.slice(0, 12));
-  const pos: [number, number, number] = [
-    xyz[0] ?? 0,
-    xyz[1] ?? 0,
-    xyz[2] ?? 0,
-  ];
-  return { pos, key: new Uint32Array(keyBuf.slice(0, 4))[0] ?? 0 };
+    assertContentRange(path, header, off, len, total);
+    const part = await res.arrayBuffer();
+    assertByteLength(`${path} range`, part.byteLength, len);
+    return { kind: "range", off, len, buffer: part };
+  }
+  if (!res.ok) throw new Error(`${path}: ${res.status}`);
+  const whole = new Uint8Array(await res.arrayBuffer());
+  await verifyWholeFile(path, whole);
+  return { kind: "whole", buffer: whole.buffer as ArrayBuffer };
 }
-
-// ---- 分片打包读取:pack 文件 + 偏移索引 + Range 取片 + 逐片 gzip。
-// 分片数(2.2 万)不再等于文件数(个位数 pack);详情从裸 JSON 存储
-// 700MB 变为存储即压缩(~250MB),传输量与原 CDN gzip 持平 ----
 
 type PackAccess =
   | { kind: "whole"; buffer: ArrayBuffer }
   | { kind: "range"; off: number; len: number; buffer: ArrayBuffer };
 
+/** 首次点查共享一次探测:服务器不支持 Range(开发环境)时整包
+ * 缓存一次,后续切片全部本地完成,并发调用合并为一个请求。 */
 const packAccess = new AsyncMemo<string, PackAccess>();
 
-async function probePack(
-  path: string,
-  off: number,
-  len: number,
-  total: number,
-): Promise<PackAccess> {
-  const res = await fetch(url(path), {
-    headers: { Range: `bytes=${off}-${off + len - 1}` },
-  });
-  if (res.status === 206) {
-    assertContentRange(
-      path,
-      res.headers.get("Content-Range"),
-      off,
-      len,
-      total,
-    );
-    const buffer = await res.arrayBuffer();
-    assertByteLength(`${path} range`, buffer.byteLength, len);
-    return { kind: "range", off, len, buffer };
-  }
-  if (!res.ok) throw new Error(`${path}: ${res.status}`);
-  const buffer = await res.arrayBuffer();
-  await verifyWholeFile(path, new Uint8Array(buffer));
-  return { kind: "whole", buffer };
-}
-
-/** Range 取片;服务器不支持 Range(开发环境)时整包缓存一次,
- * 后续切片全部本地完成。 */
 async function packSlice(
   path: string,
   off: number,
   len: number,
 ): Promise<ArrayBuffer> {
-  const [total] = publishedMeta(path);
-  if (off < 0 || len < 0 || off + len > total)
-    throw new RangeError(`${path}: slice [${off}, ${off + len}) is invalid`);
   const access = await packAccess.get(path, () =>
-    probePack(path, off, len, total),
+    rangeFetch(path, off, len),
   );
-  if (access.kind === "whole") return access.buffer.slice(off, off + len);
-  if (access.off === off && access.len === len) return access.buffer.slice(0);
-
-  const res = await fetch(url(path), {
-    headers: { Range: `bytes=${off}-${off + len - 1}` },
-  });
-  if (res.status === 206) {
-    assertContentRange(
-      path,
-      res.headers.get("Content-Range"),
-      off,
-      len,
-      total,
-    );
-    const part = await res.arrayBuffer();
-    assertByteLength(`${path} range`, part.byteLength, len);
-    return part;
+  if (access.kind === "whole")
+    return access.buffer.slice(off, off + len);
+  if (access.off === off && access.len === len)
+    return access.buffer.slice(0);
+  const direct = await rangeFetch(path, off, len);
+  if (direct.kind === "whole") {
+    packAccess.delete(path);
+    void packAccess.get(path, async () => direct);
+    return direct.buffer.slice(off, off + len);
   }
-  if (res.ok) {
-    const whole = await res.arrayBuffer();
-    await verifyWholeFile(path, new Uint8Array(whole));
-    return whole.slice(off, off + len);
-  }
-  throw new Error(`${path}: ${res.status}`);
+  return direct.buffer;
 }
 
-async function gunzipJson<T>(buf: ArrayBuffer): Promise<T> {
+/** gzip 成员解压;CRC32 或长度校验失败判定发布已被替换。 */
+async function gunzipBytes(buf: ArrayBuffer): Promise<Uint8Array> {
   const body = new Response(buf).body;
   if (!body) throw new Error("gunzip: empty body");
-  const stream = body.pipeThrough(new DecompressionStream("gzip"));
-  return (await new Response(stream).json()) as T;
+  try {
+    const stream = body.pipeThrough(new DecompressionStream("gzip"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  } catch {
+    enterReleaseChanged("gzip 成员校验失败");
+  }
 }
 
-/** 名字按连续 rank 分块。首屏不发请求；悬停、结果或关系视图只解压
- * 实际需要的块。块内仍保留原名与中文名两个字段。 */
-export function openNames(manifest: Manifest): Names {
-  const blockSize = manifest.name_block_size;
-  const blockCount = Math.ceil(manifest.n_nodes / blockSize);
-  const blocks = new Map<number, NameRow[]>();
-  const pending = new AsyncMemo<number, NameRow[]>();
+const memberMemo = new AsyncMemo<string, unknown>();
 
-  const loadBlock = (block: number): Promise<NameRow[]> =>
-    pending.get(block, async () => {
-      const idx = await loadIdx("names.idx");
-      if (idx.length !== blockCount + 1)
-        throw new SiteDataContractError(
-          `names.idx 应有 ${blockCount + 1} 项,实际为 ${idx.length}`,
-        );
-      const [packBytes] = publishedMeta("names.pack");
-      if (
-        idx[0] !== 0 ||
-        idx[idx.length - 1] !== packBytes ||
-        idx.some((off, i) => i > 0 && off <= (idx[i - 1] ?? 0))
-      )
-        throw new SiteDataContractError("names.idx 偏移与 names.pack 不一致");
-      const off = idx[block] ?? 0;
-      const len = (idx[block + 1] ?? off) - off;
-      if (len <= 0) throw new Error(`names block ${block}: empty slice`);
-      const rows = await gunzipJson<NameRow[]>(
-        await packSlice("names.pack", off, len),
-      );
-      const expected = Math.min(
-        blockSize,
-        manifest.n_nodes - block * blockSize,
-      );
-      if (!Array.isArray(rows) || rows.length !== expected)
-        throw new SiteDataContractError(
-          `names block ${block} 应有 ${expected} 行,实际为 ${rows.length}`,
-        );
-      for (const row of rows)
-        if (
-          !Array.isArray(row) ||
-          typeof row[0] !== "string" ||
-          (row[1] !== null && typeof row[1] !== "string")
-        )
-          throw new SiteDataContractError(`names block ${block} 含非法名字行`);
-      blocks.set(block, rows);
-      return rows;
-    });
+/** 读取并解码一个 gzip 成员:Promise 合并在途请求,完成后只进入
+ * 按解码字节计权的分族 LRU;缓存命中不产生网络请求。 */
+export async function member<T>(
+  family: CacheFamily,
+  path: string,
+  off: number,
+  len: number,
+): Promise<T> {
+  const cacheKey = `${path}:${off}:${len}`;
+  const hit = caches[family].get(cacheKey);
+  if (hit !== undefined) return hit as T;
+  return memberMemo.get(cacheKey, async () => {
+    const bytes = await gunzipBytes(await packSlice(path, off, len));
+    const value = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+    caches[family].set(cacheKey, value, bytes.byteLength);
+    memberMemo.delete(cacheKey);
+    return value;
+  }) as Promise<T>;
+}
 
-  return {
-    get(rank: number): string | null {
-      if (!Number.isInteger(rank) || rank < 0 || rank >= manifest.n_nodes)
-        return null;
-      const row = blocks.get(Math.floor(rank / blockSize))?.[rank % blockSize];
-      return row ? row[1] || row[0] || null : null;
-    },
-    async load(ranks: Iterable<number>): Promise<void> {
-      const needed = new Set<number>();
-      for (const rank of ranks)
-        if (Number.isInteger(rank) && rank >= 0 && rank < manifest.n_nodes) {
-          const block = Math.floor(rank / blockSize);
-          if (!blocks.has(block)) needed.add(block);
-        }
-      await Promise.all([...needed].map(loadBlock));
-    },
-  };
+// ---- 小型索引:整文件读取并常驻(不参与 LRU) ----
+
+const pinned = new AsyncMemo<string, unknown>();
+
+/** gzip 整文件 JSON 目录(entities/episodes/facts/text/vocab idx)。 */
+export function loadGzJson<T>(path: string): Promise<T> {
+  return pinned.get(path, async () => {
+    guard();
+    const res = await fetch(url(path));
+    if (!res.ok) throw new Error(`${path}: ${res.status}`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    await verifyWholeFile(path, bytes);
+    const out = await gunzipBytes(bytes.buffer as ArrayBuffer);
+    return JSON.parse(new TextDecoder().decode(out)) as unknown;
+  }) as Promise<T>;
 }
 
 const idxCache = new AsyncMemo<string, Uint32Array>();
 
-/** u32 累计偏移索引(buckets+1 项):桶 b 的片 = [idx[b], idx[b+1])。 */
+/** u32 累计偏移索引(names.idx):块 b 的片 = [idx[b], idx[b+1])。 */
 function loadIdx(path: string): Promise<Uint32Array> {
   return idxCache.get(path, async () => {
+    guard();
     const res = await fetch(url(path));
     if (!res.ok) throw new Error(`${path}: ${res.status}`);
     const bytes = new Uint8Array(await res.arrayBuffer());
@@ -433,87 +401,144 @@ function loadIdx(path: string): Promise<Uint32Array> {
   });
 }
 
-const adjCache = new AsyncMemo<number, Record<string, AdjEntry>>();
-const detCache = new AsyncMemo<number, Record<string, Detail>>();
+// ---- rank-by-key:u24 反向索引(深链恢复与事实参与者定位) ----
 
-async function shard<T>(
-  cache: AsyncMemo<number, Record<string, T>>,
-  kind: "adj" | "det",
-  bucket: number,
-  buckets: number,
-  detPacks: number,
-): Promise<Record<string, T>> {
-  return cache.get(bucket, async () => {
-    const idx = await loadIdx(`${kind}.idx`);
-    const off = idx[bucket] ?? 0;
-    const len = (idx[bucket + 1] ?? off) - off;
-    let path = "adj.pack";
-    let rel = off;
-    if (kind === "det") {
-      // det 均分多个 pack:索引存全局累计偏移,减去 pack 首桶偏移
-      const per = Math.floor(buckets / detPacks);
-      const p = Math.floor(bucket / per);
-      path = `det-${p}.pack`;
-      rel = off - (idx[p * per] ?? 0);
-    }
-    return len > 0
-      ? gunzipJson<Record<string, T>>(await packSlice(path, rel, len))
-      : ({} as Record<string, T>);
+let rankBytes: Uint8Array | null = null;
+let rankPromise: Promise<void> | null = null;
+
+export function ensureRankIndex(): Promise<void> {
+  rankPromise ??= (async () => {
+    guard();
+    const res = await fetch(url("rank-by-key.bin"), {
+      priority: "low",
+    } as RequestInit);
+    if (!res.ok) throw new Error(`rank-by-key.bin: ${res.status}`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    await verifyWholeFile("rank-by-key.bin", bytes);
+    rankBytes = bytes;
+  })().catch((error: unknown) => {
+    rankPromise = null;
+    throw error;
   });
+  return rankPromise;
 }
 
-export async function loadAdj(
-  key: number,
-  buckets: number,
-): Promise<AdjEntry | null> {
-  const s = await shard<AdjEntry>(
-    adjCache,
-    "adj",
-    key % buckets,
-    buckets,
-    manifestRef?.det_packs ?? 4,
+/** 稳定键 -> VisualRank;索引未载入或键不在当前发布时返回 null。 */
+export function rankOfKey(key: number): number | null {
+  const m = manifestRef;
+  if (!rankBytes || !m) return null;
+  const seg = m.rank_index.segments[String(key >>> 24)];
+  if (!seg) return null;
+  const id = key & 0xffffff;
+  if (id >= seg.count) return null;
+  const at = seg.offset + id * 3;
+  const rank =
+    (rankBytes[at] ?? 0) |
+    ((rankBytes[at + 1] ?? 0) << 8) |
+    ((rankBytes[at + 2] ?? 0) << 16);
+  return rank === m.rank_index.sentinel ? null : rank;
+}
+
+/** Range 点查:深链或行走落点未被流式覆盖时,读取定长坐标记录。 */
+export async function pointByRank(
+  manifest: Manifest,
+  rank: number,
+): Promise<{ pos: [number, number, number]; key: number } | null> {
+  if (!Number.isInteger(rank) || rank < 0 || rank >= manifest.n_nodes)
+    throw new RangeError(`rank ${rank} is outside geometry`);
+  const [posBuf, keyBuf] = await Promise.all([
+    packSlice("positions.bin", rank * 12, 12),
+    packSlice("key.bin", rank * 4, 4),
+  ]);
+  if (posBuf.byteLength < 12 || keyBuf.byteLength < 4) return null;
+  const xyz = new Float32Array(posBuf.slice(0, 12));
+  return {
+    pos: [xyz[0] ?? 0, xyz[1] ?? 0, xyz[2] ?? 0],
+    key: new Uint32Array(keyBuf.slice(0, 4))[0] ?? 0,
+  };
+}
+
+/** 名字按连续 rank 分块;悬停、结果或关系视图只解压实际需要的块,
+ * 已解码块受名字族 LRU 约束。 */
+export function openNames(manifest: Manifest): Names {
+  const blockSize = manifest.name_block_size;
+  const blockCount = Math.ceil(manifest.n_nodes / blockSize);
+
+  const loadBlock = async (block: number): Promise<NameRow[]> => {
+    const idx = await loadIdx("names.idx");
+    if (idx.length !== blockCount + 1)
+      throw new SiteDataContractError(
+        `names.idx 应有 ${blockCount + 1} 项,实际为 ${idx.length}`,
+      );
+    const off = idx[block] ?? 0;
+    const len = (idx[block + 1] ?? off) - off;
+    if (len <= 0) throw new Error(`names block ${block}: empty slice`);
+    const rows = await member<NameRow[]>(
+      "names",
+      "names.pack",
+      off,
+      len,
+    );
+    const expected = Math.min(
+      blockSize,
+      manifest.n_nodes - block * blockSize,
+    );
+    if (!Array.isArray(rows) || rows.length !== expected)
+      throw new SiteDataContractError(
+        `names block ${block} 应有 ${expected} 行,实际为 ${rows.length}`,
+      );
+    return rows;
+  };
+
+  let loadedIdx: Uint32Array | null = null;
+  const blockOf = (rank: number): NameRow[] | undefined => {
+    // 同步查成员缓存;索引未就绪时视为未加载(load() 会补齐)
+    if (!loadedIdx) return undefined;
+    const block = Math.floor(rank / blockSize);
+    const off = loadedIdx[block] ?? 0;
+    const len = (loadedIdx[block + 1] ?? off) - off;
+    return caches.names.get(`names.pack:${off}:${len}`) as
+      | NameRow[]
+      | undefined;
+  };
+  void loadIdx("names.idx").then(
+    (idx) => (loadedIdx = idx),
+    () => undefined,
   );
-  return s[String(key)] ?? null;
+
+  return {
+    get(rank: number): string | null {
+      if (!Number.isInteger(rank) || rank < 0 || rank >= manifest.n_nodes)
+        return null;
+      const row = blockOf(rank)?.[rank % blockSize];
+      return row ? row[1] || row[0] || null : null;
+    },
+    row(rank: number): NameRow | null {
+      if (!Number.isInteger(rank) || rank < 0 || rank >= manifest.n_nodes)
+        return null;
+      return blockOf(rank)?.[rank % blockSize] ?? null;
+    },
+    async load(ranks: Iterable<number>): Promise<void> {
+      const needed = new Set<number>();
+      for (const rank of ranks)
+        if (Number.isInteger(rank) && rank >= 0 && rank < manifest.n_nodes)
+          needed.add(Math.floor(rank / blockSize));
+      await Promise.all([...needed].map(loadBlock));
+    },
+  };
 }
 
-export async function loadDetail(
-  key: number,
-  buckets: number,
-): Promise<Detail | null> {
-  const s = await shard<Detail>(
-    detCache,
-    "det",
-    key % buckets,
-    buckets,
-    manifestRef?.det_packs ?? 4,
-  );
-  return s[String(key)] ?? null;
-}
+// ---- 搜索:自适应前缀目录 + 按需成员 ----
 
-/** 溢出页(邻接"展开全部" / 分集分页):偏移内嵌在所属条目里。 */
-export async function loadPage<T extends AdjPage | EpisodeRow[]>(
-  off: number,
-  len: number,
-): Promise<T> {
-  return gunzipJson<T>(await packSlice("pages.pack", off, len));
-}
-
-/** 悬停预取:填充分片缓存,点击时大概率已热(对冲每周失效后的冷 CDN)。 */
-export function prefetch(key: number, buckets: number): void {
-  void Promise.all([loadAdj(key, buckets), loadDetail(key, buckets)]).catch(
-    (error: unknown) => console.warn("prefetch failed", error),
-  );
-}
-
-const searchCache = new AsyncMemo<string, SearchEntry[]>();
 let charmap: Record<string, string> | null = null;
 let charmapPromise: Promise<void> | null = null;
 
-/** 幂等:搜索路径 await 它,保证折叠表就绪后才归一查询
- * (否则冷启动头几百毫秒繁体/日文旧字查询会漏命中并污染缓存)。 */
+/** 幂等:搜索路径 await 它,保证折叠表就绪后才归一查询。 */
 export function loadCharmap(): Promise<void> {
   charmapPromise ??= (async () => {
-    charmap = await loadPublishedJson<Record<string, string>>("charmap.json");
+    charmap = await loadPublishedJson<Record<string, string>>(
+      "charmap.json",
+    );
   })().catch((error: unknown) => {
     charmapPromise = null;
     throw error;
@@ -529,40 +554,15 @@ export function fold(text: string): string {
   return out;
 }
 
-let searchIdxP: Promise<Record<string, [number, number]>> | null = null;
-
-function loadSearchIdx(): Promise<Record<string, [number, number]>> {
-  searchIdxP ??= loadPublishedJson<Record<string, [number, number]>>(
-    "search.idx.json",
-  ).catch((error: unknown) => {
-    searchIdxP = null;
-    throw error;
-  });
-  return searchIdxP;
+/** 搜索目录在搜索框获得焦点时读取;启动不预取任何搜索成员。 */
+export function loadSearchDir(): Promise<Record<string, SearchNode>> {
+  return pinned.get("search.idx.json", () =>
+    loadPublishedJson<Record<string, SearchNode>>("search.idx.json"),
+  ) as Promise<Record<string, SearchNode>>;
 }
 
-async function fetchShard(first: string): Promise<SearchEntry[]> {
-  return searchCache.get(first, async () => {
-    const cp = first.codePointAt(0);
-    if (cp === undefined) return [];
-    const loc = (await loadSearchIdx())[cp.toString(16)];
-    return loc
-      ? gunzipJson<SearchEntry[]>(
-          await packSlice("search.pack", loc[0], loc[1]),
-        )
-      : [];
-  });
-}
-
-export const searchShard = fetchShard;
-
-/** 高频首字分片随首块预取，降低首次搜索命中冷分片的概率。 */
-export function prefetchHotShards(manifest: Manifest): void {
-  for (const hex of manifest.hot_shards) {
-    const cp = Number.parseInt(hex, 16);
-    if (Number.isFinite(cp))
-      void fetchShard(String.fromCodePoint(cp)).catch((error: unknown) =>
-        console.warn("hot search shard prefetch failed", error),
-      );
-  }
+export function searchMember(
+  loc: [number, number],
+): Promise<SearchEntry[]> {
+  return member<SearchEntry[]>("search", "search.pack", loc[0], loc[1]);
 }

@@ -1,7 +1,9 @@
 # 结构化站点数据与按需长文本设计
 
-> 状态：目标设计，尚未实现。当前 `site/data` 仍使用
-> `det-*.pack`、`adj.pack` 和 `pages.pack`；当前实现见
+> 状态：已实现。格式契约见 [`scripts/site_release.py`](../scripts/site_release.py)，
+> 烘焙见 [`scripts/bake_site.py`](../scripts/bake_site.py)，独立验证见
+> [`scripts/verify_site.py`](../scripts/verify_site.py)，浏览器数据入口见
+> [`web/src/data.ts`](../web/src/data.ts)。管道与交互边界另见
 > [数据管道与图模型](DATA_ARCHITECTURE.md) 与
 > [探索应用架构](EXPLORER_ARCHITECTURE.md)。
 
@@ -207,8 +209,8 @@ JSON 使用无额外空白的 UTF-8 编码；gzip 固定 `mtime=0`。相同 sche
 | `manifest.json` | schema、字段策略、来源、计数、限制和所有文件摘要 |
 | 现有几何 SoA | `positions`、`year`、`key`、`size`、`flags`、`score`、`tags` |
 | `rank-by-key.bin` | 稳定键到 Canvas VisualRank 的紧凑反向索引 |
-| `names.idx` / `names.pack` | 核心实体名称的规范副本，每 2,048 个 VisualRank 一个初始成员 |
-| `entities.idx` / `entities.pack` | 核心实体除名称和长文本外的字段 |
+| `names.idx` / `names.pack` | 核心实体 `name` 与 `name_cn` 的规范副本，每 2,048 个 VisualRank 一个初始成员 |
+| `entities.idx` / `entities.pack` | 核心实体除 `name`、`name_cn` 和长文本外的字段 |
 | `facts.idx` / `facts.pack` | 按参与实体查询的完整类型化事实结构 |
 | `episodes.idx` / `episodes.pack` | 按 SubjectKey 分组的 Episode 结构记录，包括孤儿分组 |
 | `text.idx` | 四类文本的字段目录、身份范围、成员偏移和长度 |
@@ -228,18 +230,21 @@ JSON 使用无额外空白的 UTF-8 编码；gzip 固定 `mtime=0`。相同 sche
 |---|---:|---:|
 | 名称 | 2,048 个连续 VisualRank | 6 |
 | 实体结构 | 每种实体 256 个连续源 ID | 9 |
-| Episode 结构 | 128 个连续 Subject ID | 9 |
-| 事实 incidence | 8,192 个稳定键桶 | 6 |
+| Episode 结构 | 128 个连续 Subject ID；每 Subject 内联 200 条，溢出每页 500 条 | 9 |
+| 事实 incidence | 8,192 个稳定键桶；每实体内联 200 条，溢出每页 500 条 | 6 |
 | Entity `summary` | 每种实体 128 个连续源 ID | 9 |
 | Entity `infobox` | 每种实体 256 个连续源 ID | 9 |
 | Episode `description` | 128 个连续 Subject ID | 6 |
 | 事实 `summary` | 256 个连续 FactRef | 9 |
 
 搜索索引按规范化前缀构成自适应树。叶成员压缩后不得超过 64,000 字节；需要继续拆分的
-内部前缀单独保存热度最高的 12 个结果，因此一字符查询不必下载完整大分片。每个搜索
-结果继续内嵌显示名称，避免联想下拉再扇出到名称块。
+内部前缀单独保存热度最高的 12 个结果，因此一字符查询不必下载完整大分片。无法靠加长
+前缀继续拆分的叶——其余条目共享同一规范化键——按热度顺序分页为多个叶成员，每页仍
+不超过 64,000 字节；目录记录页数，联想下拉只读取第一页。每个搜索结果继续内嵌显示
+名称，避免联想下拉再扇出到名称块。
 
-任一压缩成员超过 256,000 字节时，构建在稳定身份边界继续细分。Episode 范围优先保持
+成员上限分为两层。256,000 字节是所有结构与文本成员的全局硬上限，也是唯一的自动
+细分触发值：任一压缩成员超过它时，构建在稳定身份边界继续细分。Episode 范围优先保持
 同一 Subject 的描述在一起；若单个 Subject 仍超限，再按 EpisodeId 拆分，保证读取一条
 描述仍只需一个成员。单个文本值本身无法满足上限时构建失败并升级 profile，不能截断。
 不同字段族不共享 gzip 成员；结构记录保存存在位，空值不触发文本请求。物理 pack 只在
@@ -428,8 +433,8 @@ Data 用 Promise memo 合并进行中的相同请求；请求完成后只进入�
 - 所有分页、桶索引、gzip 成员、pack 边界、文件大小、SHA-256 和内容版本一致。
 - `text.idx` 能把每个非空文本身份唯一定位到一个成员；成员大小分位数、最大值和 manifest
   一致，任何成员都不超过 256,000 字节。
-- 每个物理 pack 不超过 80,000,000 字节；搜索叶成员不超过 64,000 字节，内部前缀的
-  前 12 项与全量排序结果一致。
+- 每个物理 pack 不超过 80,000,000 字节；搜索叶成员（含分页叶的每一页）不超过
+  64,000 字节，分页叶的页序与热度序一致，内部前缀的前 12 项与全量排序结果一致。
 - 生产托管对 pack 的点查返回正确的 HTTP 206 与 `Content-Range`；整包回退不能作为
   生产性能保证。真实浏览器还必须在几何未完成时通过深链 Range 点查恢复节点，防止 CDN
   内容编码改变 Range 所属的字节表示。
@@ -523,7 +528,7 @@ Subject ID 还会增加约 0.62 MB，并把 P99 从 47,523 B 降到 26,301 B。�
 | 物理 pack | 在稳定成员边界拆分，单文件 `<= 80,000,000 B` |
 | 结构与文本成员 | 单成员 `<= 256,000 B` |
 | 文本成员分布 | P99 `<= 75,000 B`，最大 `<= 256,000 B`；无法容纳的单值使构建失败 |
-| 名称成员分布 | P99 `<= 64,000 B`，最大 `<= 128,000 B` |
+| 名称成员分布 | P99 `<= 64,000 B`；最大值由全局成员上限约束 |
 | 搜索成员 | 自适应前缀成员 `<= 64,000 B` |
 | 首屏 | 不请求搜索成员、实体、事实、Episode、分页、`text.idx` 或文本 pack |
 | 第一批节点后 | 骨架边和结构索引可以低优先级加载，不得阻塞几何流 |

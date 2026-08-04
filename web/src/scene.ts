@@ -257,8 +257,8 @@ interface ContextData {
 export interface SceneCallbacks {
   onPick: (rank: number | null) => void;
   onHover: (rank: number | null, x: number, y: number) => void;
-  /** 工作集边悬停:解码关系 labelId(语境骨架边不出 tooltip)。 */
-  onHoverEdge: (labelId: number | null, x: number, y: number) => void;
+  /** 工作集边悬停:解码后的关系显示文本(语境骨架边不出 tooltip)。 */
+  onHoverEdge: (label: string | null, x: number, y: number) => void;
   onViewChange: (vs: OrbitState) => void;
 }
 
@@ -683,10 +683,19 @@ export class Scene {
     const reduced = prefersReducedMotion();
     const t = performance.now() - this.wsAnimStart;
     // 未流式覆盖且无 sparse 坐标的邻居先不画(位置未知,不能画到原点)
-    const shown: { rank: number; label: number; pos: [number, number, number] }[] = [];
+    const shown: {
+      rank: number;
+      label: string;
+      pos: [number, number, number];
+    }[] = [];
     state.neighbors.forEach((rk, i) => {
       const p = this.posOf(rk);
-      if (p) shown.push({ rank: rk, label: state.neighborLabels[i] ?? -1, pos: p });
+      if (p)
+        shown.push({
+          rank: rk,
+          label: state.neighborLabels[i] ?? "",
+          pos: p,
+        });
     });
     const ranks = [sel, ...shown.map((s) => s.rank)];
     const pos = new Float32Array(ranks.length * 3);
@@ -712,7 +721,7 @@ export class Scene {
     const edgeSegs: {
       a: [number, number, number];
       b: [number, number, number];
-      label: number;
+      label: string;
       alpha: number;
     }[] = [];
     if (chain) {
@@ -723,7 +732,7 @@ export class Scene {
           edgeSegs.push({
             a: pa,
             b: pb,
-            label: state.pathLabels[i] ?? -1,
+            label: state.pathLabels[i] ?? "",
             alpha: 200,
           });
       }
@@ -748,7 +757,7 @@ export class Scene {
       if (cwPos) {
         for (const s of shown)
           if (s.rank !== cw)
-            edgeSegs.push({ a: cwPos, b: s.pos, label: -1, alpha: 70 });
+            edgeSegs.push({ a: cwPos, b: s.pos, label: "", alpha: 70 });
       }
     }
     const linePos = new Float32Array(edgeSegs.length * 6);
@@ -779,12 +788,8 @@ export class Scene {
         pickable: true, // 悬停工作集边时显示解码后的关系名
         onHover: (info: { index: number; x: number; y: number }) => {
           const lbl =
-            info.index >= 0 ? (edgeSegs[info.index]?.label ?? null) : null;
-          this.cb.onHoverEdge(
-            lbl !== null && lbl >= 0 ? lbl : null,
-            info.x,
-            info.y,
-          );
+            info.index >= 0 ? (edgeSegs[info.index]?.label ?? "") : "";
+          this.cb.onHoverEdge(lbl || null, info.x, info.y);
         },
         parameters: { depthCompare: "always", depthWriteEnabled: false },
       }),

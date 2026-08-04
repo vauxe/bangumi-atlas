@@ -144,7 +144,7 @@ test("keeps working-set nodes at their focus size and lets them grow when zoomin
     });
     state.selection = 0;
     state.neighbors = [1];
-    state.neighborLabels = [0];
+    state.neighborLabels = ["关联"];
     state.compareWith = null;
     state.path = [];
     state.pathLabels = [];
