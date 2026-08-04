@@ -20,9 +20,7 @@ def normalize_world_scale(
         raise ValueError("coordinates must be (n, 3)")
     if len(coordinates) == 0:
         raise ValueError("layout must contain at least one node")
-    extent = float(
-        (coordinates.max(axis=0) - coordinates.min(axis=0)).max()
-    )
+    extent = float((coordinates.max(axis=0) - coordinates.min(axis=0)).max())
     if not np.isfinite(extent) or extent <= 0:
         raise ValueError("layout extent must be positive and finite")
     scale = span / extent

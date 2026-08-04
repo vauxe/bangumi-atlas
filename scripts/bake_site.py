@@ -29,6 +29,7 @@ from community_labels import build_community_labels
 from opencc import OpenCC
 from site_contracts import (
     read_dump_version,
+    require_parquet_matches_dump,
     validate_layout_report,
     validate_name_pack,
 )
@@ -291,20 +292,18 @@ def collect_mappings() -> tuple[dict[str, Any], dict[str, int]]:
 
 
 def main() -> None:  # noqa: PLR0915
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--allow-stub",
-        action="store_true",
-        help="allow non-publishable test geometry for local preview",
-    )
-    args = parser.parse_args()
+    argparse.ArgumentParser().parse_args()
     t_start = time.time()
     dump_version = read_dump_version(DUMP_VERSION)
+    # 烘焙读 Parquet,版本号却取自 dump:落后的 Parquet 会被贴上
+    # 当前 dump 的版本号发布出去(只重跑烘焙时尤其容易发生)
+    require_parquet_matches_dump(
+        dump_version, read_dump_version(PARQUET / "VERSION")
+    )
     if not LAYOUT_REPORT.exists():
-        sys.exit("FAILED: data/layout/report.json 缺失,先运行真实 layout.py")
+        sys.exit("FAILED: data/layout/report.json 缺失,先运行 layout.py")
     layout_report = validate_layout_report(
-        orjson.loads(LAYOUT_REPORT.read_bytes()),
-        allow_stub=args.allow_stub,
+        orjson.loads(LAYOUT_REPORT.read_bytes())
     )
     shutil.rmtree(SITE, ignore_errors=True)
     SITE.mkdir(parents=True, exist_ok=True)

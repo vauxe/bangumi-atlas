@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import random
 import time
 from pathlib import Path
 
@@ -25,14 +26,18 @@ EDGE_FILES = [
     ("character_rel", "from_id", "character", "to_id", "character"),
 ]
 
+# UMAP won the layout bake-off; alternatives live in layout_bakeoff.py.
+ALGO = "umap"
+
+# python-igraph draws from the stdlib random module, not numpy.
+SEED = 7
+
 # Keep a navigable map silhouette while allowing topology-derived parallax.
 DEPTH_RATIO = 0.20
 TYPICAL_NODE_DISTANCE = 0.28
 _JITTER_RADIUS = TYPICAL_NODE_DISTANCE * 0.15
 _HALO_GAP = TYPICAL_NODE_DISTANCE * 6
 _GOLDEN_ANGLE = np.pi * (3 - np.sqrt(5.0))
-
-rng = np.random.default_rng(7)
 
 
 def node_key(etype: str, ids: np.ndarray) -> np.ndarray:
@@ -90,15 +95,22 @@ def load_edges(index: dict[int, int]) -> np.ndarray:
     return lookup(edges)
 
 
-def run_layout(g: ig.Graph, algo: str) -> np.ndarray:
+def run_layout(g: ig.Graph) -> np.ndarray:
     """Embed graph topology directly into three dimensions."""
-    if algo == "drl":
-        layout = g.layout_drl(dim=3)
-    elif algo == "umap":
-        layout = g.layout_umap(dim=3, epochs=200)
-    else:
-        raise ValueError(algo)
+    random.seed(SEED)
+    layout = g.layout_umap(dim=3, epochs=200)
     return np.asarray(layout.coords, dtype=np.float32)
+
+
+def detect_communities(g: ig.Graph) -> np.ndarray:
+    """Partition the graph into the communities that colour the map."""
+    random.seed(SEED)
+    return np.asarray(
+        g.community_leiden(
+            objective_function="modularity", n_iterations=2
+        ).membership,
+        dtype=np.int64,
+    )
 
 
 def _jitter(keys: np.ndarray) -> np.ndarray:
@@ -222,15 +234,7 @@ def edge_compactness(coords: np.ndarray, edges: np.ndarray) -> float | None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    # UMAP is the production winner; DRL remains for reproducible bake-offs.
-    ap.add_argument("--algo", choices=["drl", "umap"], default="umap")
-    ap.add_argument(
-        "--stub",
-        action="store_true",
-        help="skip the real layout and emit non-publishable test geometry",
-    )
-    args = ap.parse_args()
+    argparse.ArgumentParser().parse_args()
 
     keys, years, collects = load_nodes()
     index = {int(k): i for i, k in enumerate(keys)}
@@ -252,28 +256,16 @@ def main() -> None:
     desired = np.zeros((len(keys), 3), dtype=np.float32)
     communities = np.full(len(keys), 0xFFFF, dtype=np.uint16)
 
-    if args.stub:
-        desired[connected] = rng.normal(0, 1, (len(connected), 3)).astype(
-            np.float32
-        )
-        communities[connected] = (keys[connected] % 512).astype(np.uint16)
-    else:
-        graph = ig.Graph(
-            n=len(connected), edges=sub_edges.tolist(), directed=False
-        )
-        graph.simplify()
-        started = time.time()
-        desired[connected] = run_layout(graph, args.algo)
-        print(f"布局完成 {time.time() - started:,.0f}s", flush=True)
-        started = time.time()
-        leiden = np.asarray(
-            graph.community_leiden(
-                objective_function="modularity", n_iterations=2
-            ).membership,
-            dtype=np.int64,
-        )
-        communities[connected] = leiden.astype(np.uint16)
-        print(f"社区检测 {time.time() - started:,.0f}s", flush=True)
+    graph = ig.Graph(
+        n=len(connected), edges=sub_edges.tolist(), directed=False
+    )
+    graph.simplify()
+    started = time.time()
+    desired[connected] = run_layout(graph)
+    print(f"布局完成 {time.time() - started:,.0f}s", flush=True)
+    started = time.time()
+    communities[connected] = detect_communities(graph).astype(np.uint16)
+    print(f"社区检测 {time.time() - started:,.0f}s", flush=True)
 
     started = time.time()
     coords = shape_layout(desired, keys, degree, years)
@@ -307,10 +299,10 @@ def main() -> None:
 
     OUT.mkdir(parents=True, exist_ok=True)
     report: dict[str, object] = {
-        "algo": args.algo,
+        "algo": ALGO,
+        "seed": SEED,
         "dimensions": 3,
         "geometry": "topology-3d",
-        "stub": args.stub,
         "n_nodes": int(len(keys)),
         "n_connected": int(len(connected)),
         "min_projected_neighbor_distance": round(min_distance, 6),

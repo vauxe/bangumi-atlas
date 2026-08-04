@@ -2,7 +2,7 @@
 
 本文说明如何将 [bangumi/Archive](https://github.com/bangumi/Archive)
 的每周数据快照转换为共享 Parquet 投影、可查询的 LadybugDB 数据库和静态探索器数据。
-构建和本地运行入口见 [README](../README.md)，前端见
+构建步骤见 [BUILD.md](BUILD.md)，前端见
 [EXPLORER_ARCHITECTURE.md](EXPLORER_ARCHITECTURE.md)。数据版本、规模和耗时只记录在
 生成产物与构建日志中，不在设计文档中维护。
 
@@ -184,7 +184,7 @@ SiteRelease 能恢复类型化 Parquet 的字段语义，但不是原始快照�
 | `scripts/fetch_dump.py` | 下载快照、校验 SHA-256、清理并重新解压 |
 | `scripts/build_db.py` | 生成 Parquet，在临时路径 COPY 全量建库，完成后原子替换正式数据库 |
 | `scripts/verify_db.py` | 执行独立计数、全字段内容核验和查询冒烟测试 |
-| `scripts/layout.py` | 从 Parquet 生成 Canvas 3D 拓扑布局 |
+| `scripts/layout.py` | 从 Parquet 生成 Canvas 3D 拓扑布局；算法固定为 UMAP 并播种随机源，同一输入可复现 |
 | `scripts/bake_site.py` | 从 Parquet 和布局生成 SiteRelease 静态站点数据；发布坐标归一到规范世界跨度（600），布局算法的任意输出尺度不进入发布物 |
 | `scripts/verify_site.py` | 独立对账 SiteRelease 与 Parquet 的内容与门禁 |
 
@@ -196,7 +196,9 @@ SiteRelease 能恢复类型化 Parquet 的字段语义，但不是原始快照�
 3. 在同目录临时文件中创建 LadybugDB，先导入节点再导入边；完整关闭后原子替换旧库。
 
 使用 `--skip-parquet` 时，dump 与 Parquet 必须都带有 `VERSION` 标记且内容一致；
-任一标记缺失或不一致都使构建失败。每周发布始终重新生成 Parquet，不走该兼容路径。
+任一标记缺失或不一致都使构建失败。`bake_site.py` 在入口重复同一核对——它读取
+Parquet 却以 dump 版本标记发布物，落后的 Parquet 会被贴上未曾据以构建的版本号。
+每周发布始终重新生成 Parquet，不走该兼容路径。
 离线校验只能证明快照来源和文件一致性，不能证明该 commit 仍是上游最新版本；需要最新
 枚举时必须运行默认的联网刷新阶段，构建日志会输出实际使用的 commit。
 

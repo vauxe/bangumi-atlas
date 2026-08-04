@@ -300,7 +300,7 @@ Pages 只接收 Actions 生成的构建产物；上游数据和中间产物不�
 | Pull Request | Push 门禁，以及新增依赖的 high/critical 漏洞审查 |
 | 每周发布 | 上述构建门禁、源枚举漂移、数据库与 SiteRelease 独立对账、真实三维布局报告、本地 HTTP 端到端 smoke 和完整 staging 体积 |
 
-`bake_site.py` 默认拒绝随机测试布局；`--allow-stub` 只用于本地预览。
+只有真实三维拓扑布局能进入发布。构建路径唯一，步骤见 [BUILD.md](BUILD.md)。
 
 仓库设置应保护 `main`：必须经 Pull Request 并要求 `python`、`web` 和
 `dependency-review` 状态通过，禁止 force push；CodeQL 使用 GitHub 默认设置扫描
@@ -320,7 +320,7 @@ Cloudflare Pages/R2，需要服务端计算时再评估 Workers。
 | 来源 | 权威内容 |
 |---|---|
 | `site/data/manifest.json` | 数据版本、节点数、产物大小与数量、布局摘要 |
-| `data/layout/report.json` | 当前布局算法、纵深比、投影邻距和边紧凑度 |
+| `data/layout/report.json` | 当前布局算法与随机种子、纵深比、投影邻距和边紧凑度 |
 | Actions 构建日志 | 各阶段耗时和门禁结果 |
 
 ## 开放风险

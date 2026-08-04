@@ -3,29 +3,16 @@
 将 [bangumi/Archive](https://github.com/bangumi/Archive) 的每周快照构建为
 LadybugDB 图数据库和可静态部署的关系星图。
 
-## 快速开始
+## 构建
 
-需要 Python 3.12+、[uv](https://docs.astral.sh/uv/) 和 Node.js。
+需要 Python 3.12+、[uv](https://docs.astral.sh/uv/) 和 Node 24。仓库只有一条构建
+路径，与每周发布相同，完整步骤见 [构建](docs/BUILD.md)。
 
-```bash
-uv sync
-uv run python scripts/fetch_dump.py
-uv run python scripts/build_db.py
-uv run python scripts/verify_db.py
-
-# 本地预览显式允许快速随机布局；正式构建不使用这两个开关
-uv run python scripts/layout.py --stub
-uv run python scripts/bake_site.py --allow-stub
-
-npm --prefix web ci
-npm --prefix web run dev
-```
-
-打开 <http://localhost:8300>。首次完整构建会下载上游快照并生成本地数据库；
-数据库和站点数据不会写入 Git。
+上游快照、数据库、布局和站点数据都在 `.gitignore` 中，克隆后需完整构建一次。
 
 ## 文档
 
+- [构建](docs/BUILD.md)：唯一构建路径、产物体积、发布门禁和跨机器一致性核对。
 - [数据管道与图模型](docs/DATA_ARCHITECTURE.md)：输入契约、图结构、字段转换和验证策略。
 - [探索应用架构](docs/EXPLORER_ARCHITECTURE.md)：产品边界、浏览器架构、交互和发布门禁。
 - [结构化站点数据与按需长文本设计](docs/STRUCTURAL_SITE_DATA_DESIGN.md)：分层发布完整

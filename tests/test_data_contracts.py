@@ -11,6 +11,7 @@ from scripts import site_release as sr
 from scripts.content_fingerprint import RowFingerprint
 from scripts.site_contracts import (
     read_dump_version,
+    require_parquet_matches_dump,
     validate_layout_report,
     validate_name_pack,
 )
@@ -185,23 +186,21 @@ class SiteContractTests(unittest.TestCase):
                 "dump-2026-07-28",
             )
 
+    def test_stale_parquet_cannot_be_baked_under_a_newer_dump(self) -> None:
+        require_parquet_matches_dump("dump-2026-07-28", "dump-2026-07-28")
+        with self.assertRaisesRegex(ValueError, "rerun build_db"):
+            require_parquet_matches_dump("dump-2026-07-28", "dump-2026-07-21")
+
     def test_only_real_three_dimensional_layouts_are_publishable(self) -> None:
         report = {
             "algo": "umap",
             "dimensions": 3,
             "geometry": "topology-3d",
-            "stub": False,
         }
 
         self.assertIs(validate_layout_report(report), report)
         with self.assertRaisesRegex(ValueError, "stub"):
             validate_layout_report({**report, "stub": True})
-        self.assertIs(
-            validate_layout_report({**report, "stub": True}, allow_stub=True)[
-                "stub"
-            ],
-            True,
-        )
         with self.assertRaisesRegex(ValueError, "three-dimensional"):
             validate_layout_report({**report, "dimensions": 2})
         with self.assertRaisesRegex(ValueError, "topology-3d"):

@@ -8,6 +8,7 @@ import numpy as np
 from scripts.layout import (
     DEPTH_RATIO,
     TYPICAL_NODE_DISTANCE,
+    detect_communities,
     run_layout,
     shape_layout,
 )
@@ -15,10 +16,18 @@ from scripts.layout import (
 
 class TopologyLayoutTests(unittest.TestCase):
     def test_layout_is_computed_in_three_dimensions(self) -> None:
-        coords = run_layout(ig.Graph.Ring(4), "umap")
+        coords = run_layout(ig.Graph.Ring(4))
 
         self.assertEqual(coords.shape, (4, 3))
         self.assertTrue(np.isfinite(coords).all())
+
+    def test_layout_is_reproducible_across_runs(self) -> None:
+        graph = ig.Graph.Famous("Zachary")
+
+        np.testing.assert_array_equal(run_layout(graph), run_layout(graph))
+        np.testing.assert_array_equal(
+            detect_communities(graph), detect_communities(graph)
+        )
 
     def test_connected_layout_has_bounded_nonzero_depth(self) -> None:
         desired = np.array(
