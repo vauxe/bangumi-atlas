@@ -191,9 +191,8 @@ Parquet 是面向建图的类型化投影，不能反向还原为原始 JSONL。
 2. 流式解析 JSONL，转换字段并写入 Parquet；`--skip-parquet` 可复用结果。
 3. 在同目录临时文件中创建 LadybugDB，先导入节点再导入边；完整关闭后原子替换旧库。
 
-使用 `--skip-parquet` 时，若 dump 与 Parquet 均有 `VERSION` 标记，两者必须一致，
-否则构建失败。任一标记缺失时，当前实现会发出警告后继续。每周发布始终重新生成
-Parquet，不走该兼容路径。
+使用 `--skip-parquet` 时，dump 与 Parquet 必须都带有 `VERSION` 标记且内容一致；
+任一标记缺失或不一致都使构建失败。每周发布始终重新生成 Parquet，不走该兼容路径。
 
 ## 6. 验证与失败策略
 

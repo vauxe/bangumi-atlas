@@ -863,9 +863,9 @@ if __name__ == "__main__":
                     f"{pq_ver.read_text().strip()};去掉 --skip-parquet 重建"
                 )
         else:
-            print(
-                "  WARNING: 缺 VERSION 标记,无法核对 parquet 与 dump "
-                "是否同版本(继续,风险自担)"
+            sys.exit(
+                "--skip-parquet 缺 VERSION 标记,无法核对 parquet 与 dump "
+                "是否同版本;去掉 --skip-parquet 重建"
             )
     print("[阶段 2] parquet -> ladybug db")
     build_db()
