@@ -16,14 +16,12 @@ from typing import Any
 import orjson
 
 
-def validate_layout_report(
-    report: Any, *, allow_stub: bool = False
-) -> dict[str, Any]:
+def validate_layout_report(report: Any) -> dict[str, Any]:
     """Reject test or obsolete geometry before it can be published."""
 
     if not isinstance(report, dict):
         raise ValueError("layout report must be an object")
-    if report.get("stub") is not False and not allow_stub:
+    if report.get("stub"):
         raise ValueError("stub layout is not publishable")
     if report.get("dimensions") != 3:
         raise ValueError("layout must be three-dimensional")
@@ -111,3 +109,20 @@ def read_dump_version(path: Path) -> str:
     if not version:
         raise ValueError(f"{path}: dump VERSION is missing or empty")
     return version
+
+
+def require_parquet_matches_dump(
+    dump_version: str, parquet_version: str
+) -> None:
+    """Reject baking a Parquet projection that predates the current dump.
+
+    The bake reads `data/parquet` but stamps the release with the dump
+    version, so a stale projection would be published under a version
+    string it was never built from.
+    """
+
+    if parquet_version != dump_version:
+        raise ValueError(
+            f"parquet VERSION {parquet_version} != dump VERSION "
+            f"{dump_version}; rerun build_db.py before baking"
+        )

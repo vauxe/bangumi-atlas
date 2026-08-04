@@ -57,7 +57,7 @@ jobs:
 
       - name: Layout current snapshot
         run: |
-          uv run python scripts/layout.py --algo umap
+          uv run python scripts/layout.py
           echo "layout report:"
           cat data/layout/report.json
 

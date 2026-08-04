@@ -97,7 +97,7 @@ function testManifest(
     ],
     year_range: [1900, 2035],
     tags: [],
-    layout: { dimensions: 3, geometry: "topology-3d", stub: false },
+    layout: { dimensions: 3, geometry: "topology-3d" },
     files: completeFiles,
     core_bytes: 0,
     total_bytes: Object.values(completeFiles).reduce(
@@ -154,7 +154,7 @@ test("rejects obsolete geometry manifests before streaming", async () => {
 
   const obsoleteLayout = {
     ...testManifest({}),
-    layout: { dimensions: 2, geometry: "planar", stub: false },
+    layout: { dimensions: 2, geometry: "planar" },
   };
   globalThis.fetch = (async () =>
     new Response(JSON.stringify(obsoleteLayout))) as typeof fetch;
