@@ -27,44 +27,97 @@ const FLY_MS = 400;
 export const FOCUS_ZOOM = 6.2;
 const FAR_MARGIN = 1.1;
 
+/** deck 的滚轮曲线：单次事件的缩放级别增量，双向对称、封顶 ±1。 */
+export function wheelDeltaToZoom(delta: number, speed = 0.01): number {
+  let scale = 2 / (1 + Math.exp(-Math.abs(delta * speed)));
+  if (delta < 0 && scale !== 0) scale = 1 / scale;
+  return Math.log2(scale);
+}
+
 /** deck 的滚轮曲线，但不把鼠标所在的空平面误当成新的关注点。 */
 export function zoomWithoutRetarget<T extends OrbitState>(
   state: T,
   delta: number,
   speed = 0.01,
 ): T {
-  let scale = 2 / (1 + Math.exp(-Math.abs(delta * speed)));
-  if (delta < 0 && scale !== 0) scale = 1 / scale;
   return {
     ...state,
     target: [...state.target],
-    zoom: state.zoom + Math.log2(scale),
+    zoom: state.zoom + wheelDeltaToZoom(delta, speed),
   };
 }
 
-/** 有真实几何时沿用 deck 的光标锚定；空白处只改变缩放，关注点不漂移。 */
+/** 放大同时把枢轴向锚点三维收敛。缩放后 2^zoom·(anchor−target)
+ * 不变，锚点被精确钉在原屏幕像素上；枢轴深度随之逼近真实内容，
+ * 根治"枢轴平面之后的画面收敛成静止图"的深缩放停滞。 */
+export function zoomTowardAnchor<T extends OrbitState>(
+  state: T,
+  anchor: readonly [number, number, number],
+  dz: number,
+): T {
+  const k = 2 ** -dz;
+  const [tx, ty, tz] = state.target;
+  return {
+    ...state,
+    target: [
+      anchor[0] + (tx - anchor[0]) * k,
+      anchor[1] + (ty - anchor[1]) * k,
+      anchor[2] + (tz - anchor[2]) * k,
+    ],
+    zoom: state.zoom + dz,
+  };
+}
+
+/** 滚轮放大脱靶时的锚点后备查询（scene 提供视线最近可见节点）。 */
+export type ZoomAnchorQuery = (
+  px: number,
+  py: number,
+) => [number, number, number] | null;
+
+/** 放大朝真实内容收敛：光标下有节点用 GPU 拾取，脱靶时退回
+ * zoomAnchor 视线锚点；都没有才原地缩放。缩小保持原语义——
+ * 只改变缩放，关注点不漂移，空平面永远不会成为新关注点。 */
 export class AtlasOrbitController extends OrbitController {
   protected override _onWheel(event: MjolnirWheelEvent): boolean {
     if (!this.scrollZoom) return false;
     const pos = this.getCenter(event);
     if (!this.isPointInBounds(pos, event)) return false;
 
-    const { x = 0, y = 0 } = this.props as { x?: number; y?: number };
+    const { x = 0, y = 0, zoomAnchor } = this.props as {
+      x?: number;
+      y?: number;
+      zoomAnchor?: ZoomAnchorQuery;
+    };
     const picked = this.pickPosition?.(x + pos[0], y + pos[1]);
     event.srcEvent.preventDefault();
     const { speed = 0.01 } =
       this.scrollZoom === true ? {} : this.scrollZoom;
-    const next = zoomWithoutRetarget(
-      this.controllerState.getViewportProps() as unknown as OrbitState,
-      event.delta,
-      speed,
-    );
-    let nextState = this.controllerState._getUpdatedState({ zoom: next.zoom });
-    if (picked?.coordinate) {
-      const viewport = nextState.makeViewport(nextState.getViewportProps());
-      nextState = nextState._getUpdatedState(
-        viewport.panByPosition(picked.coordinate, pos),
-      );
+    const state =
+      this.controllerState.getViewportProps() as unknown as OrbitState;
+    const dz = wheelDeltaToZoom(event.delta, speed);
+    const anchor =
+      dz > 0
+        ? ((picked?.coordinate as [number, number, number] | undefined) ??
+          zoomAnchor?.(x + pos[0], y + pos[1]) ??
+          null)
+        : null;
+    let nextState;
+    if (anchor) {
+      const next = zoomTowardAnchor(state, anchor, dz);
+      nextState = this.controllerState._getUpdatedState({
+        zoom: next.zoom,
+        target: next.target,
+      });
+    } else {
+      nextState = this.controllerState._getUpdatedState({
+        zoom: state.zoom + dz,
+      });
+      if (picked?.coordinate) {
+        const viewport = nextState.makeViewport(nextState.getViewportProps());
+        nextState = nextState._getUpdatedState(
+          viewport.panByPosition(picked.coordinate, pos),
+        );
+      }
     }
     this.updateViewport(
       nextState,

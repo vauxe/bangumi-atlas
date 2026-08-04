@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Camera, zoomWithoutRetarget } from "../src/camera";
+import {
+  Camera,
+  wheelDeltaToZoom,
+  zoomTowardAnchor,
+  zoomWithoutRetarget,
+} from "../src/camera";
 import type { Bounds3D } from "../src/types";
 
 Object.defineProperties(globalThis, {
@@ -115,6 +120,47 @@ test("expands the far plane enough to contain the bounded graph at deep zoom", (
   const far = camera.view().props.far;
   assert.equal(typeof far, "number");
   assert.ok((far as number) > 1 + graphDepth);
+});
+
+test("wheel curve is symmetric and capped at one level per event", () => {
+  const dz = wheelDeltaToZoom(100);
+  assert.ok(dz > 0 && dz < 1);
+  assert.equal(wheelDeltaToZoom(-100), -dz);
+  assert.ok(wheelDeltaToZoom(1e9) <= 1);
+});
+
+test("anchored zoom-in converges the pivot onto the anchor", () => {
+  const state = {
+    target: [12, -4, 8] as [number, number, number],
+    zoom: 3,
+    rotationX: 25,
+    rotationOrbit: 40,
+  };
+  const anchor: [number, number, number] = [40, 10, -6];
+  const dz = 0.5;
+
+  const next = zoomTowardAnchor(state, anchor, dz);
+  assert.equal(next.zoom, state.zoom + dz);
+  assert.equal(next.rotationX, state.rotationX);
+  assert.equal(next.rotationOrbit, state.rotationOrbit);
+  // 像素钉住不变量:2^zoom·(anchor−target) 缩放前后一致
+  for (let i = 0; i < 3; i++) {
+    assert.ok(
+      Math.abs(
+        2 ** next.zoom * ((anchor[i] ?? 0) - (next.target[i] ?? 0)) -
+          2 ** state.zoom * ((anchor[i] ?? 0) - (state.target[i] ?? 0)),
+      ) < 1e-9,
+    );
+  }
+  // 反复放大后枢轴指数收敛到锚点:深缩放不再停滞
+  let s = state;
+  for (let i = 0; i < 40; i++) s = zoomTowardAnchor(s, anchor, dz);
+  const dist = Math.hypot(
+    s.target[0] - anchor[0],
+    s.target[1] - anchor[1],
+    s.target[2] - anchor[2],
+  );
+  assert.ok(dist < 1e-4);
 });
 
 test("blank-space wheel zoom preserves the current focus", () => {

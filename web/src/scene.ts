@@ -10,12 +10,14 @@
 
 import { Deck, LayerExtension, OrbitView } from "@deck.gl/core";
 import type {
+  DeckProps,
   OrbitViewState,
   ViewStateChangeParameters,
 } from "@deck.gl/core";
 import { Buffer as LumaBuffer } from "@luma.gl/core";
 import type { Device } from "@luma.gl/core";
 import { IconLayer, LineLayer, ScatterplotLayer } from "@deck.gl/layers";
+import { cursorRay, nearestAlongRay } from "./anchor";
 import {
   AtlasOrbitController,
   Camera,
@@ -303,6 +305,8 @@ export class Scene {
   private lastSelection: number | null = null;
   private lastPickCycle: { x: number; y: number; depth: number } | null =
     null;
+  private anchorCache: { x: number; y: number; rank: number; at: number } | null =
+    null;
 
   constructor(
     parent: HTMLDivElement,
@@ -326,7 +330,10 @@ export class Scene {
         scrollZoom: { speed: 0.01, smooth: false },
         doubleClickZoom: false,
         dragMode: "pan",
-      },
+        // 自定义选项经 view 的 controllerProps 原样透传给控制器,
+        // deck 的 ControllerOptions 类型未涵盖
+        zoomAnchor: (px: number, py: number) => this.rayAnchor(px, py),
+      } as DeckProps["controller"],
       initialViewState: this.camera.viewState,
       pickingRadius: 5,
       onResize: ({ height }) => {
@@ -400,6 +407,42 @@ export class Scene {
       this.render();
     });
     return { ...viewState, ...this.camera.viewState } as ViewStateT;
+  }
+
+  /** 滚轮放大的视线锚点：光标射线附近（60px 视锥角内）最近的可见
+   * 节点。手势期间按光标位置缓存（含脱靶结果），高频 wheel 事件
+   * 不重复全量扫描；俯视正交下角度度量退化，交给原地缩放。 */
+  private rayAnchor(px: number, py: number): [number, number, number] | null {
+    const now = performance.now();
+    const c = this.anchorCache;
+    if (
+      c &&
+      Math.abs(px - c.x) <= 8 &&
+      Math.abs(py - c.y) <= 8 &&
+      now - c.at < 400
+    ) {
+      c.at = now;
+      return c.rank >= 0 ? this.posOf(c.rank) : null;
+    }
+    if (this.camera.ortho || !this.geo.loaded) return null;
+    const viewport = this.deck.getViewports()[0];
+    if (!viewport) return null;
+    const ray = cursorRay(viewport, px, py);
+    if (!ray) return null;
+    // OrbitViewport 的 focalDistance 以视口高度为单位（0.5/tan(fovy/2))
+    const focalPx =
+      ((viewport as { focalDistance?: number }).focalDistance ?? 1) *
+      viewport.height;
+    const rank = nearestAlongRay(
+      this.geo.positions,
+      this.geo.loaded,
+      ray.origin,
+      ray.dir,
+      60 / Math.max(focalPx, 1),
+      (r) => this.isVisible(r),
+    );
+    this.anchorCache = { x: px, y: py, rank, at: now };
+    return rank >= 0 ? this.posOf(rank) : null;
   }
 
   posOf(rank: number): [number, number, number] | null {
