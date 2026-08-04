@@ -41,8 +41,14 @@ CHARACTER_APPEAR_TYPES = {
     6: "声库",
 }
 
-# enum codes outside the current contract, keyed by (scope, namespace, code);
-# reported at the end of the parquet stage so mapping staleness is loud
+# Audited exceptions in the current Archive snapshot. Any new key or increase
+# is schema/mapping drift and must stop the build before database loading.
+ENUM_ANOMALY_BASELINES: dict[tuple[str, int | str, int | None], int] = {
+    ("Person.type", "*", 0): 1,  # Archive historical dirty row: id=22
+    ("RELATES_TO", 4, 4013): 6,  # upstream-deleted historical relation code
+}
+
+# Enum codes outside the current contract, keyed by (scope, namespace, code).
 unknown_codes: Counter[tuple[str, int | str, int | None]] = Counter()
 
 
@@ -773,17 +779,28 @@ def report_unknown_codes() -> None:
         print("  all enum codes decoded")
         return
     total = sum(unknown_codes.values())
-    print(
-        f"  WARNING: {total:,} records with enum codes outside the current "
-        f"contract (stale mappings or legacy dirty data):"
-    )
+    print(f"  {total:,} records with enum codes outside the current contract:")
     entries = sorted(
         unknown_codes.items(),
         key=lambda item: tuple(str(part) for part in item[0]),
     )
-    for (scope, namespace, code), count in entries:
+    growth: list[str] = []
+    for key, count in entries:
+        scope, namespace, code = key
+        baseline = ENUM_ANOMALY_BASELINES.get(key, 0)
+        status = "info" if count <= baseline else "MISMATCH"
         print(
-            f"    {scope} namespace={namespace} code={code}: {count:,} records"
+            f"    {status:8s} {scope} namespace={namespace} code={code}: "
+            f"{count:,} records (baseline {baseline:,})"
+        )
+        if count > baseline:
+            growth.append(
+                f"{scope}[namespace={namespace},code={code}] "
+                f"+{count - baseline}"
+            )
+    if growth:
+        raise RuntimeError(
+            "enum anomaly baseline exceeded: " + ", ".join(growth)
         )
 
 

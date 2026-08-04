@@ -38,6 +38,16 @@ class SourceEnumCoverageTests(unittest.TestCase):
                 },
             )
 
+    def test_only_growth_beyond_the_audited_baseline_is_rejected(self) -> None:
+        growth = verify_db.enum_anomaly_growth(
+            {
+                "Person.type": Counter({0: 2}),
+                "Episode.type": Counter({7: 1}),
+            }
+        )
+
+        self.assertEqual(growth, {"Person.type": 1, "Episode.type": 1})
+
 
 if __name__ == "__main__":
     unittest.main()
