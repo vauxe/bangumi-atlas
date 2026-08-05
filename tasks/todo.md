@@ -3,11 +3,11 @@
 ## Task 1: Deterministic island packing
 
 **Acceptance criteria:**
-- [ ] Island bounding spheres have at least the configured gap.
-- [ ] Packing is deterministic and remains three-dimensional.
+- [x] Island bounding spheres have at least the configured gap.
+- [x] Packing is deterministic and remains three-dimensional.
 
 **Verification:**
-- [ ] `uv run python -m unittest tests.test_layout_geometry`
+- [x] `uv run python -m unittest tests.test_layout_geometry`
 
 **Dependencies:** None
 
@@ -18,13 +18,13 @@
 ## Task 2: Component-aware hierarchy
 
 **Acceptance criteria:**
-- [ ] Giant-component communities become separated islands.
-- [ ] Small components are satellites and isolated nodes remain the outer shell.
-- [ ] Shape identity includes every new geometry operation and constant.
+- [x] Giant-component communities become separated islands.
+- [x] Small components are satellites and isolated nodes remain the outer shell.
+- [x] Shape identity includes every new geometry operation and constant.
 
 **Verification:**
-- [ ] Focused tests pass.
-- [ ] Full Python quality gate passes.
+- [x] Focused tests pass.
+- [x] Full Python quality gate passes.
 
 **Dependencies:** Task 1
 
@@ -36,13 +36,13 @@
 ## Task 3: Real-data rebuild and runtime verification
 
 **Acceptance criteria:**
-- [ ] Layout report records component, island, gap, and compactness metrics.
-- [ ] SiteRelease verification passes.
-- [ ] Real browser view visibly separates the connected-body communities while
+- [x] Layout report records component, island, gap, and compactness metrics.
+- [x] SiteRelease verification passes.
+- [x] Real browser view visibly separates the connected-body communities while
   retaining the shell.
 
 **Verification:**
-- [ ] Run the layout, bake, verify, client, smoke, and browser commands from
+- [x] Run the layout, bake, verify, client, smoke, and browser commands from
   `tasks/spec.md`.
 
 **Dependencies:** Task 2
