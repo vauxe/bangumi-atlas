@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildWorkingLabels, declutter } from "../src/labels";
+import {
+  buildWorkingLabels,
+  declutter,
+  perspectiveTextSize,
+} from "../src/labels";
 import type { WorkingEdge, WorkingMember } from "../src/labels";
 
 const members: WorkingMember[] = [
@@ -52,4 +56,24 @@ test("declutters by priority: the selected node's name always wins", () => {
     { position: [200, 0, 0] as [number, number, number], text: "乙", priority: 10 },
   ];
   assert.equal(declutter(spread, flat, 12, []).length, 2);
+});
+
+test("keeps label screen size when another zoom anchor pushes it deeper", () => {
+  // 该投影令 clip.w = z + 1；TextLayer 的像素偏移随后会除以 w。
+  const viewport = {
+    focalDistance: 1,
+    viewProjectionMatrix: [
+      1, 0, 0, 0,
+      0, 1, 0, 0,
+      0, 0, 1, 1,
+      0, 0, 0, 1,
+    ],
+  };
+  const apparentPixels = (z: number): number => {
+    const requested = perspectiveTextSize([0, 0, z], 14, viewport);
+    return (requested * viewport.focalDistance) / (z + 1);
+  };
+
+  assert.equal(apparentPixels(0), 14);
+  assert.equal(apparentPixels(3), 14);
 });

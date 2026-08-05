@@ -317,7 +317,7 @@ async function boot(): Promise<void> {
     hud.textContent = "";
   }
 
-  /** 相机语义:fly = 飞行聚焦;center = 枢轴滑移保持缩放;
+  /** 相机语义:fly = 飞行聚焦;center = 远处才滑移枢轴并保持缩放;
    * none = 不动相机(URL 还原,尊重链接机位)。 */
   async function select(
     rank: number,
@@ -357,7 +357,7 @@ async function boot(): Promise<void> {
     }
     if (cam === "fly") scene.flyTo(rank);
     else if (cam === "center")
-      scene.flyTo(rank, scene.getViewState().zoom);
+      scene.centerSelection(rank);
     const [factsPage, mappings] = await Promise.all([
       data.factsFor(key),
       data.mappings(),

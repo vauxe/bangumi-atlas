@@ -544,6 +544,21 @@ export class Scene {
     const pos = this.posOf(rank);
     if (!pos) return;
     const next = this.camera.flyTo(pos, zoom);
+    this.applyTransition(next);
+  }
+
+  centerSelection(rank: number): void {
+    const pos = this.posOf(rank);
+    if (!pos) return;
+    const next = this.camera.centerSelection(pos);
+    if (!next) {
+      this.render();
+      return;
+    }
+    this.applyTransition(next);
+  }
+
+  private applyTransition(next: OrbitState & Record<string, unknown>): void {
     this.deck.setProps({
       views: this.camera.view(),
       initialViewState: next,
@@ -847,22 +862,24 @@ export class Scene {
     const { nameOf } = this.cb;
     if (nameOf) {
       const viewport = this.deck.getViewports()[0];
-      const { layers: nameLayers, missing } = workingLabelLayers(
-        [
-          { rank: sel, pos: selPos },
-          ...shown.map((s) => ({ rank: s.rank, pos: s.pos })),
-        ],
-        edgeSegs,
-        nameOf,
-        (p) => {
-          if (!viewport) return null;
-          const s = viewport.project(p) as number[];
-          return [s[0] ?? 0, s[1] ?? 0];
-        },
-        this.camera.viewState.zoom,
-      );
-      if (missing.length) this.requestLabelNames(missing);
-      layers.push(...nameLayers);
+      if (viewport) {
+        const { layers: nameLayers, missing } = workingLabelLayers(
+          [
+            { rank: sel, pos: selPos },
+            ...shown.map((s) => ({ rank: s.rank, pos: s.pos })),
+          ],
+          edgeSegs,
+          nameOf,
+          (p) => {
+            const s = viewport.project(p) as number[];
+            return [s[0] ?? 0, s[1] ?? 0];
+          },
+          viewport,
+          this.camera.viewState.zoom,
+        );
+        if (missing.length) this.requestLabelNames(missing);
+        layers.push(...nameLayers);
+      }
     }
     // 选中后只播放一次 500ms 扩散，避免持续动画干扰浏览。
     if (!reduced && t < PULSE_MS) {

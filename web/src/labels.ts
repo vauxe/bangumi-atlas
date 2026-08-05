@@ -22,9 +22,9 @@ const LABEL_DEPTH = {
 // 基准字号(聚焦层级下的屏显像素);字号随 zoom 缩放:
 // 远处钳制在基准值保持可读,拉近时随节点一起放大,封顶 2 倍——
 // 固定像素字号会在节点放大时显得"越缩放字越小"。
-// 注意必须用像素单位 + CPU 逐帧算值:deck 的 min/maxPixels 钳制
-// 发生在透视除法之前,common 字号会随标签自身深度被再压小
-// (朝空白缩放把工作集甩到枢轴平面之后时,字会莫名变小)。
+// 注意必须用像素单位 + CPU 逐帧补偿 clip.w:deck 的文字偏移
+// 仍发生在透视除法之前；朝其他节点缩放时，工作集会落到新枢轴
+// 平面之后，不补偿会随自身深度变小。
 const NODE_NAME_SIZE = 14;
 const EDGE_NAME_SIZE = 12;
 
@@ -43,6 +43,30 @@ export interface WorkingEdge {
 export type ScreenProjector = (
   pos: [number, number, number],
 ) => [number, number] | null;
+
+export interface PerspectiveViewport {
+  focalDistance: number;
+  viewProjectionMatrix: readonly number[];
+}
+
+/** TextLayer 的像素偏移最终会除以 clip.w；按同一投影矩阵反向补偿，
+ * 使标签移到枢轴平面前后时仍保持目标 CSS 像素字号。 */
+export function perspectiveTextSize(
+  pos: readonly [number, number, number],
+  screenPixels: number,
+  viewport: PerspectiveViewport,
+): number {
+  const m = viewport.viewProjectionMatrix;
+  const clipW =
+    (m[3] ?? 0) * pos[0] +
+    (m[7] ?? 0) * pos[1] +
+    (m[11] ?? 0) * pos[2] +
+    (m[15] ?? 0);
+  const focal = viewport.focalDistance;
+  if (!Number.isFinite(clipW) || clipW <= 0 || !Number.isFinite(focal) || focal <= 0)
+    return screenPixels;
+  return (screenPixels * clipW) / focal;
+}
 
 interface LabelItem {
   position: [number, number, number];
@@ -143,6 +167,7 @@ export function workingLabelLayers(
   edges: WorkingEdge[],
   nameOf: (rank: number) => string | null,
   project: ScreenProjector,
+  viewport: PerspectiveViewport,
   zoom: number,
 ): { layers: unknown[]; missing: number[] } {
   const data = buildWorkingLabels(members, edges, nameOf);
@@ -200,7 +225,8 @@ export function workingLabelLayers(
         ...common,
         id: "ws-node-names",
         data: nodes,
-        getSize: nodePx,
+        getSize: (d: LabelItem) =>
+          perspectiveTextSize(d.position, nodePx, viewport),
         getPixelOffset: [0, offsetY],
         getColor: [240, 242, 246, 245],
         outlineWidth: 2,
@@ -214,7 +240,8 @@ export function workingLabelLayers(
         ...common,
         id: "ws-edge-names",
         data: edgeNames,
-        getSize: edgePx,
+        getSize: (d: LabelItem) =>
+          perspectiveTextSize(d.position, edgePx, viewport),
         getPixelOffset: [0, 0],
         getColor: [242, 160, 205, 235],
         outlineWidth: 2,
@@ -231,7 +258,12 @@ export function workingLabelLayers(
         getPosition: (d: { position: [number, number, number] }) =>
           d.position,
         getText: () => "▶",
-        getSize: Math.min(18, Math.max(10, 10 * scale)),
+        getSize: (d: { position: [number, number, number] }) =>
+          perspectiveTextSize(
+            d.position,
+            Math.min(18, Math.max(10, 10 * scale)),
+            viewport,
+          ),
         getAngle: (d: { angle: number }) => d.angle,
         getColor: [242, 160, 205, 230],
         outlineWidth: 1,

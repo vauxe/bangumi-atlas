@@ -72,6 +72,32 @@ test("keeps focus and explicit zoom independent of full-graph fit", () => {
   assert.equal(largeWorld.viewState.zoom, 12);
 });
 
+test("single-click selection preserves the view for a nearby node", () => {
+  const camera = new Camera(cube(100));
+  camera.absorb({
+    target: [0, 0, 0],
+    zoom: 6,
+    rotationX: 35,
+    rotationOrbit: 20,
+  });
+
+  const nearby = camera.centerSelection([1, 0, 0]);
+  assert.equal(nearby, null);
+  assert.deepEqual(camera.viewState, {
+    target: [0, 0, 0],
+    zoom: 6,
+    rotationX: 35,
+    rotationOrbit: 20,
+  });
+
+  const distant = camera.centerSelection([2, 0, 0]);
+  assert.ok(distant);
+  assert.deepEqual(camera.viewState.target, [2, 0, 0]);
+  assert.equal(camera.viewState.zoom, 6);
+  assert.equal(camera.viewState.rotationX, 35);
+  assert.equal(camera.viewState.rotationOrbit, 20);
+});
+
 test("centers home and leaves restored or deliberate pans free", () => {
   const bounds: Bounds3D = [
     [-311.69, -89.26, -311.69],
