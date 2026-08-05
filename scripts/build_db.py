@@ -13,12 +13,19 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import enum_mappings
 import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+if TYPE_CHECKING:
+    from build_lock import PARQUET_BUILD_MARKER, parquet_layout_lock
+elif __package__:
+    from scripts.build_lock import PARQUET_BUILD_MARKER, parquet_layout_lock
+else:
+    from build_lock import PARQUET_BUILD_MARKER, parquet_layout_lock
 
 ROOT = Path(__file__).resolve().parent.parent
 DUMP = ROOT / "data" / "dump"
@@ -222,6 +229,7 @@ def write_parquet_rows(
     staging = PARQUET / f".{name}.parquet.build"
     staging.unlink(missing_ok=True)
     columns: dict[str, list[Any]] = {field.name: [] for field in schema}
+    buffers = list(columns.values())
     count = 0
     writer = pq.ParquetWriter(staging, schema)
 
@@ -234,8 +242,8 @@ def write_parquet_rows(
 
     try:
         for row in rows:
-            for field, value in zip(schema, row, strict=True):
-                columns[field.name].append(value)
+            for buffer, value in zip(buffers, row, strict=True):
+                buffer.append(value)
             count += 1
             if count % batch_rows == 0:
                 flush()
@@ -250,7 +258,7 @@ def write_parquet_rows(
     return count
 
 
-def build_parquet() -> dict[str, int]:
+def _build_parquet_unlocked() -> dict[str, int]:
     unknown_codes.clear()
     relations, staffs, platforms, person_relations, voice_roles = (
         load_mappings()
@@ -667,6 +675,17 @@ def build_parquet() -> dict[str, int]:
     edge_file("person_rel", rel_spec, person_rel_rows("prsn", person_ids))
     edge_file("character_rel", rel_spec, person_rel_rows("crt", character_ids))
     return stats
+
+
+def build_parquet() -> dict[str, int]:
+    """Build one complete Parquet generation while layout readers wait."""
+    with parquet_layout_lock(PARQUET):
+        PARQUET.mkdir(parents=True, exist_ok=True)
+        marker = PARQUET / PARQUET_BUILD_MARKER
+        marker.write_text("Parquet publication did not complete.\n")
+        stats = _build_parquet_unlocked()
+        marker.unlink()
+        return stats
 
 
 DDL = """

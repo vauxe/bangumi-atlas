@@ -3,6 +3,7 @@ __pycache__/
 data/dump/
 data/dump.zip
 data/parquet/
+data/.parquet-layout.lock
 db/
 .ruff_cache/
 .DS_Store

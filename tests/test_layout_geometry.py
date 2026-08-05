@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
 from collections.abc import Callable
+from pathlib import Path
 from unittest import mock
 
 import igraph as ig
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from scripts import layout
 from scripts.layout import (
@@ -424,6 +429,276 @@ class ShapeIdentityTests(unittest.TestCase):
             layout._canonical_logic(documented()),
             layout._canonical_logic(reworded()),
         )
+
+
+class LayoutCacheTests(unittest.TestCase):
+    def write_inputs(self, parquet: Path) -> None:
+        parquet.mkdir()
+        for index, name in enumerate(layout.LAYOUT_INPUT_FILES):
+            (parquet / name).write_bytes(f"input-{index}".encode())
+
+    def write_outputs(self, output: Path, shape: str) -> None:
+        output.mkdir()
+        pq.write_table(
+            pa.table(
+                {
+                    "key": pa.array([0x01000001], pa.uint32()),
+                    "x": pa.array([1.0], pa.float32()),
+                    "y": pa.array([2.0], pa.float32()),
+                    "z": pa.array([3.0], pa.float32()),
+                    "community": pa.array([0], pa.uint16()),
+                    "isolated": pa.array([False]),
+                    "collect": pa.array([4], pa.int64()),
+                    "year": pa.array([2000], pa.uint16()),
+                    "degree": pa.array([1], pa.int64()),
+                },
+                schema=layout.LAYOUT_SCHEMA,
+            ),
+            output / "coords.parquet",
+        )
+        (output / "report.json").write_text(
+            json.dumps(
+                {
+                    "dimensions": 3,
+                    "shape_digest": shape,
+                    "n_nodes": 1,
+                    "n_connected": 1,
+                }
+            )
+        )
+
+    def test_cache_hit_requires_exact_inputs_and_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parquet = root / "parquet"
+            output = root / "layout"
+            self.write_inputs(parquet)
+            shape = "shape-v1"
+            self.write_outputs(output, shape)
+            input_digest = layout.layout_input_digest(parquet)
+            layout.write_layout_cache(output, input_digest, shape)
+
+            self.assertTrue(
+                layout.layout_cache_matches(output, input_digest, shape)
+            )
+
+            first_input = parquet / layout.LAYOUT_INPUT_FILES[0]
+            first_input.write_bytes(b"changed")
+            self.assertFalse(
+                layout.layout_cache_matches(
+                    output, layout.layout_input_digest(parquet), shape
+                )
+            )
+            first_input.write_bytes(b"input-0")
+
+            coords = output / "coords.parquet"
+            coords.write_bytes(coords.read_bytes() + b"corrupt")
+            self.assertFalse(
+                layout.layout_cache_matches(output, input_digest, shape)
+            )
+
+    def test_cache_rejects_report_or_shape_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parquet = root / "parquet"
+            output = root / "layout"
+            self.write_inputs(parquet)
+            self.write_outputs(output, "shape-v1")
+            input_digest = layout.layout_input_digest(parquet)
+            layout.write_layout_cache(output, input_digest, "shape-v1")
+
+            self.assertFalse(
+                layout.layout_cache_matches(output, input_digest, "shape-v2")
+            )
+            with mock.patch.object(
+                layout, "layout_cache_identity", return_value="changed"
+            ):
+                self.assertFalse(
+                    layout.layout_cache_matches(
+                        output, input_digest, "shape-v1"
+                    )
+                )
+            report = output / "report.json"
+            report.write_text(report.read_text() + "\n")
+            self.assertFalse(
+                layout.layout_cache_matches(output, input_digest, "shape-v1")
+            )
+            report.write_text("[]")
+            self.assertFalse(
+                layout.layout_cache_matches(output, input_digest, "shape-v1")
+            )
+
+    def test_main_cache_hit_does_not_load_or_rewrite_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parquet = root / "parquet"
+            output = root / "layout"
+            self.write_inputs(parquet)
+            shape = shape_digest()
+            self.write_outputs(output, shape)
+            input_digest = layout.layout_input_digest(parquet)
+            layout.write_layout_cache(output, input_digest, shape)
+            artifacts = [output / "coords.parquet", output / "report.json"]
+            before = {
+                path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in artifacts
+            }
+
+            with (
+                mock.patch.object(layout, "PARQUET", parquet),
+                mock.patch.object(layout, "OUT", output),
+                mock.patch.object(
+                    layout,
+                    "load_nodes",
+                    side_effect=AssertionError("cache hit loaded nodes"),
+                ),
+                mock.patch.object(
+                    layout,
+                    "load_edges",
+                    side_effect=AssertionError("cache hit loaded edges"),
+                ),
+                mock.patch.object(
+                    layout,
+                    "hierarchical_connected_layout",
+                    side_effect=AssertionError("cache hit ran layout"),
+                ),
+                mock.patch("sys.argv", ["layout.py"]),
+            ):
+                layout.main()
+
+            after = {
+                path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in artifacts
+            }
+            self.assertEqual(after, before)
+
+    def test_force_removes_cache_before_recompute(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parquet = root / "parquet"
+            output = root / "layout"
+            self.write_inputs(parquet)
+            shape = shape_digest()
+            self.write_outputs(output, shape)
+            input_digest = layout.layout_input_digest(parquet)
+            layout.write_layout_cache(output, input_digest, shape)
+
+            with (
+                mock.patch.object(layout, "PARQUET", parquet),
+                mock.patch.object(layout, "OUT", output),
+                mock.patch.object(
+                    layout,
+                    "load_nodes",
+                    side_effect=RuntimeError("recompute started"),
+                ),
+                mock.patch("sys.argv", ["layout.py", "--force"]),
+                self.assertRaisesRegex(RuntimeError, "recompute started"),
+            ):
+                layout.main()
+
+            self.assertFalse((output / layout.LAYOUT_CACHE_FILE).exists())
+
+    def test_incomplete_parquet_build_is_not_consumed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parquet = root / "parquet"
+            output = root / "layout"
+            self.write_inputs(parquet)
+            (parquet / ".build-in-progress").write_text("interrupted")
+
+            with (
+                mock.patch.object(layout, "PARQUET", parquet),
+                mock.patch.object(layout, "OUT", output),
+                mock.patch("sys.argv", ["layout.py"]),
+                self.assertRaisesRegex(RuntimeError, "incomplete"),
+            ):
+                layout.main()
+
+    def test_input_or_implementation_drift_is_not_published(self) -> None:
+        for drift in ("inputs", "implementation"):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                parquet = root / "parquet"
+                output = root / "layout"
+                self.write_inputs(parquet)
+                self.write_outputs(output, shape_digest())
+                before = {
+                    name: (output / name).read_bytes()
+                    for name in ("coords.parquet", "report.json")
+                }
+                keys = np.array([0x01000001], dtype=np.uint32)
+                empty_edges = np.empty((0, 2), dtype=np.int32)
+                hierarchy = {
+                    "n_community_islands": 0,
+                    "n_satellite_islands": 0,
+                }
+                input_digest = (
+                    mock.patch.object(
+                        layout,
+                        "layout_input_digest",
+                        side_effect=["before", "after"],
+                    )
+                    if drift == "inputs"
+                    else mock.patch.object(
+                        layout, "layout_input_digest", return_value="stable"
+                    )
+                )
+                cache_identity = (
+                    mock.patch.object(
+                        layout,
+                        "layout_cache_identity",
+                        side_effect=["before", "after"],
+                    )
+                    if drift == "implementation"
+                    else mock.patch.object(
+                        layout, "layout_cache_identity", return_value="stable"
+                    )
+                )
+
+                with (
+                    mock.patch.object(layout, "PARQUET", parquet),
+                    mock.patch.object(layout, "OUT", output),
+                    input_digest,
+                    cache_identity,
+                    mock.patch.object(
+                        layout,
+                        "load_nodes",
+                        return_value=(
+                            keys,
+                            np.array([2000], dtype=np.uint16),
+                            np.array([1], dtype=np.int64),
+                        ),
+                    ),
+                    mock.patch.object(
+                        layout, "load_edges", return_value=empty_edges
+                    ),
+                    mock.patch.object(
+                        layout,
+                        "hierarchical_connected_layout",
+                        return_value=(
+                            np.empty((0, 3), dtype=np.float64),
+                            np.empty(0, dtype=np.uint16),
+                            hierarchy,
+                        ),
+                    ),
+                    mock.patch.object(
+                        layout,
+                        "wrap_isolated_shell",
+                        return_value=np.array([[1.0, 2.0, 3.0]]),
+                    ),
+                    mock.patch("sys.argv", ["layout.py", "--force"]),
+                    self.assertRaisesRegex(RuntimeError, f"{drift} changed"),
+                ):
+                    layout.main()
+
+                self.assertEqual(
+                    {
+                        name: (output / name).read_bytes()
+                        for name in ("coords.parquet", "report.json")
+                    },
+                    before,
+                )
+                self.assertFalse((output / layout.LAYOUT_CACHE_FILE).exists())
 
 
 if __name__ == "__main__":

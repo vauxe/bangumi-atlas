@@ -10,13 +10,20 @@ import textwrap
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import igraph as ig
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 from scipy.spatial import cKDTree
+
+if TYPE_CHECKING:
+    from build_lock import PARQUET_BUILD_MARKER, parquet_layout_lock
+elif __package__:
+    from scripts.build_lock import PARQUET_BUILD_MARKER, parquet_layout_lock
+else:
+    from build_lock import PARQUET_BUILD_MARKER, parquet_layout_lock
 
 ROOT = Path(__file__).resolve().parent.parent
 PARQUET = ROOT / "data" / "parquet"
@@ -31,6 +38,27 @@ EDGE_FILES = [
     ("person_rel", "from_id", "person", "to_id", "person"),
     ("character_rel", "from_id", "character", "to_id", "character"),
 ]
+LAYOUT_INPUT_FILES = (
+    "subject.parquet",
+    "person.parquet",
+    "character.parquet",
+    *(f"{name}.parquet" for name, *_ in EDGE_FILES),
+)
+LAYOUT_CACHE_FILE = "cache.json"
+LAYOUT_CACHE_FORMAT = "layout-cache-v2"
+LAYOUT_SCHEMA = pa.schema(
+    [
+        ("key", pa.uint32()),
+        ("x", pa.float32()),
+        ("y", pa.float32()),
+        ("z", pa.float32()),
+        ("community", pa.uint16()),
+        ("isolated", pa.bool_()),
+        ("collect", pa.int64()),
+        ("year", pa.uint16()),
+        ("degree", pa.int64()),
+    ]
+)
 
 # UMAP preserves local topology inside each island; Leiden and a weighted
 # community supergraph provide the global hierarchy.
@@ -816,6 +844,115 @@ def shape_digest() -> str:
     ).hexdigest()
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def layout_input_digest(parquet: Path = PARQUET) -> str:
+    """Identify every Parquet file that can affect layout output."""
+    entries = [
+        [name, _file_sha256(parquet / name)] for name in LAYOUT_INPUT_FILES
+    ]
+    return hashlib.sha256(
+        json.dumps(entries, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _artifact_fingerprint(path: Path) -> dict[str, int | str]:
+    return {"bytes": path.stat().st_size, "sha256": _file_sha256(path)}
+
+
+def layout_cache_identity() -> str:
+    """Identify the local implementation and locked dependency contract."""
+    files = {"layout.py": _file_sha256(Path(__file__))}
+    lockfile = ROOT / "uv.lock"
+    if lockfile.exists():
+        files["uv.lock"] = _file_sha256(lockfile)
+    return hashlib.sha256(
+        json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _layout_outputs_valid(output: Path, current_shape_digest: str) -> bool:
+    try:
+        report = json.loads((output / "report.json").read_text())
+        if not isinstance(report, dict):
+            return False
+        parquet = pq.ParquetFile(output / "coords.parquet")
+        rows = parquet.metadata.num_rows
+        connected = report.get("n_connected")
+        return (
+            not report.get("stub")
+            and report.get("dimensions") == 3
+            and report.get("shape_digest") == current_shape_digest
+            and report.get("n_nodes") == rows
+            and isinstance(connected, int)
+            and 0 <= connected <= rows
+            and parquet.schema_arrow == LAYOUT_SCHEMA
+        )
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def write_layout_cache(
+    output: Path,
+    input_digest: str,
+    current_shape_digest: str,
+    cache_identity: str | None = None,
+) -> None:
+    """Publish a cache stamp only after both layout artifacts are valid."""
+    if not _layout_outputs_valid(output, current_shape_digest):
+        raise ValueError("refusing to cache invalid layout outputs")
+    cache = {
+        "format": LAYOUT_CACHE_FORMAT,
+        "input_digest": input_digest,
+        "shape_digest": current_shape_digest,
+        "cache_identity": cache_identity or layout_cache_identity(),
+        "artifacts": {
+            name: _artifact_fingerprint(output / name)
+            for name in ("coords.parquet", "report.json")
+        },
+    }
+    target = output / LAYOUT_CACHE_FILE
+    staging = output / f".{LAYOUT_CACHE_FILE}.build"
+    staging.write_text(json.dumps(cache, sort_keys=True))
+    staging.replace(target)
+
+
+def layout_cache_matches(
+    output: Path,
+    input_digest: str,
+    current_shape_digest: str,
+    cache_identity: str | None = None,
+) -> bool:
+    """Return true only for an intact layout built from the exact inputs."""
+    try:
+        cache = json.loads((output / LAYOUT_CACHE_FILE).read_text())
+        if (
+            not isinstance(cache, dict)
+            or cache.get("format") != LAYOUT_CACHE_FORMAT
+            or cache.get("input_digest") != input_digest
+            or cache.get("shape_digest") != current_shape_digest
+            or cache.get("cache_identity")
+            != (cache_identity or layout_cache_identity())
+            or not _layout_outputs_valid(output, current_shape_digest)
+        ):
+            return False
+        artifacts = cache.get("artifacts")
+        if not isinstance(artifacts, dict):
+            return False
+        return all(
+            artifacts.get(name) == _artifact_fingerprint(output / name)
+            for name in ("coords.parquet", "report.json")
+        )
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+        return False
+
+
 def edge_compactness(coords: np.ndarray, edges: np.ndarray) -> float | None:
     """Mean edge length divided by mean random-pair length."""
     if not len(edges) or len(coords) < 2:
@@ -834,8 +971,24 @@ def edge_compactness(coords: np.ndarray, edges: np.ndarray) -> float | None:
     return float(edge_length.mean()) / mean_random if mean_random else None
 
 
-def main() -> None:
-    argparse.ArgumentParser().parse_args()
+def _build_layout(force: bool) -> None:
+    marker = PARQUET / PARQUET_BUILD_MARKER
+    if marker.exists():
+        raise RuntimeError(
+            f"Parquet build incomplete ({marker}); rerun build_db.py"
+        )
+    current_shape_digest = shape_digest()
+    input_digest = layout_input_digest(PARQUET)
+    cache_identity = layout_cache_identity()
+    if not force and layout_cache_matches(
+        OUT, input_digest, current_shape_digest, cache_identity
+    ):
+        print(
+            f"布局缓存命中 {input_digest[:12]},坐标文件未重写",
+            flush=True,
+        )
+        return
+    (OUT / LAYOUT_CACHE_FILE).unlink(missing_ok=True)
 
     keys, years, collects = load_nodes()
     print(f"节点 {len(keys):,}", flush=True)
@@ -903,7 +1056,7 @@ def main() -> None:
         "seed": SEED,
         "dimensions": int(coords.shape[1]),
         "geometry": "topology-3d-community-islands",
-        "shape_digest": shape_digest(),
+        "shape_digest": current_shape_digest,
         "n_nodes": int(len(keys)),
         "n_connected": int(len(connected)),
         **{
@@ -917,24 +1070,62 @@ def main() -> None:
             round(compactness, 6) if compactness is not None else None
         ),
     }
-    (OUT / "report.json").write_text(json.dumps(report))
-    pq.write_table(
-        pa.table(
-            {
-                "key": pa.array(keys, pa.uint32()),
-                "x": pa.array(coords[:, 0], pa.float32()),
-                "y": pa.array(coords[:, 1], pa.float32()),
-                "z": pa.array(coords[:, 2], pa.float32()),
-                "community": pa.array(communities, pa.uint16()),
-                "isolated": pa.array(isolated),
-                "collect": pa.array(collects, pa.int64()),
-                "year": pa.array(years, pa.uint16()),
-                "degree": pa.array(degree, pa.int64()),
-            }
-        ),
-        OUT / "coords.parquet",
+    table = pa.table(
+        {
+            "key": pa.array(keys, pa.uint32()),
+            "x": pa.array(coords[:, 0], pa.float32()),
+            "y": pa.array(coords[:, 1], pa.float32()),
+            "z": pa.array(coords[:, 2], pa.float32()),
+            "community": pa.array(communities, pa.uint16()),
+            "isolated": pa.array(isolated),
+            "collect": pa.array(collects, pa.int64()),
+            "year": pa.array(years, pa.uint16()),
+            "degree": pa.array(degree, pa.int64()),
+        },
+        schema=LAYOUT_SCHEMA,
+    )
+    report_path = OUT / "report.json"
+    coords_path = OUT / "coords.parquet"
+    report_staging = OUT / ".report.json.build"
+    coords_staging = OUT / ".coords.parquet.build"
+    report_staging.unlink(missing_ok=True)
+    coords_staging.unlink(missing_ok=True)
+    try:
+        report_staging.write_text(json.dumps(report))
+        pq.write_table(table, coords_staging)
+        if layout_input_digest(PARQUET) != input_digest:
+            raise RuntimeError(
+                "layout inputs changed while building; not published"
+            )
+        if layout_cache_identity() != cache_identity:
+            raise RuntimeError(
+                "layout implementation changed while building; not published"
+            )
+        coords_staging.replace(coords_path)
+        report_staging.replace(report_path)
+    finally:
+        report_staging.unlink(missing_ok=True)
+        coords_staging.unlink(missing_ok=True)
+    write_layout_cache(
+        OUT,
+        input_digest,
+        current_shape_digest,
+        cache_identity,
     )
     print(f"已写出 {OUT / 'coords.parquet'}", flush=True)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="ignore a valid layout cache and recompute coordinates",
+    )
+    cli = parser.parse_args()
+    OUT.mkdir(parents=True, exist_ok=True)
+    with parquet_layout_lock(PARQUET):
+        _build_layout(cli.force)
 
 
 if __name__ == "__main__":
