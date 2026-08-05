@@ -26,6 +26,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import site_release as sr
 from community_labels import build_community_labels
+from layout import shape_digest
 from opencc import OpenCC
 from site_contracts import (
     read_dump_version,
@@ -303,7 +304,8 @@ def main() -> None:  # noqa: PLR0915
     if not LAYOUT_REPORT.exists():
         sys.exit("FAILED: data/layout/report.json 缺失,先运行 layout.py")
     layout_report = validate_layout_report(
-        orjson.loads(LAYOUT_REPORT.read_bytes())
+        orjson.loads(LAYOUT_REPORT.read_bytes()),
+        shape_digest=shape_digest(),
     )
     shutil.rmtree(SITE, ignore_errors=True)
     SITE.mkdir(parents=True, exist_ok=True)

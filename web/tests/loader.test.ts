@@ -97,7 +97,7 @@ function testManifest(
     ],
     year_range: [1900, 2035],
     tags: [],
-    layout: { dimensions: 3, geometry: "topology-3d" },
+    layout: { dimensions: 3, shape_digest: "c80e48f8" },
     files: completeFiles,
     core_bytes: 0,
     total_bytes: Object.values(completeFiles).reduce(
@@ -154,11 +154,11 @@ test("rejects obsolete geometry manifests before streaming", async () => {
 
   const obsoleteLayout = {
     ...testManifest({}),
-    layout: { dimensions: 2, geometry: "planar" },
+    layout: { dimensions: 2, shape_digest: "c80e48f8" },
   };
   globalThis.fetch = (async () =>
     new Response(JSON.stringify(obsoleteLayout))) as typeof fetch;
-  await assert.rejects(loadManifest(), /布局应为 topology-3d.*重建站点数据/);
+  await assert.rejects(loadManifest(), /布局应为 3D.*实际为 2.*重建站点数据/);
 });
 
 test("loads and caches only the requested name blocks", async () => {

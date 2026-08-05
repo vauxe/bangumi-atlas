@@ -44,7 +44,8 @@ uv run python scripts/verify_site.py
 - 快照 SHA-256 与上游 `aux/latest.json` 不符。
 - 枚举异常超过 `build_db.py` 的 `ENUM_ANOMALY_BASELINES`，说明上游枚举漂移，需
   人工审计后更新基线。
-- `data/layout/report.json` 缺失，或几何并非三维 `topology-3d`。
+- `data/layout/report.json` 缺失、并非三维，或 `shape_digest` 与当前整形代码算出
+  的摘要不符（坐标出自另一套整形逻辑，重跑 `layout.py`）。
 
 ## 4. 客户端
 
@@ -73,8 +74,10 @@ kill %1
 
 1. `data/dump/VERSION` —— 上游每周三滚动，`fetch_dump.py` 始终取最新版本。
 2. `data/mappings/manifest.json` 的 commit 与逐文件 SHA-256。
-3. `data/layout/report.json` —— `algo`、`seed` 与 `depth_ratio` 构成布局身份；
-   三者不同即几何形状不同，与上游版本无关。
+3. `data/layout/report.json` —— 身份取 `algo`、`seed` 与 `shape_digest`，三项相同
+   即整形逻辑与常量相同，与上游版本无关；摘要由 `layout.py` 从整形代码算出，改了
+   几何就自动变。`depth_ratio`、邻距和 `edge_compactness` 由数据实测，随上游版本
+   漂移，读作几何质量。
 4. `site/data/manifest.json` 的 `version` —— 相同即整份发布逐字节相同。
 
 前两项相同时，后两项也应相同：布局固定用 UMAP，`layout.py` 播种 igraph 的随机源。

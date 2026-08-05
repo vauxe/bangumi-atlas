@@ -1,10 +1,16 @@
 """Bake a topology-preserving 3D graph layout."""
 
 import argparse
+import ast
+import hashlib
+import inspect
 import json
 import random
+import textwrap
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import igraph as ig
 import numpy as np
@@ -32,8 +38,8 @@ ALGO = "umap"
 # python-igraph draws from the stdlib random module, not numpy.
 SEED = 7
 
-# Keep a navigable map silhouette while allowing topology-derived parallax.
-DEPTH_RATIO = 0.20
+# Topology keeps all three axes: the body stays a volume, and structureless
+# nodes surround it as a shell instead of being pushed into one plane.
 TYPICAL_NODE_DISTANCE = 0.28
 _JITTER_RADIUS = TYPICAL_NODE_DISTANCE * 0.15
 _HALO_GAP = TYPICAL_NODE_DISTANCE * 6
@@ -131,7 +137,7 @@ def _jitter(keys: np.ndarray) -> np.ndarray:
 
 
 def _shape_connected(desired: np.ndarray, keys: np.ndarray) -> np.ndarray:
-    """Orient, flatten and scale continuous 3D topology coordinates."""
+    """Orient and scale continuous 3D topology coordinates."""
     points = desired.astype(np.float64)
     points -= points.mean(axis=0)
     if len(points) > 1:
@@ -139,40 +145,40 @@ def _shape_connected(desired: np.ndarray, keys: np.ndarray) -> np.ndarray:
         values, axes = np.linalg.eigh(covariance)
         points = points @ axes[:, np.argsort(values)[::-1]]
 
-    # Principal components 0/1 form the map; component 2 becomes restrained
-    # depth. Quantiles keep a few outliers from flattening the whole galaxy.
-    horizontal_span = 0.0
+    # Principal components only fix a stable orientation; every axis keeps
+    # its topology-derived extent, so scaling stays uniform and the body
+    # stays a volume. Quantiles keep a few outliers from shrinking it.
+    body_span = 0.0
     if len(points) > 1:
         bounds = np.quantile(points, (0.01, 0.99), axis=0)
-        spans = bounds[1] - bounds[0]
-        horizontal_span = float(max(spans[0], spans[1]))
-        depth_span = float(spans[2])
-        if horizontal_span > 0 and depth_span > 0:
-            points[:, 2] *= DEPTH_RATIO * horizontal_span / depth_span
+        body_span = float((bounds[1] - bounds[0]).max())
 
     coords = points[:, (0, 2, 1)]
-    if horizontal_span > np.finfo(np.float64).eps:
+    if body_span > np.finfo(np.float64).eps:
         target_span = TYPICAL_NODE_DISTANCE * np.sqrt(len(coords))
-        coords *= target_span / horizontal_span
+        coords *= target_span / body_span
     coords += _jitter(keys)
     return coords
 
 
 def _isolated_halo(count: int, inner_radius: float) -> np.ndarray:
-    """Place structureless nodes in a sparse, honest outer halo."""
+    """Spread structureless nodes over a sparse shell around the body.
+
+    A Fibonacci sphere keeps the shell evenly sampled at any count; the
+    radius grows until every node owns a cell, so density never lies.
+    """
     if count == 0:
         return np.empty((0, 3), dtype=np.float64)
     cell_area = np.sqrt(3.0) / 2 * TYPICAL_NODE_DISTANCE**2
-    outer_radius = np.sqrt(inner_radius**2 + count * cell_area / np.pi)
+    radius = max(inner_radius, float(np.sqrt(count * cell_area / (4 * np.pi))))
     order = np.arange(count, dtype=np.float64)
-    fraction = (order + 0.5) / count
-    radius = np.sqrt(
-        inner_radius**2 + fraction * (outer_radius**2 - inner_radius**2)
-    )
+    height = 1.0 - 2.0 * (order + 0.5) / count
+    ring = np.sqrt(np.maximum(0.0, 1.0 - height**2))
     angle = order * _GOLDEN_ANGLE
-    coords = np.zeros((count, 3), dtype=np.float64)
-    coords[:, 0] = np.cos(angle) * radius
-    coords[:, 2] = np.sin(angle) * radius
+    coords = np.empty((count, 3), dtype=np.float64)
+    coords[:, 0] = np.cos(angle) * ring * radius
+    coords[:, 1] = height * radius
+    coords[:, 2] = np.sin(angle) * ring * radius
     return coords
 
 
@@ -182,7 +188,7 @@ def shape_layout(
     degree: np.ndarray,
     years: np.ndarray,
 ) -> np.ndarray:
-    """Create a flattened topology cloud plus an isolated-node halo."""
+    """Create a topology volume wrapped in an isolated-node shell."""
     n = len(keys)
     if desired.shape != (n, 3):
         raise ValueError(f"expected {(n, 3)} desired coordinates")
@@ -195,9 +201,8 @@ def shape_layout(
         coords[connected] = _shape_connected(
             desired[connected], keys[connected]
         )
-        body_radius = float(
-            np.linalg.norm(coords[connected][:, (0, 2)], axis=1).max()
-        )
+        # The body is a volume, so the shell must clear its 3D extent.
+        body_radius = float(np.linalg.norm(coords[connected], axis=1).max())
     else:
         body_radius = 0.0
 
@@ -213,6 +218,46 @@ def shape_layout(
     if not np.isfinite(coords).all():
         raise RuntimeError("layout contains non-finite coordinates")
     return coords.astype(np.float32)
+
+
+# 整形身份由下面这些函数和常量算出,不靠人手维护的形状标签:
+# 忘记改标签会让新几何冒充旧几何,忘记改代码则摘要自然不动。
+_SHAPE_LOGIC = (_jitter, _shape_connected, _isolated_halo, shape_layout)
+_SHAPE_CONSTANTS = {
+    "typical_node_distance": TYPICAL_NODE_DISTANCE,
+    "jitter_radius": _JITTER_RADIUS,
+    "halo_gap": _HALO_GAP,
+    "golden_angle": float(_GOLDEN_ANGLE),
+}
+
+
+def _canonical_logic(fn: Callable[..., Any]) -> str:
+    """函数逻辑的规范形式:注释、空行、缩进和文档字符串都不参与。"""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef | ast.Module):
+            continue
+        head = node.body[0] if node.body else None
+        if (
+            isinstance(head, ast.Expr)
+            and isinstance(head.value, ast.Constant)
+            and isinstance(head.value.value, str)
+        ):
+            del node.body[0]
+    return ast.dump(tree)
+
+
+def shape_digest() -> str:
+    """整形身份:整形逻辑或常量一变,摘要即变。"""
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "constants": _SHAPE_CONSTANTS,
+                "logic": [_canonical_logic(fn) for fn in _SHAPE_LOGIC],
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
 
 
 def edge_compactness(coords: np.ndarray, edges: np.ndarray) -> float | None:
@@ -246,7 +291,7 @@ def main() -> None:
     np.add.at(degree, edges[:, 0], 1)
     np.add.at(degree, edges[:, 1], 1)
     isolated = degree == 0
-    print(f"孤立节点 {isolated.sum():,}(外围光环)", flush=True)
+    print(f"孤立节点 {isolated.sum():,}(外层球壳)", flush=True)
 
     connected = np.flatnonzero(~isolated)
     remap = -np.ones(len(keys), dtype=np.int64)
@@ -301,8 +346,8 @@ def main() -> None:
     report: dict[str, object] = {
         "algo": ALGO,
         "seed": SEED,
-        "dimensions": 3,
-        "geometry": "topology-3d",
+        "dimensions": int(coords.shape[1]),
+        "shape_digest": shape_digest(),
         "n_nodes": int(len(keys)),
         "n_connected": int(len(connected)),
         "min_projected_neighbor_distance": round(min_distance, 6),
