@@ -1,5 +1,3 @@
-/** Optional Bangumi cover media shared by the DOM drawer and deck.gl. */
-
 import { html } from "./html";
 import { eid, etype } from "./types";
 

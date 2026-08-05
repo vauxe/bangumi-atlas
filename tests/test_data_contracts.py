@@ -47,7 +47,6 @@ class SiteReleaseContractTests(unittest.TestCase):
             ((2 << 24) | 1, (3 << 24) | 2, (1 << 24) | 3),
             (0, "备注"),
         )
-        # 仅文本不同的两行是两个事实,不能因侧车另存而合并
         self.assertNotEqual(base, with_text)
 
     def test_canonical_fact_validates_shape(self) -> None:
@@ -161,7 +160,6 @@ class SiteReleaseContractTests(unittest.TestCase):
                     ("core", "sidecar", "omitted"),
                     f"{table}.{field}",
                 )
-        # explorer-v1 不省略任何字段
         self.assertNotIn(
             "omitted",
             {p for f in sr.FIELD_POLICY.values() for p in f.values()},
@@ -205,7 +203,6 @@ class SiteContractTests(unittest.TestCase):
             check({**report, "stub": True})
         with self.assertRaisesRegex(ValueError, "three-dimensional"):
             check({**report, "dimensions": 2})
-        # 整形代码换了一套,旧坐标不能顶着新代码发布
         with self.assertRaisesRegex(ValueError, "rerun layout.py"):
             check({**report, "shape_digest": "94d049bb1"})
         with self.assertRaisesRegex(ValueError, "rerun layout.py"):

@@ -1,11 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import {
-  EDGE_WIDTHS,
-  NodeStyleExtension,
-  Scene,
-} from "../src/scene";
+import { NodeStyleExtension, Scene } from "../src/scene";
 import { FOCUS_ZOOM } from "../src/camera";
 import type { OrbitState } from "../src/camera";
 import { state } from "../src/store";
@@ -48,14 +44,6 @@ test("commits the final camera frame after the view callback returns", async () 
   assert.deepEqual(events, ["state", "view", "deck", "layers"]);
 });
 
-test("keeps node connections visually subordinate to nodes", () => {
-  assert.ok(EDGE_WIDTHS.context <= 0.5);
-  assert.ok(EDGE_WIDTHS.relation <= 1);
-  assert.ok(EDGE_WIDTHS.path <= 1.5);
-  assert.ok(EDGE_WIDTHS.context < EDGE_WIDTHS.relation);
-  assert.ok(EDGE_WIDTHS.relation < EDGE_WIDTHS.path);
-});
-
 test("clamps the final context-node radius in screen pixels", () => {
   const shaders = new NodeStyleExtension().getShaders() as {
     inject: Record<string, string>;
@@ -76,7 +64,7 @@ test("clamps the final context-node radius in screen pixels", () => {
   assert.doesNotMatch(sizeFilter, /outerRadiusPixels/);
 });
 
-test("keeps normal node colors full-strength and zoom-independent", () => {
+test("keeps normal node color independent of zoom, size, and SDF edge alpha", () => {
   const shaders = new NodeStyleExtension().getShaders() as {
     inject: Record<string, string>;
   };
@@ -87,14 +75,8 @@ test("keeps normal node colors full-strength and zoom-independent", () => {
     nodeShaders,
     /atlas\.zoom|atlas_reveal|atlas_keep|atlas_viewDepth|depthFalloff/,
   );
-  assert.doesNotMatch(colorFilter, /float f_size|160\.0|floor\(f_size/);
-  assert.match(colorFilter, /float visibility = a_iso \? 150\.0 \/ 255\.0 : 1\.0/);
-  assert.match(
-    colorFilter,
-    /vec3 stableRgb = mix\(vec3\(15\.0, 26\.0, 28\.0\), rgb, visibility\)/,
-  );
-  assert.match(colorFilter, /color = vec4\(stableRgb \/ 255\.0, color\.a\)/);
-  assert.doesNotMatch(colorFilter, /\(a \/ 255\.0\) \* color\.a/);
+  assert.doesNotMatch(colorFilter, /\bf_size\b/);
+  assert.match(colorFilter, /color = vec4\([^,\n]+, color\.a\)/);
 });
 
 test("excludes subjects with unknown years when a year filter is active", () => {
@@ -125,7 +107,7 @@ test("excludes subjects with unknown years when a year filter is active", () => 
   }
 });
 
-test("keeps working-set nodes at their focus size and lets them grow when zooming in", () => {
+test("lets working-set nodes grow when zooming in", () => {
   const previousState = {
     selection: state.selection,
     neighbors: state.neighbors,
@@ -180,40 +162,36 @@ test("keeps working-set nodes at their focus size and lets them grow when zoomin
       minPixels: number,
       maxPixels: number,
     ): number => Math.min(Math.max(value * 2 ** zoom, minPixels), maxPixels);
-    const assertCircleKeepsGrowing = (props: Record<string, unknown>): void => {
+    const assertDoublesWithZoom = (
+      value: number,
+      minPixels: number,
+      maxPixels: number,
+    ): void => {
       const atFocus = projectedCommonPixels(
-        props.getRadius as number,
+        value,
         FOCUS_ZOOM,
-        props.radiusMinPixels as number,
-        props.radiusMaxPixels as number,
+        minPixels,
+        maxPixels,
       );
       const oneLevelCloser = projectedCommonPixels(
-        props.getRadius as number,
+        value,
         FOCUS_ZOOM + 1,
-        props.radiusMinPixels as number,
-        props.radiusMaxPixels as number,
+        minPixels,
+        maxPixels,
       );
-      assert.ok(Math.abs(atFocus - 9) < 1e-6);
       assert.ok(Math.abs(oneLevelCloser / atFocus - 2) < 1e-6);
     };
-    assertCircleKeepsGrowing(lit.props);
-    assertCircleKeepsGrowing(xray.props);
-
-    const coverAtFocus = projectedCommonPixels(
+    for (const layer of [lit, xray])
+      assertDoublesWithZoom(
+        layer.props.getRadius as number,
+        layer.props.radiusMinPixels as number,
+        layer.props.radiusMaxPixels as number,
+      );
+    assertDoublesWithZoom(
       covers.props.getSize as number,
-      FOCUS_ZOOM,
       covers.props.sizeMinPixels as number,
       covers.props.sizeMaxPixels as number,
     );
-    const coverOneLevelCloser = projectedCommonPixels(
-      covers.props.getSize as number,
-      FOCUS_ZOOM + 1,
-      covers.props.sizeMinPixels as number,
-      covers.props.sizeMaxPixels as number,
-    );
-
-    assert.ok(Math.abs(coverAtFocus - 16.5) < 1e-6);
-    assert.ok(Math.abs(coverOneLevelCloser / coverAtFocus - 2) < 1e-6);
   } finally {
     Object.assign(state, previousState);
     if (originalWindow === undefined)

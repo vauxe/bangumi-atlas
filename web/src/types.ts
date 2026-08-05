@@ -278,13 +278,12 @@ export type SearchNode =
   | { t: [number, number] };
 
 export const TYPE_NAMES = ["", "作品", "人物", "角色"] as const;
-// 萌系三色(天蓝/珊瑚/薄荷),暗紫底 #181226 上通过
-// CVD 校验:最差对 ΔE 8.7(deutan)、对比度全 ≥3:1
+// 三类数据色经画布底色的 CVD 与对比度校验，不随主题色漂移。
 export const TYPE_COLORS: [number, number, number][] = [
   [0, 0, 0],
-  [61, 142, 222], // 作品 #3d8ede
-  [229, 106, 64], // 人物 #e56a40
-  [39, 171, 124], // 角色 #27ab7c
+  [61, 142, 222], // 作品
+  [229, 106, 64], // 人物
+  [39, 171, 124], // 角色
 ];
 export const MEDIA_NAMES: Record<number, string> = {
   1: "书籍",

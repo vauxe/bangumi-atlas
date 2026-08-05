@@ -13,7 +13,6 @@ const pack = (...nodes: [number, number, number][]): Float32Array =>
   Float32Array.from(nodes.flat());
 
 test("picks the best-aligned node within the nearest depth group", () => {
-  // 同一深度组内(t 相近):夹角小者胜
   const sameDepth = pack([2, 0, 10], [0.5, 0, 10]);
   assert.equal(nearestAlongRay(sameDepth, 2, ORIGIN, FORWARD, 0.6), 1);
   // 正对射线但位于近处目标身后很远的节点不得胜出——

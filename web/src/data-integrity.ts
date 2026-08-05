@@ -32,7 +32,6 @@ export function assertContentRange(
     );
 }
 
-/** Browser-native SHA-256 in the same lowercase format as manifest.json. */
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
   return [...new Uint8Array(digest)]

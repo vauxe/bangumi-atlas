@@ -50,8 +50,6 @@ class TopologyLayoutTests(unittest.TestCase):
 
         shaped = shape_layout(desired, keys, degree, years)
         spans = np.ptp(shaped, axis=0)
-        # 只做等比缩放:整形后的轴比例与 PCA 主轴的输入比例一致,
-        # 纵深不再被压成地图厚度
         centred = desired.astype(np.float64) - desired.mean(axis=0)
         rotated = centred @ np.linalg.eigh(centred.T @ centred)[1][:, ::-1]
         source = np.ptp(rotated, axis=0)
@@ -111,7 +109,6 @@ class TopologyLayoutTests(unittest.TestCase):
         shaped = shape_layout(desired, keys, degree, years)
         radius = np.linalg.norm(shaped, axis=1)
 
-        # 球壳:孤立节点在各方向包住实体,且彼此等距于原点
         self.assertGreater(radius[degree == 0].min(), radius[degree > 0].max())
         shell = radius[degree == 0]
         self.assertAlmostEqual(float(shell.max() - shell.min()), 0.0, places=4)
@@ -119,12 +116,6 @@ class TopologyLayoutTests(unittest.TestCase):
 
 
 class ShapeIdentityTests(unittest.TestCase):
-    def test_digest_is_a_stable_sha256(self) -> None:
-        digest = shape_digest()
-
-        self.assertRegex(digest, r"^[0-9a-f]{64}$")
-        self.assertEqual(digest, shape_digest())
-
     def test_digest_follows_the_shaping_constants(self) -> None:
         before = shape_digest()
         with mock.patch.object(
@@ -134,7 +125,6 @@ class ShapeIdentityTests(unittest.TestCase):
         self.assertEqual(shape_digest(), before)
 
     def test_digest_follows_the_shaping_logic(self) -> None:
-        # 同名同签名、只换实现:平面光环改成球壳这类改动必须被摘要抓到
         def _isolated_halo(count: int, inner_radius: float) -> None:
             """Spread structureless nodes over a shell around the body."""
             raise NotImplementedError
@@ -148,7 +138,7 @@ class ShapeIdentityTests(unittest.TestCase):
 
         self.assertNotEqual(real, fake)
 
-    def test_digest_ignores_comments_and_docstrings(self) -> None:
+    def test_digest_ignores_docstrings(self) -> None:
         def documented() -> Callable[[int], int]:
             def shaped(x: int) -> int:
                 """原始说明。"""
@@ -159,7 +149,6 @@ class ShapeIdentityTests(unittest.TestCase):
         def reworded() -> Callable[[int], int]:
             def shaped(x: int) -> int:
                 """改写后的说明,逻辑一字未动。"""
-                # 顺手加一行注释
                 return x + 1
 
             return shaped

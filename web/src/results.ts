@@ -67,7 +67,7 @@ export class Results {
     const key = `${f.yearMin}|${f.yearMax}|${f.scoreMin}|${[...f.tags].join()}|${[...f.media].join()}`;
     if (key !== this.filterKey) {
       this.filterKey = key;
-      this.shown = PAGE; // 条件变了,分页归零
+      this.shown = PAGE;
     }
     const { geo } = this.deps;
     // 谓词 = isVisible(年份/评分/标签)+ 媒介作为查询条件

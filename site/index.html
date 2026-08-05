@@ -11,9 +11,6 @@
       content="99 万个作品、人物与角色的 3D 关系宇宙">
 <style>
 :root {
-  /* 初音未来配色:葱色 #39C5BB 主调 + 黑青夜空底 + 品红粉点缀,
-     抽屉为粉色调面板。数据三色(天蓝/珊瑚/薄荷)是编码色,
-     在本底色上重新通过 CVD ΔE≥8 与对比度校验,不随主题漂移 */
   --surface: #0f1a1c; --panel: #14262b;
   --ink: #eafcfa; --ink-2: #8fb8b5; --line: #24444a;
   --miku: #39c5bb; --pink: #f25ba6;
@@ -41,18 +38,16 @@ button:focus-visible, input:focus-visible, a:focus-visible {
   background: var(--panel); border: 1px solid var(--line);
   border-radius: 0 0 16px 16px; text-align: left; max-height: 320px;
   overflow: auto; }
-#hits:empty { display: none; } /* 空下拉不渲染,消除搜索框下的线 */
+#hits:empty { display: none; }
 #hits .hit { padding: 8px 16px; cursor: pointer; }
 #hits .hit.active, #hits .hit:hover { background: var(--line); }
 
 #searchwrap-dock { position: fixed; top: 14px; left: 14px;
   width: 320px; z-index: 6; }
-/* 搜索框内的随机传送按钮 */
 #dice { position: absolute; right: 6px; top: 6px; width: 36px;
   height: 36px; border: 0; background: none; font-size: 18px;
   cursor: pointer; border-radius: 50%; }
 #dice:hover { background: var(--line); }
-/* 左列:筛选面板 + 结果面板,停靠搜索框下方 */
 #leftcol { position: fixed; top: 76px; left: 14px; width: 320px;
   z-index: 5; display: flex; flex-direction: column; gap: 10px;
   max-height: calc(100vh - 116px); } /* 底部让出图例一行 */
@@ -74,7 +69,6 @@ button:focus-visible, input:focus-visible, a:focus-visible {
 .prow { margin: 4px 0; }
 .parrow { color: var(--ink-2); font-size: 12px; margin: 0 0 4px 18px; }
 
-/* 抽屉:深青面板,粉色只作边缘高亮(描边 + 边缘光晕),内部无粉 */
 #drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 420px;
   max-width: 92vw; background: var(--panel); z-index: 7; padding: 20px;
   overflow-y: auto; transform: translateX(105%); transition: transform .25s;
@@ -97,7 +91,6 @@ button:focus-visible, input:focus-visible, a:focus-visible {
   object-fit: cover; border-radius: 12px; margin: 8px 0 10px 12px;
   clear: right; background: var(--line); }
 #drawer .subtitle { color: var(--ink-2); margin-bottom: 8px; }
-/* 顶部操作随抽屉滚动保持可用。 */
 .drawer-actions { position: sticky; top: 0; float: right; z-index: 2;
   display: flex; gap: 4px; }
 .drawer-action { display: grid; place-items: center; border: 0;
@@ -120,7 +113,6 @@ button:focus-visible, input:focus-visible, a:focus-visible {
   color: var(--miku); cursor: pointer; padding: 2px 0; }
 .group { margin-top: 14px; }
 .group-label { color: var(--ink-2); font-size: 12px; margin-bottom: 6px; }
-/* 交互元素:平时初音绿,高亮(激活/选中)发饰粉 */
 .chip { background: var(--miku); color: #06211f; border: 0;
   border-radius: 16px; padding: 4px 10px; margin: 0 6px 6px 0;
   cursor: pointer; font-size: 13px; font-family: inherit;
@@ -129,7 +121,6 @@ button:focus-visible, input:focus-visible, a:focus-visible {
 .chip:hover { background: #5fd6cc; }
 .chip.on { background: var(--pink); color: #3a0b22; }
 .note, .ep-date { color: var(--ink-2); font-size: 12px; }
-/* "还有 N 个"可点:静默态初音绿,与交互元素配色语义一致 */
 button.more { background: none; border: 0; padding: 4px 6px;
   color: var(--miku); font-size: 12px; font-family: inherit;
   cursor: pointer; appearance: none; -webkit-appearance: none; }
@@ -149,7 +140,6 @@ pre.infobox { white-space: pre-wrap; word-break: break-all;
 
 #filters .chip { margin: 0 6px 6px 0; min-height: 28px;
   display: inline-flex; align-items: center; }
-/* 筛选面板:四个过滤维度统一宽度收纳,可折叠,形状归一 */
 #filters { flex: none; background: rgba(20,38,43,.88);
   border: 1px solid var(--line); border-radius: 16px;
   backdrop-filter: blur(4px); overflow: hidden; }

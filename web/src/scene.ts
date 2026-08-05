@@ -35,8 +35,7 @@ import type { Bounds3D, Geometry } from "./types";
 
 export type { OrbitState } from "./camera";
 
-export const EDGE_WIDTHS = {
-  context: 0.5, // 语境骨架边已默认停用,保留宽度契约供将来开关
+const EDGE_WIDTHS = {
   relation: 1,
   path: 1.5,
 } as const;
@@ -51,7 +50,6 @@ const WORKING_NODE_RADIUS = 9 / FOCUS_SCALE;
 const WORKING_COVER_SIZE = 16.5 / FOCUS_SCALE;
 const WORKING_GLOW_RADIUS = 36 / FOCUS_SCALE;
 
-/** Crop dynamically packed cover textures to the circular node silhouette. */
 class CircleCropExtension extends LayerExtension {
   static override extensionName = "CircleCropExtension";
 
@@ -257,7 +255,7 @@ interface ContextData {
 export interface SceneCallbacks {
   onPick: (rank: number | null) => void;
   onHover: (rank: number | null, x: number, y: number) => void;
-  /** 工作集边悬停:解码后的关系显示文本(语境骨架边不出 tooltip)。 */
+  /** 工作集边悬停时提供解码后的关系显示文本。 */
   onHoverEdge: (label: string | null, x: number, y: number) => void;
   onViewChange: (vs: OrbitState) => void;
   /** 近场动态标签:同步读已载名字 / 批量补载缺失名字。 */
@@ -330,7 +328,6 @@ export class Scene {
         // 自定义选项经 view 的 controllerProps 原样透传给控制器,
         // deck 的 ControllerOptions 类型未涵盖
         zoomAnchor: (px: number, py: number) => this.rayAnchor(px, py),
-        // 飞行目标反馈:手势锁定锚点时在其上闪一个淡出环
         onWheelAnchor: (pos: [number, number, number] | null) =>
           this.flashAnchor(pos),
       } as DeckProps["controller"],
@@ -410,7 +407,6 @@ export class Scene {
 
   private labelNamesPending = false;
 
-  /** 工作集名字补载:同一时刻只跑一批;完成后重绘。 */
   private requestLabelNames(ranks: number[]): void {
     const load = this.cb.loadNames;
     if (!load || this.labelNamesPending) return;
@@ -561,7 +557,6 @@ export class Scene {
     this.applyCamera(true);
   }
 
-  /** 正交开关(URL 还原用;`T` 键走 topView)。 */
   setOrtho(v: boolean): void {
     if (this.camera.ortho === v) return;
     this.camera.ortho = v;
@@ -743,11 +738,10 @@ export class Scene {
         },
         parameters: { depthCompare: "always", depthWriteEnabled: false },
       }),
-      // 选中节点脚下使用柔和粉色辉光，与类别色分离。
       new ScatterplotLayer({
         id: "ws-glow",
         data: { length: 1, attributes: { getPosition: { value: pos, size: 3 } } },
-        getFillColor: [242, 91, 166, 60], // Miku 品红光晕
+        getFillColor: [242, 91, 166, 60],
         radiusUnits: "common",
         getRadius: WORKING_GLOW_RADIUS,
         radiusMinPixels: 12,

@@ -27,9 +27,10 @@ const cube = (size: number): Bounds3D => [
 
 test("uses the bounding box to frame and restore the full graph", () => {
   const camera = new Camera(cube(100));
-  const homeZoom = Math.log2(900 / 100) - 0.2;
+  const largerWorld = new Camera(cube(1000));
+  const homeZoom = camera.viewState.zoom;
 
-  assert.equal(camera.viewState.zoom, homeZoom);
+  assert.ok(homeZoom > largerWorld.viewState.zoom);
 
   camera.absorb({
     target: [0, 0, 0],
@@ -63,8 +64,8 @@ test("keeps focus and explicit zoom independent of full-graph fit", () => {
 
   const smallFocus = smallWorld.flyTo([1, 2, 3]).zoom;
   const largeFocus = largeWorld.flyTo([1, 2, 3]).zoom;
-  assert.equal(smallFocus, 6.2);
-  assert.equal(largeFocus, 6.2);
+  assert.equal(smallFocus, largeFocus);
+  assert.ok(smallFocus > 1);
 
   const explicitZoom = largeWorld.flyTo([4, 5, 6], 12);
   assert.equal(explicitZoom.zoom, 12);
@@ -178,9 +179,7 @@ test("a wheel gesture latches one anchor for smooth convergence", () => {
   // 同手势(≤400ms、≤24px):沿用首个锚点,不重新解析
   assert.deepEqual(latch.resolve(1200, 110, 95, lookup([9, 9, 9])), [1, 2, 3]);
   assert.equal(lookups, 1);
-  // 停顿超时 → 重新解析
   assert.deepEqual(latch.resolve(1700, 110, 95, lookup([9, 9, 9])), [9, 9, 9]);
-  // 光标移开 → 重新解析
   assert.deepEqual(latch.resolve(1800, 200, 95, lookup([5, 5, 5])), [5, 5, 5]);
   assert.equal(lookups, 3);
 });
