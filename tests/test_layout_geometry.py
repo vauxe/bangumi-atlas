@@ -13,6 +13,7 @@ from scripts.layout import (
     SATELLITE_GAP,
     TYPICAL_NODE_DISTANCE,
     detect_communities,
+    hierarchical_connected_layout,
     minimum_island_gap,
     pack_island_centers,
     place_islands,
@@ -20,6 +21,7 @@ from scripts.layout import (
     satellite_island_centers,
     shape_digest,
     shape_layout,
+    wrap_isolated_shell,
 )
 
 
@@ -120,6 +122,26 @@ class TopologyLayoutTests(unittest.TestCase):
         self.assertAlmostEqual(float(shell.max() - shell.min()), 0.0, places=4)
         self.assertGreater(float(np.ptp(shaped[degree == 0][:, 1])), 0.0)
 
+    def test_wraps_prebuilt_connected_islands_without_moving_them(
+        self,
+    ) -> None:
+        connected = np.array(
+            [[-3.0, 0.5, 0.0], [2.0, -0.5, 1.0]], dtype=np.float32
+        )
+        keys = np.arange(20, 24, dtype=np.uint32)
+        degree = np.array([1, 0, 1, 0], dtype=np.int64)
+        years = np.array([0, 2001, 0, 1999], dtype=np.uint16)
+
+        wrapped = wrap_isolated_shell(connected, keys, degree, years)
+
+        np.testing.assert_array_equal(wrapped[degree > 0], connected)
+        connected_radius = np.linalg.norm(wrapped[degree > 0], axis=1)
+        shell_radius = np.linalg.norm(wrapped[degree == 0], axis=1)
+        self.assertGreater(shell_radius.min(), connected_radius.max())
+        self.assertAlmostEqual(
+            float(shell_radius.max() - shell_radius.min()), 0.0, places=4
+        )
+
 
 class CommunityIslandTests(unittest.TestCase):
     def test_packs_island_bounding_spheres_with_a_deterministic_gap(
@@ -198,6 +220,44 @@ class CommunityIslandTests(unittest.TestCase):
             minimum_island_gap(centers, radii), ISLAND_GAP - 1e-9
         )
         self.assertTrue((np.ptp(centers, axis=0) > 0).all())
+
+    def test_builds_macro_communities_and_component_satellites(self) -> None:
+        graph = ig.Graph(n=15, directed=False)
+        graph.add_edges(
+            [
+                *[(a, b) for a in range(5) for b in range(a + 1, 5)],
+                *[(a, b) for a in range(5, 10) for b in range(a + 1, 10)],
+                (4, 5),
+                (10, 11),
+                (12, 13),
+                (13, 14),
+            ]
+        )
+        keys = np.arange(200, 215, dtype=np.uint32)
+
+        first = hierarchical_connected_layout(graph, keys, target_islands=2)
+        second = hierarchical_connected_layout(graph, keys, target_islands=2)
+        coords, communities, report = first
+
+        np.testing.assert_array_equal(first[0], second[0])
+        np.testing.assert_array_equal(first[1], second[1])
+        self.assertEqual(coords.shape, (15, 3))
+        self.assertTrue(np.isfinite(coords).all())
+        self.assertEqual(len(np.unique(communities[:10])), 2)
+        self.assertEqual(communities[10], communities[11])
+        self.assertEqual(communities[12], communities[13])
+        self.assertEqual(communities[13], communities[14])
+        self.assertNotEqual(communities[10], communities[12])
+        self.assertEqual(report["n_components"], 3)
+        self.assertEqual(report["n_giant_nodes"], 10)
+        self.assertEqual(report["n_community_islands"], 2)
+        self.assertEqual(report["n_satellite_islands"], 2)
+        self.assertGreaterEqual(
+            report["min_community_island_gap"], ISLAND_GAP - 1e-9
+        )
+        self.assertGreaterEqual(
+            report["min_satellite_island_gap"], ISLAND_GAP - 1e-9
+        )
 
 
 class ShapeIdentityTests(unittest.TestCase):

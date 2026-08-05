@@ -32,8 +32,9 @@ EDGE_FILES = [
     ("character_rel", "from_id", "character", "to_id", "character"),
 ]
 
-# UMAP won the layout bake-off; alternatives live in layout_bakeoff.py.
-ALGO = "umap"
+# UMAP preserves local topology inside each island; Leiden and a weighted
+# community supergraph provide the global hierarchy.
+ALGO = "hierarchical-community-islands"
 
 # python-igraph draws from the stdlib random module, not numpy.
 SEED = 7
@@ -43,6 +44,7 @@ TYPICAL_NODE_DISTANCE = 0.28
 _JITTER_RADIUS = TYPICAL_NODE_DISTANCE * 0.15
 ISLAND_GAP = TYPICAL_NODE_DISTANCE * 4
 SATELLITE_GAP = TYPICAL_NODE_DISTANCE * 6
+TARGET_COMMUNITY_ISLANDS = 64
 _HALO_GAP = TYPICAL_NODE_DISTANCE * 6
 _GOLDEN_ANGLE = np.pi * (3 - np.sqrt(5.0))
 
@@ -118,6 +120,79 @@ def detect_communities(g: ig.Graph) -> np.ndarray:
         ).membership,
         dtype=np.int64,
     )
+
+
+def _community_supergraph(
+    edges: np.ndarray,
+    membership: np.ndarray,
+) -> ig.Graph:
+    """Aggregate node edges into a weighted undirected community graph."""
+    if edges.ndim != 2 or edges.shape[1] != 2:
+        raise ValueError("community edges must have two endpoints")
+    if membership.ndim != 1 or (membership < 0).any():
+        raise ValueError("community membership must be non-negative")
+    count = int(membership.max()) + 1 if len(membership) else 0
+    if count == 0:
+        return ig.Graph(n=0, directed=False)
+    if not np.array_equal(np.unique(membership), np.arange(count)):
+        raise ValueError("community membership must be dense")
+    left = membership[edges[:, 0]]
+    right = membership[edges[:, 1]]
+    low = np.minimum(left, right)
+    high = np.maximum(left, right)
+    cross = low != high
+    codes = low[cross] * count + high[cross]
+    unique, weights = np.unique(codes, return_counts=True)
+    pairs = np.column_stack([unique // count, unique % count])
+    return ig.Graph(
+        n=count,
+        edges=pairs.tolist(),
+        directed=False,
+        edge_attrs={"weight": weights.astype(float).tolist()},
+    )
+
+
+def coarsen_communities(
+    edges: np.ndarray,
+    fine: np.ndarray,
+    target: int,
+) -> np.ndarray:
+    """Assign fine Leiden groups to the nearest large anchor communities."""
+    if target <= 0:
+        raise ValueError("target community count must be positive")
+    count = int(fine.max()) + 1 if len(fine) else 0
+    if count <= target:
+        return fine.astype(np.int64, copy=True)
+
+    sizes = np.bincount(fine, minlength=count)
+    anchors = np.lexsort((np.arange(count), -sizes))[:target]
+    graph = _community_supergraph(edges, fine)
+    edge_weight = np.asarray(graph.es["weight"], dtype=np.float64)
+    travel_cost = 1.0 / np.log1p(edge_weight)
+    distances = np.asarray(
+        graph.distances(target=anchors.tolist(), weights=travel_cost.tolist())
+    )
+    if not np.isfinite(distances).any(axis=1).all():
+        raise RuntimeError("fine-community graph is disconnected")
+    fine_owner = np.argmin(distances, axis=1).astype(np.int64)
+    return fine_owner[fine]
+
+
+def run_macro_layout(graph: ig.Graph) -> np.ndarray:
+    """Layout the small weighted community supergraph in three dimensions."""
+    count = graph.vcount()
+    if count == 0:
+        return np.empty((0, 3), dtype=np.float64)
+    if count == 1:
+        return np.zeros((1, 3), dtype=np.float64)
+    random.seed(SEED)
+    weights = np.log1p(np.asarray(graph.es["weight"], dtype=np.float64))
+    layout = graph.layout_fruchterman_reingold(
+        dim=3,
+        niter=1000,
+        weights=weights.tolist(),
+    )
+    return np.asarray(layout.coords, dtype=np.float64)
 
 
 def _jitter(keys: np.ndarray) -> np.ndarray:
@@ -284,6 +359,18 @@ def place_islands(
     if desired_centers.shape != (count, 3):
         raise ValueError("desired centers must match island count")
 
+    local, radii = _local_island_geometry(desired, keys, island, count)
+    centers = pack_island_centers(desired_centers, radii, gap)
+    return local + centers[island], centers, radii
+
+
+def _local_island_geometry(
+    desired: np.ndarray,
+    keys: np.ndarray,
+    island: np.ndarray,
+    count: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Orient and scale each island around its own local origin."""
     local = np.zeros_like(desired, dtype=np.float64)
     radii = np.zeros(count, dtype=np.float64)
     for group in range(count):
@@ -295,8 +382,7 @@ def place_islands(
             TYPICAL_NODE_DISTANCE / 2,
             float(np.linalg.norm(shaped, axis=1).max()),
         )
-    centers = pack_island_centers(desired_centers, radii, gap)
-    return local + centers[island], centers, radii
+    return local, radii
 
 
 def _fibonacci_unit_sphere(count: int) -> np.ndarray:
@@ -353,6 +439,105 @@ def satellite_island_centers(
     raise RuntimeError("satellite island packing did not converge")
 
 
+def hierarchical_connected_layout(
+    graph: ig.Graph,
+    keys: np.ndarray,
+    *,
+    target_islands: int = TARGET_COMMUNITY_ISLANDS,
+) -> tuple[np.ndarray, np.ndarray, dict[str, int | float]]:
+    """Build separated giant-component communities and component satellites."""
+    count = graph.vcount()
+    if keys.shape != (count,):
+        raise ValueError("connected graph and keys must align")
+    if count == 0:
+        return (
+            np.empty((0, 3), dtype=np.float32),
+            np.empty(0, dtype=np.uint16),
+            {
+                "n_components": 0,
+                "n_giant_nodes": 0,
+                "n_community_islands": 0,
+                "n_satellite_islands": 0,
+                "min_community_island_gap": 0.0,
+                "min_satellite_island_gap": 0.0,
+                "giant_body_radius": 0.0,
+                "satellite_radius": 0.0,
+            },
+        )
+
+    components = np.asarray(graph.connected_components().membership)
+    component_sizes = np.bincount(components)
+    giant_component = int(np.argmax(component_sizes))
+    giant_vertices = np.flatnonzero(components == giant_component)
+    giant = graph.subgraph(giant_vertices.tolist())
+    giant_edges = np.asarray(giant.get_edgelist(), dtype=np.int64)
+
+    fine = detect_communities(giant)
+    macro = coarsen_communities(giant_edges, fine, target_islands)
+    macro_count = int(macro.max()) + 1
+    macro_graph = _community_supergraph(giant_edges, macro)
+    macro_desired = run_macro_layout(macro_graph)
+    giant_desired = run_layout(giant)
+    giant_coords, macro_centers, macro_radii = place_islands(
+        giant_desired,
+        keys[giant_vertices],
+        macro,
+        macro_desired,
+        ISLAND_GAP,
+    )
+
+    coords = np.zeros((count, 3), dtype=np.float64)
+    communities = np.zeros(count, dtype=np.int64)
+    coords[giant_vertices] = giant_coords
+    communities[giant_vertices] = macro
+    giant_radius = float(np.linalg.norm(giant_coords, axis=1).max())
+
+    small_vertices = np.flatnonzero(components != giant_component)
+    satellite_count = 0
+    satellite_gap = 0.0
+    satellite_radius = 0.0
+    if len(small_vertices):
+        small_graph = graph.subgraph(small_vertices.tolist())
+        _, satellite = np.unique(
+            components[small_vertices], return_inverse=True
+        )
+        satellite = satellite.astype(np.int64)
+        satellite_count = int(satellite.max()) + 1
+        small_desired = run_layout(small_graph)
+        local, satellite_radii = _local_island_geometry(
+            small_desired,
+            keys[small_vertices],
+            satellite,
+            satellite_count,
+        )
+        satellite_centers = satellite_island_centers(
+            satellite_radii, giant_radius
+        )
+        coords[small_vertices] = local + satellite_centers[satellite]
+        communities[small_vertices] = macro_count + satellite
+        satellite_gap = minimum_island_gap(satellite_centers, satellite_radii)
+        satellite_radius = float(np.linalg.norm(satellite_centers[0]))
+
+    if int(communities.max()) >= 0xFFFF:
+        raise RuntimeError("community island count exceeds the u16 contract")
+    macro_gap = (
+        minimum_island_gap(macro_centers, macro_radii)
+        if macro_count > 1
+        else 0.0
+    )
+    report: dict[str, int | float] = {
+        "n_components": int(len(component_sizes)),
+        "n_giant_nodes": int(len(giant_vertices)),
+        "n_community_islands": macro_count,
+        "n_satellite_islands": satellite_count,
+        "min_community_island_gap": macro_gap,
+        "min_satellite_island_gap": satellite_gap,
+        "giant_body_radius": giant_radius,
+        "satellite_radius": satellite_radius,
+    }
+    return coords.astype(np.float32), communities.astype(np.uint16), report
+
+
 def _isolated_halo(count: int, inner_radius: float) -> np.ndarray:
     """Spread structureless nodes over a sparse shell around the body.
 
@@ -363,15 +548,41 @@ def _isolated_halo(count: int, inner_radius: float) -> np.ndarray:
         return np.empty((0, 3), dtype=np.float64)
     cell_area = np.sqrt(3.0) / 2 * TYPICAL_NODE_DISTANCE**2
     radius = max(inner_radius, float(np.sqrt(count * cell_area / (4 * np.pi))))
-    order = np.arange(count, dtype=np.float64)
-    height = 1.0 - 2.0 * (order + 0.5) / count
-    ring = np.sqrt(np.maximum(0.0, 1.0 - height**2))
-    angle = order * _GOLDEN_ANGLE
-    coords = np.empty((count, 3), dtype=np.float64)
-    coords[:, 0] = np.cos(angle) * ring * radius
-    coords[:, 1] = height * radius
-    coords[:, 2] = np.sin(angle) * ring * radius
-    return coords
+    return _fibonacci_unit_sphere(count) * radius
+
+
+def wrap_isolated_shell(
+    connected_coords: np.ndarray,
+    keys: np.ndarray,
+    degree: np.ndarray,
+    years: np.ndarray,
+) -> np.ndarray:
+    """Preserve connected islands inside the degree-zero outer shell."""
+    node_count = len(keys)
+    connected = degree > 0
+    if connected_coords.shape != (int(connected.sum()), 3):
+        raise ValueError("connected coordinates must match non-isolated nodes")
+    if degree.shape != (node_count,) or years.shape != (node_count,):
+        raise ValueError("degree and years must match node count")
+
+    coords = np.zeros((node_count, 3), dtype=np.float64)
+    coords[connected] = connected_coords
+    body_radius = (
+        float(np.linalg.norm(connected_coords, axis=1).max())
+        if len(connected_coords)
+        else 0.0
+    )
+    isolated = ~connected
+    if isolated.any():
+        isolated_index = np.flatnonzero(isolated)
+        thematic_order = np.lexsort(
+            (keys[isolated], years[isolated], keys[isolated] >> 24)
+        )
+        halo = _isolated_halo(int(isolated.sum()), body_radius + _HALO_GAP)
+        coords[isolated_index[thematic_order]] = halo
+    if not np.isfinite(coords).all():
+        raise RuntimeError("layout contains non-finite coordinates")
+    return coords.astype(np.float32)
 
 
 def shape_layout(
@@ -387,34 +598,38 @@ def shape_layout(
     if degree.shape != (n,) or years.shape != (n,):
         raise ValueError("degree and years must match node count")
 
-    coords = np.zeros((n, 3), dtype=np.float64)
     connected = degree > 0
-    if connected.any():
-        coords[connected] = _shape_connected(
-            desired[connected], keys[connected]
-        )
-        body_radius = float(np.linalg.norm(coords[connected], axis=1).max())
-    else:
-        body_radius = 0.0
-
-    isolated = ~connected
-    if isolated.any():
-        isolated_index = np.flatnonzero(isolated)
-        thematic_order = np.lexsort(
-            (keys[isolated], years[isolated], keys[isolated] >> 24)
-        )
-        halo = _isolated_halo(int(isolated.sum()), body_radius + _HALO_GAP)
-        coords[isolated_index[thematic_order]] = halo
-
-    if not np.isfinite(coords).all():
-        raise RuntimeError("layout contains non-finite coordinates")
-    return coords.astype(np.float32)
+    shaped = _shape_connected(desired[connected], keys[connected])
+    return wrap_isolated_shell(shaped, keys, degree, years)
 
 
-_SHAPE_LOGIC = (_jitter, _shape_connected, _isolated_halo, shape_layout)
+_SHAPE_LOGIC = (
+    run_layout,
+    detect_communities,
+    _community_supergraph,
+    coarsen_communities,
+    run_macro_layout,
+    _jitter,
+    _shape_connected,
+    _pair_direction,
+    pack_island_centers,
+    _local_island_geometry,
+    place_islands,
+    _fibonacci_unit_sphere,
+    satellite_island_centers,
+    hierarchical_connected_layout,
+    _isolated_halo,
+    wrap_isolated_shell,
+    shape_layout,
+)
 _SHAPE_CONSTANTS = {
+    "algo": ALGO,
+    "seed": SEED,
     "typical_node_distance": TYPICAL_NODE_DISTANCE,
     "jitter_radius": _JITTER_RADIUS,
+    "island_gap": ISLAND_GAP,
+    "satellite_gap": SATELLITE_GAP,
+    "target_community_islands": TARGET_COMMUNITY_ISLANDS,
     "halo_gap": _HALO_GAP,
     "golden_angle": float(_GOLDEN_ANGLE),
 }
@@ -487,7 +702,6 @@ def main() -> None:
     remap[connected] = np.arange(len(connected))
     sub_edges = remap[edges]
 
-    desired = np.zeros((len(keys), 3), dtype=np.float32)
     communities = np.full(len(keys), 0xFFFF, dtype=np.uint16)
 
     graph = ig.Graph(
@@ -495,14 +709,19 @@ def main() -> None:
     )
     graph.simplify()
     started = time.time()
-    desired[connected] = run_layout(graph)
-    print(f"布局完成 {time.time() - started:,.0f}s", flush=True)
-    started = time.time()
-    communities[connected] = detect_communities(graph).astype(np.uint16)
-    print(f"社区检测 {time.time() - started:,.0f}s", flush=True)
+    connected_coords, connected_communities, hierarchy = (
+        hierarchical_connected_layout(graph, keys[connected])
+    )
+    communities[connected] = connected_communities
+    print(
+        f"层次布局完成 {time.time() - started:,.0f}s:"
+        f"主体 {hierarchy['n_community_islands']} 个社区岛,"
+        f"卫星 {hierarchy['n_satellite_islands']} 个分量岛",
+        flush=True,
+    )
 
     started = time.time()
-    coords = shape_layout(desired, keys, degree, years)
+    coords = wrap_isolated_shell(connected_coords, keys, degree, years)
     projected = coords[:, (0, 2)]
     if len(coords) > 1:
         nearest = cKDTree(projected).query(
@@ -536,9 +755,14 @@ def main() -> None:
         "algo": ALGO,
         "seed": SEED,
         "dimensions": int(coords.shape[1]),
+        "geometry": "topology-3d-community-islands",
         "shape_digest": shape_digest(),
         "n_nodes": int(len(keys)),
         "n_connected": int(len(connected)),
+        **{
+            key: round(value, 6) if isinstance(value, float) else value
+            for key, value in hierarchy.items()
+        },
         "min_projected_neighbor_distance": round(min_distance, 6),
         "median_projected_neighbor_distance": round(median_distance, 6),
         "depth_ratio": round(actual_depth_ratio, 6),
