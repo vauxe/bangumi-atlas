@@ -46,8 +46,6 @@ def validate_name_pack(
     n_rows: int,
     block_size: int,
 ) -> None:
-    """Prove that every indexed name block is readable and complete."""
-
     if n_rows < 0:
         raise ValueError("name row count must not be negative")
     if block_size <= 0:

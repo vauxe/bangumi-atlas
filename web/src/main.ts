@@ -1,8 +1,7 @@
 /** 启动序列与交互接线;整体契约见 docs/STRUCTURAL_SITE_DATA_DESIGN.md。
- * 加载优先级:manifest 后立即启动几何流,首块即渲;骨架边、反向
- * 索引与标签低优先级补齐;搜索目录在聚焦时读取;text.idx 在首次
- * 结构画面后空闲读取;悬停名字按需、稳定 150ms 才预取结构,
- * 不预取 Episode 或任何文本。 */
+ * 加载优先级:manifest 后立即启动几何流,首块即渲;反向索引低优先级
+ * 补齐;搜索目录在聚焦时读取;text.idx 在首次结构画面后空闲读取;
+ * 悬停名字按需、稳定 150ms 才预取结构,不预取 Episode 或任何文本。 */
 
 import { Drawer } from "./drawer";
 import { Data } from "./data";
@@ -255,7 +254,6 @@ async function boot(): Promise<void> {
       return point;
     });
 
-  /** 第二个节点选定后计算并呈现连接查询。 */
   async function handleLink(
     link: LinkState,
     bRank: number,

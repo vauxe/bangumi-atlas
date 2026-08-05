@@ -1,5 +1,3 @@
-/** 微型状态 store:单一事实来源 + 订阅。 */
-
 export interface Filters {
   yearMin: number;
   yearMax: number;

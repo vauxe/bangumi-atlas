@@ -189,7 +189,6 @@ async function verifyWholeFile(
     enterReleaseChanged(`${path} 摘要不符`);
 }
 
-/** Fetch and authenticate a complete JSON artifact from the manifest. */
 export async function loadPublishedJson<T>(path: string): Promise<T> {
   guard();
   const res = await fetchPublished(path);

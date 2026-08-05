@@ -38,8 +38,7 @@ ALGO = "umap"
 # python-igraph draws from the stdlib random module, not numpy.
 SEED = 7
 
-# Topology keeps all three axes: the body stays a volume, and structureless
-# nodes surround it as a shell instead of being pushed into one plane.
+# Keep the connected graph volumetric and place structureless nodes around it.
 TYPICAL_NODE_DISTANCE = 0.28
 _JITTER_RADIUS = TYPICAL_NODE_DISTANCE * 0.15
 _HALO_GAP = TYPICAL_NODE_DISTANCE * 6
@@ -201,7 +200,6 @@ def shape_layout(
         coords[connected] = _shape_connected(
             desired[connected], keys[connected]
         )
-        # The body is a volume, so the shell must clear its 3D extent.
         body_radius = float(np.linalg.norm(coords[connected], axis=1).max())
     else:
         body_radius = 0.0
@@ -220,8 +218,6 @@ def shape_layout(
     return coords.astype(np.float32)
 
 
-# 整形身份由下面这些函数和常量算出,不靠人手维护的形状标签:
-# 忘记改标签会让新几何冒充旧几何,忘记改代码则摘要自然不动。
 _SHAPE_LOGIC = (_jitter, _shape_connected, _isolated_halo, shape_layout)
 _SHAPE_CONSTANTS = {
     "typical_node_distance": TYPICAL_NODE_DISTANCE,

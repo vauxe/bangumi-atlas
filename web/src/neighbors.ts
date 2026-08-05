@@ -4,7 +4,6 @@
 
 import type { Fact, Mappings } from "./types";
 
-/** 事实中除 self 外的参与者(角色顺序)。 */
 export function factOthers(fact: Fact, selfKey: number): number[] {
   const parts = factParticipants(fact);
   const others = parts.filter((p) => p !== selfKey);

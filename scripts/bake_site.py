@@ -324,7 +324,7 @@ def main() -> None:  # noqa: PLR0915
         [lay["x"][order], lay["y"][order], lay["z"][order]], axis=1
     )
     # UMAP 输出尺度任意;发布坐标归一到规范世界跨度,保证探索端
-    # 绝对 zoom 档位(标签切换/骨架边显隐/聚焦层级)的既定语义
+    # 聚焦层级、工作集字号和节点尺寸的绝对 zoom 语义
     coords_r, world_scale = normalize_world_scale(coords_r)
     rank_of_key: dict[int, int] = {int(k): i for i, k in enumerate(key_r)}
     log(

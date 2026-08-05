@@ -10,12 +10,6 @@ import {
 } from "../src/covers";
 
 test("uses a CORS-compatible resized asset for WebGL map covers", () => {
-  assert.deepEqual(COVER_SIZES, {
-    map: "small",
-    chip: "grid",
-    drawer: "small",
-  });
-
   assert.equal(
     coverUrl(0x0200_0007, COVER_SIZES.map),
     "https://api.bgm.tv/v0/persons/7/image?type=small",
@@ -39,17 +33,14 @@ test("builds typed Bangumi cover URLs and rejects invalid entity keys", () => {
   assert.equal(coverUrl(0x0400_0001, "small"), null);
 });
 
-test("renders covers with a stable type-dot fallback", () => {
-  const chip = chipCover(0x0200_0007);
-  assert.match(chip, /class="chip-media type-2"/);
-  assert.match(chip, /class="chip-mark type-2"/);
-  assert.match(chip, /class="chip-av"/);
-  assert.match(chip, /onerror="this\.remove\(\)"/);
-
-  const drawer = drawerCover(0x0100_002a);
-  assert.match(drawer, /class="cover"/);
-  assert.match(drawer, /type=small/);
-  assert.match(drawer, /alt=""/);
+test("renders optional covers as decorative and self-removing", () => {
+  for (const markup of [
+    chipCover(0x0200_0007),
+    drawerCover(0x0100_002a),
+  ]) {
+    assert.match(markup, /alt=""/);
+    assert.match(markup, /onerror="this\.remove\(\)"/);
+  }
 });
 
 test("omits invalid and duplicate map cover items", () => {

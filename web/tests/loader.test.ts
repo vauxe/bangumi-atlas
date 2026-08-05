@@ -254,7 +254,6 @@ test("treats a changed Content-Range total as a replaced release", async () => {
     (error: unknown) => error instanceof ReleaseChangedError,
   );
   assert.equal(releaseWasReplaced(), true);
-  // 判定发布已被替换后停止该发布的后续数据请求
   await assert.rejects(
     pointByRank(manifest, 0),
     (error: unknown) => error instanceof ReleaseChangedError,
@@ -391,7 +390,6 @@ test("shares one whole-pack fallback across concurrent members", async () => {
   assert.deepEqual(loadedFirst, first);
   assert.deepEqual(loadedSecond, second);
   assert.equal(packRequests, 1);
-  // 成员缓存命中不得产生网络请求
   await member("structure", "facts.pack", 0, firstGzip.byteLength);
   assert.equal(packRequests, 1);
 });

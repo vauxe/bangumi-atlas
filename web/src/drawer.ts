@@ -412,7 +412,6 @@ export class Drawer {
     this.restoreAnchor(anchor);
   }
 
-  /** 过滤条件变化后按当前 store 重绘。 */
   refresh(): void {
     this.rerender();
   }
@@ -442,7 +441,6 @@ export class Drawer {
     </button>`;
   }
 
-  /** 共同关联视图:两端点 + 交集列表。 */
   async showCompare(
     aRank: number,
     bRank: number,
@@ -485,7 +483,6 @@ export class Drawer {
     `;
   }
 
-  /** 最短路径视图:链式列表,关系名标在相邻两点之间。 */
   async showPath(res: PathResult): Promise<void> {
     const viewEpoch = ++this.viewEpoch;
     this.cur = null;
@@ -594,7 +591,6 @@ export class Drawer {
           </button>`
         : "";
 
-    // 标签(作品):meta_tags 前 8 个
     const tags =
       entity?.kind === "subject"
         ? entity.metaTags

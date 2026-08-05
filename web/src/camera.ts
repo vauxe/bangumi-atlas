@@ -347,7 +347,6 @@ export class Camera {
     };
   }
 
-  /** `T`:俯视 + 正交投影(2D 保底);再按恢复透视轨道。 */
   toggleTop(): OrbitState {
     this.ortho = !this.ortho;
     this.viewState = {
@@ -358,7 +357,6 @@ export class Camera {
     return this.viewState;
   }
 
-  /** `R`:相机复位(恢复透视)。 */
   home(): OrbitState {
     this.ortho = false;
     this.viewState = {
