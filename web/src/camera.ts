@@ -35,6 +35,12 @@ export function wheelDeltaToZoom(delta: number, speed = 0.01): number {
   return Math.log2(scale);
 }
 
+/** maxZoom 后的巡航步长。等量 zoom-out 会把轨道半径从 d 扩大到
+ * d·2^dz，因此 target 前进 d·(2^dz−1) 才能产生对等的相机位移。 */
+export function cruiseStepForZoom(distance: number, dz: number): number {
+  return distance * Math.expm1(Math.LN2 * dz);
+}
+
 /** deck 的滚轮曲线，但不把鼠标所在的空平面误当成新的关注点。 */
 export function zoomWithoutRetarget<T extends OrbitState>(
   state: T,
@@ -216,7 +222,7 @@ export class AtlasOrbitController extends OrbitController {
             target,
             anchor,
             [fx / dist, fy / dist, fz / dist],
-            dist * (1 - 2 ** -dzFly),
+            cruiseStepForZoom(dist, dzFly),
           );
         }
       }

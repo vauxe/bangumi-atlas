@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   Camera,
   WheelAnchorLatch,
+  cruiseStepForZoom,
   cruiseTarget,
   wheelDeltaToZoom,
   zoomTowardAnchor,
@@ -156,6 +157,22 @@ test("wheel curve is symmetric and capped at one level per event", () => {
   assert.ok(dz > 0 && dz < 1);
   assert.equal(wheelDeltaToZoom(-100), -dz);
   assert.ok(wheelDeltaToZoom(1e9) <= 1);
+});
+
+test("max-zoom cruise balances the same wheel delta zooming out", () => {
+  const orbitDistance = 100;
+  for (const delta of [10, 50, 100, 120, 1000]) {
+    const dz = wheelDeltaToZoom(delta);
+    const step = cruiseStepForZoom(orbitDistance, dz);
+    const target = cruiseTarget(
+      [0, 0, 0],
+      null,
+      [0, 0, 1],
+      step,
+    );
+    const cameraAfterZoomOut = target[2] - orbitDistance * 2 ** dz;
+    assert.ok(Math.abs(cameraAfterZoomOut + orbitDistance) < 1e-9);
+  }
 });
 
 test("anchored zoom-in converges the pivot onto the anchor", () => {
