@@ -12,8 +12,9 @@ is implemented and tested before the full-data orchestration.
 - Detect connected components before embedding; never ask UMAP to arrange
   unrelated components in the same topology volume.
 - Use coarse Leiden communities only inside the giant component.
-- Layout each macro community locally with UMAP, then place collision-free
-  bounding spheres according to a weighted community supergraph.
+- Layout each macro community locally with UMAP, establish stable full-sphere
+  centers, then spread local nodes and repack their 95%-core spheres according
+  to the weighted community supergraph.
 - Layout all small components together for efficiency, recenter each component,
   and place their islands on a satellite sphere.
 - Preserve the existing isolated Fibonacci shell outside every connected node.
@@ -62,6 +63,12 @@ is implemented and tested before the full-data orchestration.
 | Fine Leiden count drifts | Medium | Merge fine groups into a fixed number of deterministic large anchors |
 | Huge communities dominate world scale | Medium | Robust local quantile scaling plus collision-aware radii |
 | Shell no longer clears satellites | High | Derive shell radius from the final connected extent and test it |
+
+### Phase 4: Compactness Tuning
+
+- [x] Repack macro communities around their dense cores.
+- [x] Increase local node spacing independently of island-center spacing.
+- [ ] Rebuild and compare real-data browser output against the first island layout.
 
 ## Open Questions
 

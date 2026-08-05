@@ -3,7 +3,7 @@
 ## Task 1: Deterministic island packing
 
 **Acceptance criteria:**
-- [x] Island bounding spheres have at least the configured gap.
+- [x] Initial island bounding spheres have at least the configured gap.
 - [x] Packing is deterministic and remains three-dimensional.
 
 **Verification:**
@@ -49,3 +49,17 @@
 
 **Files likely touched:**
 - Generated ignored files under `data/layout/` and `site/data/`
+
+## Task 4: Tighten islands and spread their nodes
+
+**Acceptance criteria:**
+- [ ] Macro-community centers are visibly closer than the first rebuild.
+- [ ] Island-local nearest-neighbor distance increases.
+- [ ] The 95% community cores retain a measured positive gap.
+- [ ] Satellites remain inside the complete isolated-node shell.
+
+**Verification:**
+- [ ] Focused and full quality gates pass.
+- [ ] Rebuild the real layout and compare browser screenshots.
+
+**Dependencies:** Task 3

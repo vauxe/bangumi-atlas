@@ -45,6 +45,9 @@ _JITTER_RADIUS = TYPICAL_NODE_DISTANCE * 0.15
 ISLAND_GAP = TYPICAL_NODE_DISTANCE * 4
 SATELLITE_GAP = TYPICAL_NODE_DISTANCE * 6
 TARGET_COMMUNITY_ISLANDS = 64
+COMMUNITY_NODE_SPREAD = 1.5
+COMMUNITY_CORE_QUANTILE = 0.95
+COMMUNITY_CORE_GAP = TYPICAL_NODE_DISTANCE
 _HALO_GAP = TYPICAL_NODE_DISTANCE * 6
 _GOLDEN_ANGLE = np.pi * (3 - np.sqrt(5.0))
 
@@ -385,6 +388,45 @@ def _local_island_geometry(
     return local, radii
 
 
+def tighten_islands(
+    local: np.ndarray,
+    island: np.ndarray,
+    desired_centers: np.ndarray,
+    *,
+    node_spread: float = COMMUNITY_NODE_SPREAD,
+    core_quantile: float = COMMUNITY_CORE_QUANTILE,
+    gap: float = COMMUNITY_CORE_GAP,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Spread local nodes, then repack centers around each dense core."""
+    if local.ndim != 2 or local.shape[1] != 3:
+        raise ValueError("local island geometry must have three dimensions")
+    if island.shape != (len(local),) or len(local) == 0:
+        raise ValueError("local geometry and island ids must align")
+    count = len(desired_centers)
+    if desired_centers.shape != (count, 3):
+        raise ValueError("desired island centers must have three dimensions")
+    if island.min() < 0 or not np.array_equal(
+        np.unique(island), np.arange(count)
+    ):
+        raise ValueError("island ids must be dense non-negative integers")
+    if node_spread <= 0 or not 0 < core_quantile <= 1 or gap < 0:
+        raise ValueError("island tightening parameters are out of range")
+
+    expanded = local.astype(np.float64, copy=True) * node_spread
+    actual_radii = np.zeros(count, dtype=np.float64)
+    core_radii = np.zeros(count, dtype=np.float64)
+    node_radius = TYPICAL_NODE_DISTANCE / 2
+    for group in range(count):
+        radial = np.linalg.norm(expanded[island == group], axis=1)
+        actual_radii[group] = max(node_radius, float(radial.max()))
+        core_radii[group] = max(
+            node_radius,
+            float(np.quantile(radial, core_quantile)),
+        )
+    centers = pack_island_centers(desired_centers, core_radii, gap)
+    return expanded + centers[island], centers, actual_radii, core_radii
+
+
 def _fibonacci_unit_sphere(count: int) -> np.ndarray:
     """Evenly sample deterministic unit directions at any count."""
     if count == 0:
@@ -459,6 +501,9 @@ def hierarchical_connected_layout(
                 "n_community_islands": 0,
                 "n_satellite_islands": 0,
                 "min_community_island_gap": 0.0,
+                "min_community_core_gap": 0.0,
+                "community_core_quantile": COMMUNITY_CORE_QUANTILE,
+                "community_node_spread": COMMUNITY_NODE_SPREAD,
                 "min_satellite_island_gap": 0.0,
                 "giant_body_radius": 0.0,
                 "satellite_radius": 0.0,
@@ -478,12 +523,16 @@ def hierarchical_connected_layout(
     macro_graph = _community_supergraph(giant_edges, macro)
     macro_desired = run_macro_layout(macro_graph)
     giant_desired = run_layout(giant)
-    giant_coords, macro_centers, macro_radii = place_islands(
+    giant_coords, macro_centers, _macro_radii = place_islands(
         giant_desired,
         keys[giant_vertices],
         macro,
         macro_desired,
         ISLAND_GAP,
+    )
+    giant_local = giant_coords - macro_centers[macro]
+    giant_coords, macro_centers, macro_radii, macro_core_radii = (
+        tighten_islands(giant_local, macro, macro_centers)
     )
 
     coords = np.zeros((count, 3), dtype=np.float64)
@@ -510,6 +559,8 @@ def hierarchical_connected_layout(
             satellite,
             satellite_count,
         )
+        local *= COMMUNITY_NODE_SPREAD
+        satellite_radii *= COMMUNITY_NODE_SPREAD
         satellite_centers = satellite_island_centers(
             satellite_radii, giant_radius
         )
@@ -525,12 +576,20 @@ def hierarchical_connected_layout(
         if macro_count > 1
         else 0.0
     )
+    macro_core_gap = (
+        minimum_island_gap(macro_centers, macro_core_radii)
+        if macro_count > 1
+        else 0.0
+    )
     report: dict[str, int | float] = {
         "n_components": int(len(component_sizes)),
         "n_giant_nodes": int(len(giant_vertices)),
         "n_community_islands": macro_count,
         "n_satellite_islands": satellite_count,
         "min_community_island_gap": macro_gap,
+        "min_community_core_gap": macro_core_gap,
+        "community_core_quantile": COMMUNITY_CORE_QUANTILE,
+        "community_node_spread": COMMUNITY_NODE_SPREAD,
         "min_satellite_island_gap": satellite_gap,
         "giant_body_radius": giant_radius,
         "satellite_radius": satellite_radius,
@@ -615,6 +674,7 @@ _SHAPE_LOGIC = (
     pack_island_centers,
     _local_island_geometry,
     place_islands,
+    tighten_islands,
     _fibonacci_unit_sphere,
     satellite_island_centers,
     hierarchical_connected_layout,
@@ -630,6 +690,9 @@ _SHAPE_CONSTANTS = {
     "island_gap": ISLAND_GAP,
     "satellite_gap": SATELLITE_GAP,
     "target_community_islands": TARGET_COMMUNITY_ISLANDS,
+    "community_node_spread": COMMUNITY_NODE_SPREAD,
+    "community_core_quantile": COMMUNITY_CORE_QUANTILE,
+    "community_core_gap": COMMUNITY_CORE_GAP,
     "halo_gap": _HALO_GAP,
     "golden_angle": float(_GOLDEN_ANGLE),
 }
