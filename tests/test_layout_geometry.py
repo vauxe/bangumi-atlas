@@ -9,9 +9,15 @@ import numpy as np
 
 from scripts import layout
 from scripts.layout import (
+    ISLAND_GAP,
+    SATELLITE_GAP,
     TYPICAL_NODE_DISTANCE,
     detect_communities,
+    minimum_island_gap,
+    pack_island_centers,
+    place_islands,
     run_layout,
+    satellite_island_centers,
     shape_digest,
     shape_layout,
 )
@@ -113,6 +119,85 @@ class TopologyLayoutTests(unittest.TestCase):
         shell = radius[degree == 0]
         self.assertAlmostEqual(float(shell.max() - shell.min()), 0.0, places=4)
         self.assertGreater(float(np.ptp(shaped[degree == 0][:, 1])), 0.0)
+
+
+class CommunityIslandTests(unittest.TestCase):
+    def test_packs_island_bounding_spheres_with_a_deterministic_gap(
+        self,
+    ) -> None:
+        desired = np.array(
+            [
+                [-0.02, 0.00, -0.01],
+                [0.01, 0.02, 0.00],
+                [0.00, -0.01, 0.02],
+                [0.02, 0.01, -0.02],
+            ],
+            dtype=np.float64,
+        )
+        radii = np.array([2.0, 1.5, 1.0, 0.75], dtype=np.float64)
+
+        first = pack_island_centers(desired, radii, ISLAND_GAP)
+        second = pack_island_centers(desired, radii, ISLAND_GAP)
+
+        np.testing.assert_array_equal(first, second)
+        self.assertGreaterEqual(
+            minimum_island_gap(first, radii), ISLAND_GAP - 1e-9
+        )
+        self.assertTrue((np.ptp(first, axis=0) > 0).all())
+
+    def test_places_local_topology_in_separate_community_islands(self) -> None:
+        desired = np.array(
+            [
+                [-1.0, 0.0, 0.2],
+                [-0.2, 0.8, -0.1],
+                [0.7, -0.4, 0.5],
+                [1.0, 0.3, -0.4],
+                [-0.8, 0.1, -0.2],
+                [-0.1, -0.7, 0.4],
+                [0.6, 0.5, -0.5],
+                [1.1, -0.2, 0.1],
+            ],
+            dtype=np.float32,
+        )
+        keys = np.arange(100, 108, dtype=np.uint32)
+        islands = np.array([0, 0, 0, 0, 1, 1, 1, 1], dtype=np.int64)
+        desired_centers = np.array(
+            [[-0.01, 0.0, 0.0], [0.01, 0.0, 0.0]], dtype=np.float64
+        )
+
+        coords, centers, radii = place_islands(
+            desired, keys, islands, desired_centers, ISLAND_GAP
+        )
+
+        self.assertEqual(coords.shape, desired.shape)
+        self.assertGreaterEqual(
+            minimum_island_gap(centers, radii), ISLAND_GAP - 1e-9
+        )
+        for island in range(2):
+            np.testing.assert_allclose(
+                coords[islands == island].mean(axis=0),
+                centers[island],
+                atol=1e-6,
+            )
+
+    def test_places_satellite_islands_outside_the_body_without_overlap(
+        self,
+    ) -> None:
+        radii = np.array([2.0, 1.5, 1.0, 0.8, 0.6], dtype=np.float64)
+        body_radius = 5.0
+
+        centers = satellite_island_centers(radii, body_radius)
+
+        center_radius = np.linalg.norm(centers, axis=1)
+        self.assertAlmostEqual(float(np.ptp(center_radius)), 0.0, places=8)
+        self.assertGreaterEqual(
+            float(center_radius.min() - radii.max()),
+            body_radius + SATELLITE_GAP - 1e-9,
+        )
+        self.assertGreaterEqual(
+            minimum_island_gap(centers, radii), ISLAND_GAP - 1e-9
+        )
+        self.assertTrue((np.ptp(centers, axis=0) > 0).all())
 
 
 class ShapeIdentityTests(unittest.TestCase):
