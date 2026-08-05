@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import ladybug as lb
 import orjson
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -122,6 +123,69 @@ class SourceSchemaTests(unittest.TestCase):
 
 
 class ParquetProjectionTests(unittest.TestCase):
+    def test_streaming_writer_flushes_bounded_row_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parquet = Path(directory)
+            schema = pa.schema([("id", pa.int64()), ("name", pa.string())])
+
+            with patch.object(build_db, "PARQUET", parquet):
+                count = build_db.write_parquet_rows(
+                    "streamed",
+                    schema,
+                    ((index, f"row-{index}") for index in range(5)),
+                    batch_rows=2,
+                )
+
+            file = pq.ParquetFile(parquet / "streamed.parquet")
+            self.assertEqual(count, 5)
+            self.assertEqual(file.metadata.num_row_groups, 3)
+            self.assertEqual(
+                file.read().to_pylist(),
+                [{"id": index, "name": f"row-{index}"} for index in range(5)],
+            )
+
+    def test_streaming_writer_preserves_schema_for_empty_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parquet = Path(directory)
+            schema = pa.schema(
+                [("id", pa.int64()), ("tags", pa.list_(pa.string()))]
+            )
+
+            with patch.object(build_db, "PARQUET", parquet):
+                count = build_db.write_parquet_rows(
+                    "empty",
+                    schema,
+                    iter(()),
+                    batch_rows=2,
+                )
+
+            table = pq.read_table(parquet / "empty.parquet")
+            self.assertEqual(count, 0)
+            self.assertEqual(table.schema, schema)
+            self.assertEqual(table.to_pylist(), [])
+
+    def test_streaming_writer_failure_preserves_published_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parquet = Path(directory)
+            target = parquet / "stable.parquet"
+            target.write_bytes(b"last-known-good")
+            schema = pa.schema([("id", pa.int64())])
+
+            def interrupted_rows():
+                yield (1,)
+                raise RuntimeError("interrupted")
+
+            with (
+                patch.object(build_db, "PARQUET", parquet),
+                self.assertRaisesRegex(RuntimeError, "interrupted"),
+            ):
+                build_db.write_parquet_rows(
+                    "stable", schema, interrupted_rows(), batch_rows=2
+                )
+
+            self.assertEqual(target.read_bytes(), b"last-known-good")
+            self.assertFalse((parquet / ".stable.parquet.build").exists())
+
     def test_subject_platform_keeps_source_code_and_decoded_name(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

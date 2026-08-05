@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import heapq
 import sys
+import tempfile
 import time
 from collections import Counter, defaultdict
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +35,15 @@ failures: list[str] = []
 artifact_files: dict[str, list[Any]] = {}
 member_spans: dict[str, set[tuple[int, int]]] = defaultdict(set)
 MIN_NODE_CENTER_DISTANCE = 0.28
+VERIFY_BATCH_ROWS = 32_768
+FACT_INDEX_DTYPE = np.dtype(
+    [
+        ("offset", "<u8"),
+        ("length", "<u4"),
+        ("multiplicity", "<u4"),
+        ("incidence", "u1"),
+    ]
+)
 
 
 def log(msg: str) -> None:
@@ -96,6 +108,145 @@ def quantile(sizes: list[int], q: float) -> int:
     return arr[min(len(arr) - 1, int(q * len(arr)))]
 
 
+def iter_parquet_dict_batches(
+    path: Path,
+    columns: Sequence[str],
+    *,
+    batch_size: int = VERIFY_BATCH_ROWS,
+) -> Iterator[dict[str, list[Any]]]:
+    """Project and decode one bounded Parquet record batch at a time."""
+
+    for batch in pq.ParquetFile(path).iter_batches(
+        batch_size=batch_size,
+        columns=list(columns),
+    ):
+        yield batch.to_pydict()
+
+
+def _read_fact_run(path: Path) -> Iterator[bytes]:
+    with gzip.open(path, "rb") as reader:
+        for line in reader:
+            if not line.endswith(b"\n"):
+                raise ValueError(f"truncated fact run: {path}")
+            yield line[:-1]
+
+
+class ExpectedFactStore:
+    """Disk-backed canonical fact lookup addressed by deterministic FactRef."""
+
+    def __init__(
+        self,
+        data_path: Path,
+        index_path: Path,
+        *,
+        count: int,
+        source_rows: int,
+    ) -> None:
+        self.count = count
+        self.source_rows = source_rows
+        self._data = np.memmap(data_path, dtype=np.uint8, mode="r")
+        self._index = np.memmap(
+            index_path,
+            dtype=FACT_INDEX_DTYPE,
+            mode="r",
+            shape=(count,),
+        )
+
+    def lookup(self, ref: int) -> tuple[bytes, int, int]:
+        record = self._index[ref]
+        offset = int(record["offset"])
+        length = int(record["length"])
+        encoded = bytes(self._data[offset : offset + length])
+        return (
+            encoded,
+            int(record["multiplicity"]),
+            int(record["incidence"]),
+        )
+
+    @property
+    def incidence_counts(self) -> np.ndarray:
+        return self._index["incidence"]
+
+    @property
+    def multiplicities(self) -> np.ndarray:
+        return self._index["multiplicity"]
+
+    def close(self) -> None:
+        self._data._mmap.close()  # type: ignore[attr-defined]
+        self._index._mmap.close()  # type: ignore[attr-defined]
+
+
+def build_expected_fact_store(
+    directory: Path,
+    encoded_batches: Iterable[Iterable[bytes]],
+) -> ExpectedFactStore:
+    """External-sort canonical facts into a compact random-access index."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    runs: list[Path] = []
+    source_rows = 0
+    for run_number, batch in enumerate(encoded_batches):
+        encoded = list(batch)
+        if not encoded:
+            continue
+        source_rows += len(encoded)
+        encoded.sort()
+        path = directory / f"fact-{run_number:06d}.jsonl.gz"
+        with gzip.open(path, "wb", compresslevel=1) as writer:
+            for value in encoded:
+                if b"\n" in value:
+                    raise ValueError("canonical fact contains a raw newline")
+                writer.write(value + b"\n")
+        runs.append(path)
+
+    data_path = directory / "facts.data"
+    index_path = directory / "facts.index"
+    count = 0
+    index_rows: list[tuple[int, int, int, int]] = []
+    merged = heapq.merge(*(_read_fact_run(path) for path in runs))
+
+    with data_path.open("wb") as data, index_path.open("wb") as index:
+        previous: bytes | None = None
+        multiplicity = 0
+
+        def emit(value: bytes, repeats: int) -> None:
+            nonlocal count
+            offset = data.tell()
+            data.write(value)
+            parts = orjson.loads(value)[1]
+            index_rows.append((offset, len(value), repeats, len(set(parts))))
+            count += 1
+            if len(index_rows) == VERIFY_BATCH_ROWS:
+                index.write(
+                    np.asarray(index_rows, dtype=FACT_INDEX_DTYPE).tobytes()
+                )
+                index_rows.clear()
+
+        for value in merged:
+            if value == previous:
+                multiplicity += 1
+                continue
+            if previous is not None:
+                emit(previous, multiplicity)
+            previous = value
+            multiplicity = 1
+        if previous is not None:
+            emit(previous, multiplicity)
+        if index_rows:
+            index.write(
+                np.asarray(index_rows, dtype=FACT_INDEX_DTYPE).tobytes()
+            )
+
+    if not count:
+        raise ValueError("expected at least one fact")
+    return ExpectedFactStore(
+        data_path,
+        index_path,
+        count=count,
+        source_rows=source_rows,
+    )
+
+
 def find_position_overlap(
     positions: np.ndarray,
     minimum_distance: float,
@@ -105,9 +256,7 @@ def find_position_overlap(
     tree = cKDTree(positions)
     for start in range(0, len(positions), 100_000):
         end = min(start + 100_000, len(positions))
-        distance, neighbor = tree.query(
-            positions[start:end], k=2, workers=1
-        )
+        distance, neighbor = tree.query(positions[start:end], k=2, workers=1)
         nearest = distance[:, 1]
         local = int(np.argmin(nearest))
         if float(nearest[local]) < minimum_distance:
@@ -182,9 +331,7 @@ def main() -> None:  # noqa: PLR0915
     if len(positions_flat) != n * 3:
         raise ValueError("positions.bin has an invalid float32 record count")
     positions = positions_flat.reshape(n, 3)
-    declared_distance = manifest["layout"].get(
-        "minimum_node_center_distance"
-    )
+    declared_distance = manifest["layout"].get("minimum_node_center_distance")
     reconcile(
         "layout 声明全局最小节点中心距",
         MIN_NODE_CENTER_DISTANCE,
@@ -270,29 +417,41 @@ def main() -> None:  # noqa: PLR0915
     site_ent_fp = RowFingerprint()
     ent_counts: dict[int, int] = {k: 0 for k in sr.KINDS}
     ent_sizes: list[int] = []
-    rank_of_key = {int(k): i for i, k in enumerate(key_r)}
-    presence: dict[str, dict[int, tuple[int, int]]] = {
-        "1": {},
-        "2": {},
-        "3": {},
+    presence: dict[str, np.ndarray] = {
+        str(kind): np.zeros(len(decoded[kind]), dtype=np.uint8)
+        for kind in sr.KINDS
     }
     for kind_s, ranges in ent_idx["k"].items():
         kind = int(kind_s)
-        seen_ids: set[int] = set()
+        seen_ids = np.zeros(len(decoded[kind]), dtype=np.bool_)
         for row in ranges:
             start, end, off, length = row
             ent_sizes.append(length)
             member = load_member("entities.pack", off, length)
             for sid, tup in zip(member["i"], member["r"], strict=True):
-                if sid < start or sid > end or sid in seen_ids:
+                invalid_id = (
+                    sid < start
+                    or sid > end
+                    or sid >= len(seen_ids)
+                    or seen_ids[sid]
+                )
+                if invalid_id:
                     check(
                         f"entities kind={kind} 身份唯一且在范围内",
                         False,
                         str(sid),
                     )
-                seen_ids.add(sid)
-                key = (kind << 24) | sid
-                nm = names_by_rank[rank_of_key[key]]
+                    continue
+                seen_ids[sid] = True
+                rank = int(decoded[kind][sid])
+                if rank == sr.RANK_SENTINEL:
+                    check(
+                        f"entities kind={kind} 身份存在于 rank",
+                        False,
+                        str(sid),
+                    )
+                    continue
+                nm = names_by_rank[rank]
                 if kind == sr.KIND_SUBJECT:
                     (
                         styp,
@@ -354,7 +513,7 @@ def main() -> None:  # noqa: PLR0915
                     site_ent_fp.add(
                         [kind, sid, nm[0], role, comments, collects]
                     )
-                presence[kind_s][sid] = (hs, hi)
+                presence[kind_s][sid] = int(hs) | (int(hi) << 1)
                 ent_counts[kind] += 1
     for kind_name, kind in (("subject", 1), ("person", 2), ("character", 3)):
         reconcile(
@@ -365,60 +524,89 @@ def main() -> None:  # noqa: PLR0915
     check("实体成员硬上限", max(ent_sizes) <= sr.MEMBER_CAP)
 
     pq_ent_fp = RowFingerprint()
-    sub = pq.read_table(PARQUET / "subject.parquet").to_pydict()
-    for i in range(len(sub["id"])):
-        pq_ent_fp.add(
-            [
-                1,
-                sub["id"][i],
-                sub["name"][i],
-                sub["name_cn"][i],
-                sub["type"][i],
-                sub["platform_code"][i],
-                sub["date"][i],
-                sub["score"][i],
-                sub["rank"][i],
-                int(sub["nsfw"][i]),
-                sub["wish"][i],
-                sub["done"][i],
-                sub["doing"][i],
-                sub["on_hold"][i],
-                sub["dropped"][i],
-                int(sub["series"][i]),
-                sub["score_details"][i],
-                sub["meta_tags"][i],
-                [[t["name"], t["count"]] for t in sub["tags"][i]],
-            ]
-        )
-    per = pq.read_table(PARQUET / "person.parquet").to_pydict()
-    for i in range(len(per["id"])):
-        pq_ent_fp.add(
-            [
-                2,
-                per["id"][i],
-                per["name"][i],
-                per["type"][i],
-                per["career"][i],
-                per["comments"][i],
-                per["collects"][i],
-            ]
-        )
-    cha = pq.read_table(PARQUET / "character.parquet").to_pydict()
-    for i in range(len(cha["id"])):
-        pq_ent_fp.add(
-            [
-                3,
-                cha["id"][i],
-                cha["name"][i],
-                cha["role"][i],
-                cha["comments"][i],
-                cha["collects"][i],
-            ]
-        )
+    subject_columns = [
+        "id",
+        "name",
+        "name_cn",
+        "type",
+        "platform_code",
+        "date",
+        "score",
+        "rank",
+        "nsfw",
+        "wish",
+        "done",
+        "doing",
+        "on_hold",
+        "dropped",
+        "series",
+        "score_details",
+        "meta_tags",
+        "tags",
+    ]
+    for sub in iter_parquet_dict_batches(
+        PARQUET / "subject.parquet", subject_columns
+    ):
+        for i in range(len(sub["id"])):
+            pq_ent_fp.add(
+                [
+                    1,
+                    sub["id"][i],
+                    sub["name"][i],
+                    sub["name_cn"][i],
+                    sub["type"][i],
+                    sub["platform_code"][i],
+                    sub["date"][i],
+                    sub["score"][i],
+                    sub["rank"][i],
+                    int(sub["nsfw"][i]),
+                    sub["wish"][i],
+                    sub["done"][i],
+                    sub["doing"][i],
+                    sub["on_hold"][i],
+                    sub["dropped"][i],
+                    int(sub["series"][i]),
+                    sub["score_details"][i],
+                    sub["meta_tags"][i],
+                    [[t["name"], t["count"]] for t in sub["tags"][i]],
+                ]
+            )
+    for per in iter_parquet_dict_batches(
+        PARQUET / "person.parquet",
+        ["id", "name", "type", "career", "comments", "collects"],
+    ):
+        for i in range(len(per["id"])):
+            pq_ent_fp.add(
+                [
+                    2,
+                    per["id"][i],
+                    per["name"][i],
+                    per["type"][i],
+                    per["career"][i],
+                    per["comments"][i],
+                    per["collects"][i],
+                ]
+            )
+    for cha in iter_parquet_dict_batches(
+        PARQUET / "character.parquet",
+        ["id", "name", "role", "comments", "collects"],
+    ):
+        for i in range(len(cha["id"])):
+            pq_ent_fp.add(
+                [
+                    3,
+                    cha["id"][i],
+                    cha["name"][i],
+                    cha["role"][i],
+                    cha["comments"][i],
+                    cha["collects"][i],
+                ]
+            )
     check(
         "实体结构内容指纹 = parquet",
         site_ent_fp.snapshot() == pq_ent_fp.snapshot(),
     )
+    del key_r, raw, site_ent_fp, pq_ent_fp
 
     # ---- 文本侧车:非空/空计数、字节数、指纹、存在位 ----
     log("[5] 文本侧车")
@@ -430,10 +618,9 @@ def main() -> None:  # noqa: PLR0915
         sizes: list[int] = []
         seen_count = 0
         raw_bytes = 0
-        seen_by_kind: dict[str, set[int]] = {
-            "1": set(),
-            "2": set(),
-            "3": set(),
+        seen_by_kind: dict[str, np.ndarray] = {
+            str(kind): np.zeros(len(decoded[kind]), dtype=np.bool_)
+            for kind in sr.KINDS
         }
         for kind_s, ranges in fam["ranges"].items():
             for start, end, fidx, off, length in ranges:
@@ -443,11 +630,13 @@ def main() -> None:  # noqa: PLR0915
                     if (
                         sid < start
                         or sid > end
-                        or sid in seen_by_kind[kind_s]
+                        or sid >= len(seen_by_kind[kind_s])
+                        or seen_by_kind[kind_s][sid]
                         or not text
                     ):
                         check(f"{family} 身份唯一且非空", False, str(sid))
-                    seen_by_kind[kind_s].add(sid)
+                        continue
+                    seen_by_kind[kind_s][sid] = True
                     fp_site.add([int(kind_s), sid, text])
                     raw_bytes += len(text.encode())
                     seen_count += 1
@@ -455,21 +644,22 @@ def main() -> None:  # noqa: PLR0915
         pq_non_empty = 0
         pq_empty = 0
         for kind, table in ((1, "subject"), (2, "person"), (3, "character")):
-            t = pq.read_table(
-                PARQUET / f"{table}.parquet", columns=["id", column]
-            ).to_pydict()
-            for i in range(len(t["id"])):
-                text = t[column][i]
-                if text:
-                    fp_pq.add([kind, t["id"][i], text])
-                    pq_non_empty += 1
-                else:
-                    pq_empty += 1
-                bits = presence[str(kind)][t["id"][i]]
-                if bits[bit] != int(bool(text)):
-                    check(
-                        f"{family} 存在位一致", False, f"{kind}:{t['id'][i]}"
-                    )
+            for t in iter_parquet_dict_batches(
+                PARQUET / f"{table}.parquet", ["id", column]
+            ):
+                for source_id, text in zip(t["id"], t[column], strict=True):
+                    if text:
+                        fp_pq.add([kind, source_id, text])
+                        pq_non_empty += 1
+                    else:
+                        pq_empty += 1
+                    bits = int(presence[str(kind)][source_id])
+                    if ((bits >> bit) & 1) != int(bool(text)):
+                        check(
+                            f"{family} 存在位一致",
+                            False,
+                            f"{kind}:{source_id}",
+                        )
         check(
             f"{family} 内容指纹 = parquet",
             fp_site.snapshot() == fp_pq.snapshot(),
@@ -505,7 +695,7 @@ def main() -> None:  # noqa: PLR0915
 
     # episode-description:识别 (subject, episode) 唯一定位
     fam = text_idx["episode-description"]
-    desc_site: dict[tuple[int, int], bool] = {}
+    desc_site: set[tuple[int, int]] = set()
     fp_site = RowFingerprint()
     sizes = []
     desc_raw = 0
@@ -523,25 +713,22 @@ def main() -> None:  # noqa: PLR0915
                     )
                 if len(row) == 7 and not (row[5] <= epid <= row[6]):
                     check("episode-description 分集边界", False, str(epid))
-                desc_site[(sid, epid)] = True
+                desc_site.add((sid, epid))
                 fp_site.add([sid, epid, text])
                 desc_raw += len(text.encode())
-    ep_t = pq.read_table(
-        PARQUET / "episode.parquet",
-        columns=["id", "subject_id", "description"],
-    ).to_pydict()
     fp_pq = RowFingerprint()
     pq_non_empty = 0
     pq_empty = 0
-    desc_bit_by_ep: dict[int, int] = {}
-    for i in range(len(ep_t["id"])):
-        text = ep_t["description"][i]
-        desc_bit_by_ep[ep_t["id"][i]] = int(bool(text))
-        if text:
-            fp_pq.add([ep_t["subject_id"][i], ep_t["id"][i], text])
-            pq_non_empty += 1
-        else:
-            pq_empty += 1
+    for ep_t in iter_parquet_dict_batches(
+        PARQUET / "episode.parquet", ["id", "subject_id", "description"]
+    ):
+        for i in range(len(ep_t["id"])):
+            text = ep_t["description"][i]
+            if text:
+                fp_pq.add([ep_t["subject_id"][i], ep_t["id"][i], text])
+                pq_non_empty += 1
+            else:
+                pq_empty += 1
     check(
         "episode-description 内容指纹 = parquet",
         fp_site.snapshot() == fp_pq.snapshot(),
@@ -577,13 +764,14 @@ def main() -> None:  # noqa: PLR0915
         "fact-summary 目录与 pack 存在",
         all(site_file(f).exists() for f in fam["files"]),
     )
-    vo = pq.read_table(
-        PARQUET / "voiced.parquet",
-        columns=["summary"],
-    ).to_pydict()
+    voiced_summary_count = 0
+    for vo in iter_parquet_dict_batches(
+        PARQUET / "voiced.parquet", ["summary"]
+    ):
+        voiced_summary_count += sum(1 for summary in vo["summary"] if summary)
     reconcile(
         "fact-summary 非空值 = parquet",
-        sum(1 for s in vo["summary"] if s),
+        voiced_summary_count,
         len(fact_summary),
     )
 
@@ -594,7 +782,6 @@ def main() -> None:  # noqa: PLR0915
     site_ep_fp = RowFingerprint()
     ep_rows_seen = 0
     orphan_groups = 0
-    subject_ids = set(sub["id"])
     eps_sizes: list[int] = []
     seen_sids: set[int] = set()
     for start, end, off, length in eps_idx["ranges"]:
@@ -604,7 +791,10 @@ def main() -> None:  # noqa: PLR0915
             if sid < start or sid > end or sid in seen_sids:
                 check("episodes 分组键唯一且在范围内", False, str(sid))
             seen_sids.add(sid)
-            if sid not in subject_ids:
+            if (
+                sid >= len(decoded[sr.KIND_SUBJECT])
+                or decoded[sr.KIND_SUBJECT][sid] == sr.RANK_SENTINEL
+            ):
                 orphan_groups += 1
             rows = list(entry["e"])
             for poff, plen in entry.get("op", []):
@@ -615,7 +805,7 @@ def main() -> None:  # noqa: PLR0915
             prev_key = None
             for r in rows:
                 epid, name, cn, air, disc, dur, sort, typ, hd = r
-                if hd != desc_bit_by_ep.get(epid, -1):
+                if hd != int((sid, epid) in desc_site):
                     check("episodes 描述存在位", False, str(epid))
                 site_ep_fp.add(
                     [sid, epid, name, cn, air, disc, dur, sort, typ]
@@ -630,35 +820,35 @@ def main() -> None:  # noqa: PLR0915
                     check("episodes 组内有序", False, str(epid))
                 prev_key = order_key
                 ep_rows_seen += 1
-    ep_full = pq.read_table(
-        PARQUET / "episode.parquet",
-        columns=[
-            "id",
-            "subject_id",
-            "name",
-            "name_cn",
-            "airdate",
-            "disc",
-            "duration",
-            "sort",
-            "type",
-        ],
-    ).to_pydict()
     pq_ep_fp = RowFingerprint()
-    for i in range(len(ep_full["id"])):
-        pq_ep_fp.add(
-            [
-                ep_full["subject_id"][i],
-                ep_full["id"][i],
-                ep_full["name"][i],
-                ep_full["name_cn"][i],
-                ep_full["airdate"][i],
-                ep_full["disc"][i],
-                ep_full["duration"][i],
-                ep_full["sort"][i],
-                ep_full["type"][i],
-            ]
-        )
+    episode_columns = [
+        "id",
+        "subject_id",
+        "name",
+        "name_cn",
+        "airdate",
+        "disc",
+        "duration",
+        "sort",
+        "type",
+    ]
+    for ep_full in iter_parquet_dict_batches(
+        PARQUET / "episode.parquet", episode_columns
+    ):
+        for i in range(len(ep_full["id"])):
+            pq_ep_fp.add(
+                [
+                    ep_full["subject_id"][i],
+                    ep_full["id"][i],
+                    ep_full["name"][i],
+                    ep_full["name_cn"][i],
+                    ep_full["airdate"][i],
+                    ep_full["disc"][i],
+                    ep_full["duration"][i],
+                    ep_full["sort"][i],
+                    ep_full["type"][i],
+                ]
+            )
     check(
         "分集内容指纹 = parquet", site_ep_fp.snapshot() == pq_ep_fp.snapshot()
     )
@@ -669,163 +859,186 @@ def main() -> None:  # noqa: PLR0915
         orphan_groups,
     )
     check("分集成员硬上限", max(eps_sizes) <= sr.MEMBER_CAP)
+    decoded.clear()
+    presence.clear()
+    del desc_site, site_ep_fp, pq_ep_fp
 
     # ---- 事实:incidence 还原 FactRef、multiplicity 对账 ----
     log("[7] 事实与 incidence")
-    expected: dict[bytes, tuple[int, int]] = {}
-    fact_source_rows = 0
-    mult_count: dict[bytes, int] = defaultdict(int)
 
-    def add_rows(kind: str, parts_attrs: Any) -> None:
-        nonlocal fact_source_rows
-        for parts, attrs in parts_attrs:
-            mult_count[sr.canonical_fact(kind, parts, attrs)] += 1
-            fact_source_rows += 1
+    def encode_source(
+        table: str,
+        columns: Sequence[str],
+        kind: str,
+        row_for_index: Any,
+    ) -> Iterator[list[bytes]]:
+        for values in iter_parquet_dict_batches(
+            PARQUET / f"{table}.parquet", columns
+        ):
+            yield [
+                sr.canonical_fact(kind, *row_for_index(values, i))
+                for i in range(len(values[columns[0]]))
+            ]
 
-    rel = pq.read_table(PARQUET / "relates_to.parquet").to_pydict()
-    add_rows(
-        "RELATES_TO",
-        (
-            (
-                ((1 << 24) | rel["from_id"][i], (1 << 24) | rel["to_id"][i]),
-                (rel["relation_type"][i], rel["sort_order"][i]),
-            )
-            for i in range(len(rel["from_id"]))
-        ),
-    )
-    wo = pq.read_table(PARQUET / "worked_on.parquet").to_pydict()
-    add_rows(
-        "WORKED_ON",
-        (
-            (
-                ((2 << 24) | wo["from_id"][i], (1 << 24) | wo["to_id"][i]),
-                (wo["position"][i], wo["appear_eps"][i]),
-            )
-            for i in range(len(wo["from_id"]))
-        ),
-    )
-    ap = pq.read_table(PARQUET / "appears_in.parquet").to_pydict()
-    add_rows(
-        "APPEARS_IN",
-        (
-            (
-                ((3 << 24) | ap["from_id"][i], (1 << 24) | ap["to_id"][i]),
-                (ap["type"][i], ap["sort_order"][i]),
-            )
-            for i in range(len(ap["from_id"]))
-        ),
-    )
-    vo_full = pq.read_table(PARQUET / "voiced.parquet").to_pydict()
-    add_rows(
-        "VOICE_CREDIT",
-        (
-            (
+    def encoded_fact_batches() -> Iterator[list[bytes]]:
+        yield from encode_source(
+            "relates_to",
+            ["from_id", "to_id", "relation_type", "sort_order"],
+            "RELATES_TO",
+            lambda row, i: (
                 (
-                    (2 << 24) | vo_full["from_id"][i],
-                    (3 << 24) | vo_full["to_id"][i],
-                    (1 << 24) | vo_full["subject_id"][i],
+                    sr.entity_key(sr.KIND_SUBJECT, row["from_id"][i]),
+                    sr.entity_key(sr.KIND_SUBJECT, row["to_id"][i]),
                 ),
-                (vo_full["type"][i], vo_full["summary"][i]),
-            )
-            for i in range(len(vo_full["from_id"]))
-        ),
-    )
-    pr = pq.read_table(PARQUET / "person_rel.parquet").to_pydict()
-    add_rows(
-        "PERSON_REL",
-        (
-            (
-                ((2 << 24) | pr["from_id"][i], (2 << 24) | pr["to_id"][i]),
+                (row["relation_type"][i], row["sort_order"][i]),
+            ),
+        )
+        yield from encode_source(
+            "worked_on",
+            ["from_id", "to_id", "position", "appear_eps"],
+            "WORKED_ON",
+            lambda row, i: (
                 (
-                    pr["relation_type"][i],
-                    int(pr["spoiler"][i]),
-                    int(pr["ended"][i]),
+                    sr.entity_key(sr.KIND_PERSON, row["from_id"][i]),
+                    sr.entity_key(sr.KIND_SUBJECT, row["to_id"][i]),
                 ),
-            )
-            for i in range(len(pr["from_id"]))
-        ),
-    )
-    cr = pq.read_table(PARQUET / "character_rel.parquet").to_pydict()
-    add_rows(
-        "CHARACTER_REL",
-        (
-            (
-                ((3 << 24) | cr["from_id"][i], (3 << 24) | cr["to_id"][i]),
+                (row["position"][i], row["appear_eps"][i]),
+            ),
+        )
+        yield from encode_source(
+            "appears_in",
+            ["from_id", "to_id", "type", "sort_order"],
+            "APPEARS_IN",
+            lambda row, i: (
                 (
-                    cr["relation_type"][i],
-                    int(cr["spoiler"][i]),
-                    int(cr["ended"][i]),
+                    sr.entity_key(sr.KIND_CHARACTER, row["from_id"][i]),
+                    sr.entity_key(sr.KIND_SUBJECT, row["to_id"][i]),
+                ),
+                (row["type"][i], row["sort_order"][i]),
+            ),
+        )
+        yield from encode_source(
+            "voiced",
+            ["from_id", "to_id", "subject_id", "type", "summary"],
+            "VOICE_CREDIT",
+            lambda row, i: (
+                (
+                    sr.entity_key(sr.KIND_PERSON, row["from_id"][i]),
+                    sr.entity_key(sr.KIND_CHARACTER, row["to_id"][i]),
+                    sr.entity_key(sr.KIND_SUBJECT, row["subject_id"][i]),
+                ),
+                (row["type"][i], row["summary"][i]),
+            ),
+        )
+        for table, kind, entity_kind in (
+            ("person_rel", "PERSON_REL", sr.KIND_PERSON),
+            ("character_rel", "CHARACTER_REL", sr.KIND_CHARACTER),
+        ):
+            yield from encode_source(
+                table,
+                ["from_id", "to_id", "relation_type", "spoiler", "ended"],
+                kind,
+                lambda row, i, entity_kind=entity_kind: (
+                    (
+                        sr.entity_key(entity_kind, row["from_id"][i]),
+                        sr.entity_key(entity_kind, row["to_id"][i]),
+                    ),
+                    (
+                        row["relation_type"][i],
+                        int(row["spoiler"][i]),
+                        int(row["ended"][i]),
+                    ),
                 ),
             )
-            for i in range(len(cr["from_id"]))
-        ),
-    )
-    for i, enc in enumerate(sorted(mult_count)):
-        expected[enc] = (i, mult_count[enc])
-    n_facts = len(expected)
-    reconcile("事实计数", manifest["counts"]["facts"], n_facts)
-    reconcile(
-        "事实源行数", manifest["counts"]["fact_source_rows"], fact_source_rows
-    )
-    reconcile(
-        "multiplicity 总和 = 源行数",
-        fact_source_rows,
-        sum(mult_count.values()),
-    )
-    del rel, wo, ap, pr, cr
 
-    tag_to_kind = {v: k for k, v in sr.FACT_TAGS.items()}
-    facts_idx = load_idx("facts.idx")
-    seen_incidence = np.zeros(n_facts, dtype=np.uint8)
-    expected_incidence = np.zeros(n_facts, dtype=np.uint8)
-    for enc, (ref, _) in expected.items():
-        kind, parts, _attrs = orjson.loads(enc)
-        expected_incidence[ref] = len(set(parts))
-    n_inc_seen = 0
-    fact_sizes: list[int] = []
-    ok_incidence = True
-    for bucket_i, members in enumerate(facts_idx["b"]):
-        for off, length, _last_key in members:
-            fact_sizes.append(length)
-            member = load_member("facts.pack", off, length)
-            for key_s, entry in member.items():
-                key = int(key_s)
-                if key % sr.FACT_BUCKETS != bucket_i:
-                    check("事实桶键归属", False, key_s)
-                items: list[tuple[str, list[Any]]] = []
-                for tag, tuples in entry["g"].items():
-                    items.extend((tag, t) for t in tuples)
-                for poff, plen in entry.get("op", []):
-                    for page_item in load_member(pages_path, poff, plen):
-                        items.append((page_item[0], page_item[1:]))
-                totals = Counter(tag for tag, _ in items)
-                if dict(totals) != entry["n"]:
-                    check("事实条目分组计数", False, key_s)
-                for tag, tup in items:
-                    f_kind = tag_to_kind[tag]
-                    ref, mult, role_bits, others, *attrs = tup
-                    parts = sr.participants_from_incidence(
-                        f_kind, key, role_bits, others
-                    )
-                    if f_kind == "VOICE_CREDIT":
-                        text = fact_summary.get(ref, "")
-                        if bool(text) != bool(attrs[1]):
-                            ok_incidence = False
-                        attrs = [attrs[0], text]
-                    enc = sr.canonical_fact(f_kind, parts, tuple(attrs))
-                    exp = expected.get(enc)
-                    if exp is None or exp[0] != ref or exp[1] != mult:
-                        ok_incidence = False
-                    else:
-                        seen_incidence[ref] += 1
-                    n_inc_seen += 1
-    check("每条 incidence 还原为同一规范事实与 FactRef", ok_incidence)
-    check(
-        "每个事实在每个参与者下恰好一条 incidence",
-        bool((seen_incidence == expected_incidence).all()),
-    )
-    reconcile("incidence 总数", manifest["counts"]["incidence"], n_inc_seen)
-    check("事实成员硬上限", max(fact_sizes) <= sr.MEMBER_CAP)
+    with tempfile.TemporaryDirectory(
+        prefix="bangumi-atlas-verify-facts-"
+    ) as temp:
+        expected = build_expected_fact_store(
+            Path(temp), encoded_fact_batches()
+        )
+        try:
+            n_facts = expected.count
+            fact_source_rows = expected.source_rows
+            reconcile("事实计数", manifest["counts"]["facts"], n_facts)
+            reconcile(
+                "事实源行数",
+                manifest["counts"]["fact_source_rows"],
+                fact_source_rows,
+            )
+            reconcile(
+                "multiplicity 总和 = 源行数",
+                fact_source_rows,
+                int(expected.multiplicities.sum(dtype=np.uint64)),
+            )
+
+            tag_to_kind = {v: k for k, v in sr.FACT_TAGS.items()}
+            facts_idx = load_idx("facts.idx")
+            seen_incidence = np.zeros(n_facts, dtype=np.uint8)
+            n_inc_seen = 0
+            fact_sizes: list[int] = []
+            ok_incidence = True
+            for bucket_i, members in enumerate(facts_idx["b"]):
+                for off, length, _last_key in members:
+                    fact_sizes.append(length)
+                    member = load_member("facts.pack", off, length)
+                    for key_s, entry in member.items():
+                        key = int(key_s)
+                        if key % sr.FACT_BUCKETS != bucket_i:
+                            check("事实桶键归属", False, key_s)
+                        items: list[tuple[str, list[Any]]] = []
+                        for tag, tuples in entry["g"].items():
+                            items.extend((tag, t) for t in tuples)
+                        for poff, plen in entry.get("op", []):
+                            for page_item in load_member(
+                                pages_path, poff, plen
+                            ):
+                                items.append((page_item[0], page_item[1:]))
+                        totals = Counter(tag for tag, _ in items)
+                        if dict(totals) != entry["n"]:
+                            check("事实条目分组计数", False, key_s)
+                        for tag, tup in items:
+                            f_kind = tag_to_kind[tag]
+                            ref, mult, role_bits, others, *attrs = tup
+                            parts = sr.participants_from_incidence(
+                                f_kind, key, role_bits, others
+                            )
+                            if f_kind == "VOICE_CREDIT":
+                                text = fact_summary.get(ref, "")
+                                if bool(text) != bool(attrs[1]):
+                                    ok_incidence = False
+                                attrs = [attrs[0], text]
+                            enc = sr.canonical_fact(
+                                f_kind, parts, tuple(attrs)
+                            )
+                            if ref < 0 or ref >= n_facts:
+                                ok_incidence = False
+                            else:
+                                exp_enc, exp_mult, _exp_inc = expected.lookup(
+                                    ref
+                                )
+                                if enc != exp_enc or mult != exp_mult:
+                                    ok_incidence = False
+                                else:
+                                    seen_incidence[ref] += 1
+                            n_inc_seen += 1
+            check(
+                "每条 incidence 还原为同一规范事实与 FactRef",
+                ok_incidence,
+            )
+            check(
+                "每个事实在每个参与者下恰好一条 incidence",
+                bool((seen_incidence == expected.incidence_counts).all()),
+            )
+            reconcile(
+                "incidence 总数",
+                manifest["counts"]["incidence"],
+                n_inc_seen,
+            )
+            check("事实成员硬上限", max(fact_sizes) <= sr.MEMBER_CAP)
+        finally:
+            expected.close()
+    del fact_summary, seen_incidence
 
     # ---- 搜索:自适应前缀树与全量排序一致 ----
     log("[8] 搜索索引")
@@ -835,27 +1048,33 @@ def main() -> None:  # noqa: PLR0915
         t = text.strip().lower()
         return "".join(charmap.get(ch, ch) for ch in t)
 
-    entries: list[tuple[str, str, int]] = []
+    search_dir = orjson.loads(site_file("search.idx.json").read_bytes())
+    by_prefix: dict[str, list[list[Any]]] = {
+        prefix: [] for prefix in search_dir
+    }
+    uncovered_entry: str | None = None
     for rank in range(n):
         nm = names_by_rank[rank]
         for text in dict.fromkeys(t for t in (nm[0], nm[1] or "") if t):
             nk = fold(text)
-            if nk:
-                entries.append((nk, text, rank))
-    entries.sort(key=lambda e: e[2])
-    search_dir = orjson.loads(site_file("search.idx.json").read_bytes())
-    by_prefix: dict[str, list[list[Any]]] = defaultdict(list)
-    for nk, text, rank in entries:
-        for plen in range(1, len(nk) + 1):
-            p = nk[:plen]
-            if p in search_dir:
-                by_prefix[p].append([nk, text, rank])
-            else:
-                break
+            if not nk:
+                continue
+            matched = False
+            for plen in range(1, len(nk) + 1):
+                p = nk[:plen]
+                node = search_dir.get(p)
+                if node is None:
+                    break
+                matched = True
+                expected_items = by_prefix[p]
+                if "l" in node or len(expected_items) < sr.SEARCH_TOP:
+                    expected_items.append([nk, text, rank])
+            if not matched and uncovered_entry is None:
+                uncovered_entry = nk[:8]
     ok_search = True
     search_max = 0
     for prefix, node in search_dir.items():
-        exp_items = by_prefix.get(prefix, [])
+        exp_items = by_prefix[prefix]
         if "l" in node:
             if set(node) != {"l"}:
                 ok_search = False
@@ -878,17 +1097,12 @@ def main() -> None:  # noqa: PLR0915
         search_max <= sr.SEARCH_LEAF_CAP,
         f"max {search_max:,}",
     )
-    covered = set()
-    for nk, _text, _rank in entries:
-        p = None
-        for plen in range(len(nk), 0, -1):
-            if nk[:plen] in search_dir:
-                p = nk[:plen]
-                break
-        if p is None:
-            check("搜索目录覆盖全部条目", False, nk[:8])
-            break
-        covered.add(p)
+    check(
+        "搜索目录覆盖全部条目",
+        uncovered_entry is None,
+        uncovered_entry or "",
+    )
+    del by_prefix, names_by_rank
 
     for logical_name, (
         size,
@@ -925,15 +1139,20 @@ def main() -> None:  # noqa: PLR0915
         ("PERSON_REL", "person_rel", "relation_type", "relation"),
         ("CHARACTER_REL", "character_rel", "relation_type", "relation"),
     ):
-        t = pq.read_table(
-            PARQUET / f"{table}.parquet", columns=[code_col, name_col]
-        ).to_pydict()
         table_map = mappings["fact_labels"][kind_name]
-        ok_map = all(
-            (not name and str(code) not in table_map)
-            or table_map.get(str(code)) == name
-            for code, name in zip(t[code_col], t[name_col], strict=True)
-        )
+        ok_map = True
+        for values in iter_parquet_dict_batches(
+            PARQUET / f"{table}.parquet", [code_col, name_col]
+        ):
+            if not all(
+                (not name and str(code) not in table_map)
+                or table_map.get(str(code)) == name
+                for code, name in zip(
+                    values[code_col], values[name_col], strict=True
+                )
+            ):
+                ok_map = False
+                break
         check(f"mappings.{kind_name} 与 parquet 解码一致", ok_map)
 
     elapsed = time.time() - t0

@@ -11,6 +11,7 @@ import sys
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
@@ -202,12 +203,51 @@ def iter_jsonl(name: str) -> Iterator[dict[str, Any]]:
             yield r
 
 
-def write_parquet(
-    name: str, schema: pa.Schema, columns: dict[str, list[Any]]
+PARQUET_BATCH_ROWS = 10_000
+
+
+def write_parquet_rows(
+    name: str,
+    schema: pa.Schema,
+    rows: Iterable[tuple[Any, ...]],
+    *,
+    batch_rows: int = PARQUET_BATCH_ROWS,
 ) -> int:
-    table = pa.table(columns, schema=schema)
-    pq.write_table(table, PARQUET / f"{name}.parquet")
-    return table.num_rows
+    """Write rows in bounded batches and publish only a complete file."""
+
+    if batch_rows <= 0:
+        raise ValueError("batch_rows must be positive")
+
+    target = PARQUET / f"{name}.parquet"
+    staging = PARQUET / f".{name}.parquet.build"
+    staging.unlink(missing_ok=True)
+    columns: dict[str, list[Any]] = {field.name: [] for field in schema}
+    count = 0
+    writer = pq.ParquetWriter(staging, schema)
+
+    def flush() -> None:
+        if not columns[schema.names[0]]:
+            return
+        writer.write_table(pa.table(columns, schema=schema))
+        for column in columns.values():
+            column.clear()
+
+    try:
+        for row in rows:
+            for field, value in zip(schema, row, strict=True):
+                columns[field.name].append(value)
+            count += 1
+            if count % batch_rows == 0:
+                flush()
+        flush()
+        writer.close()
+        staging.replace(target)
+    except BaseException:
+        with suppress(Exception):
+            writer.close()
+        staging.unlink(missing_ok=True)
+        raise
+    return count
 
 
 def build_parquet() -> dict[str, int]:
@@ -221,68 +261,7 @@ def build_parquet() -> dict[str, int]:
     # ---- nodes ----
     # id -> type, reused for edge decoding and FK checks
     subject_type: dict[int, int] = {}
-    cols: dict[str, list[Any]] = {
-        k: []
-        for k in (
-            "id",
-            "type",
-            "type_name",
-            "name",
-            "name_cn",
-            "platform_code",
-            "platform",
-            "date",
-            "score",
-            "rank",
-            "nsfw",
-            "wish",
-            "done",
-            "doing",
-            "on_hold",
-            "dropped",
-            "series",
-            "score_details",
-            "meta_tags",
-            "tags",
-            "summary",
-            "infobox",
-        )
-    }
-    for r in iter_jsonl("subject"):
-        sid, stype = r["id"], r["type"]
-        if sid in subject_type:
-            continue
-        subject_type[sid] = stype
-        fav = r.get("favorite") or {}
-        # platform 解码:命名空间整体缺失(音乐 type 3)是上游事实,
-        # 不算失配;命名空间存在但码查不到才计入 unknown_codes
-        plat_ns = platforms.get(stype)
-        plat = (plat_ns or {}).get(r.get("platform")) or {}
-        if plat_ns is not None and r.get("platform") and not plat:
-            unknown_codes[("Subject.platform", stype, r["platform"])] += 1
-        if stype not in SUBJECT_TYPES:
-            unknown_codes[("Subject.type", "*", stype)] += 1
-        cols["id"].append(sid)
-        cols["type"].append(stype)
-        cols["type_name"].append(SUBJECT_TYPES.get(stype, str(stype)))
-        cols["name"].append(r.get("name") or "")
-        cols["name_cn"].append(r.get("name_cn") or "")
-        cols["platform_code"].append(r.get("platform"))
-        cols["platform"].append(plat.get("type_cn") or plat.get("type") or "")
-        cols["date"].append(r.get("date") or "")
-        cols["score"].append(r.get("score"))
-        cols["rank"].append(r.get("rank"))
-        cols["nsfw"].append(bool(r.get("nsfw")))
-        for k in ("wish", "done", "doing", "on_hold", "dropped"):
-            cols[k].append(fav.get(k, 0))
-        cols["series"].append(bool(r.get("series")))
-        sd = r.get("score_details") or {}
-        cols["score_details"].append([sd.get(str(i), 0) for i in range(1, 11)])
-        cols["meta_tags"].append(r.get("meta_tags") or [])
-        cols["tags"].append(r.get("tags") or [])
-        cols["summary"].append(r.get("summary") or "")
-        cols["infobox"].append(r.get("infobox") or "")
-    schema = pa.schema(
+    subject_schema = pa.schema(
         [
             ("id", pa.int64()),
             ("type", pa.int64()),
@@ -313,38 +292,54 @@ def build_parquet() -> dict[str, int]:
             ("infobox", pa.string()),
         ]
     )
-    stats["Subject"] = write_parquet("subject", schema, cols)
+
+    def subject_rows() -> Iterator[tuple[Any, ...]]:
+        for r in iter_jsonl("subject"):
+            sid, stype = r["id"], r["type"]
+            if sid in subject_type:
+                continue
+            subject_type[sid] = stype
+            fav = r.get("favorite") or {}
+            # platform 解码:命名空间整体缺失(音乐 type 3)是上游事实,
+            # 不算失配;命名空间存在但码查不到才计入 unknown_codes
+            plat_ns = platforms.get(stype)
+            plat = (plat_ns or {}).get(r.get("platform")) or {}
+            if plat_ns is not None and r.get("platform") and not plat:
+                unknown_codes[("Subject.platform", stype, r["platform"])] += 1
+            if stype not in SUBJECT_TYPES:
+                unknown_codes[("Subject.type", "*", stype)] += 1
+            score_details = r.get("score_details") or {}
+            yield (
+                sid,
+                stype,
+                SUBJECT_TYPES.get(stype, str(stype)),
+                r.get("name") or "",
+                r.get("name_cn") or "",
+                r.get("platform"),
+                plat.get("type_cn") or plat.get("type") or "",
+                r.get("date") or "",
+                r.get("score"),
+                r.get("rank"),
+                bool(r.get("nsfw")),
+                fav.get("wish", 0),
+                fav.get("done", 0),
+                fav.get("doing", 0),
+                fav.get("on_hold", 0),
+                fav.get("dropped", 0),
+                bool(r.get("series")),
+                [score_details.get(str(i), 0) for i in range(1, 11)],
+                r.get("meta_tags") or [],
+                r.get("tags") or [],
+                r.get("summary") or "",
+                r.get("infobox") or "",
+            )
+
+    stats["Subject"] = write_parquet_rows(
+        "subject", subject_schema, subject_rows()
+    )
 
     person_ids: set[int] = set()
-    cols = {
-        k: []
-        for k in (
-            "id",
-            "name",
-            "type",
-            "career",
-            "comments",
-            "collects",
-            "summary",
-            "infobox",
-        )
-    }
-    for r in iter_jsonl("person"):
-        if r["id"] in person_ids:
-            continue
-        person_ids.add(r["id"])
-        person_type = r.get("type")
-        if person_type not in PERSON_TYPES:
-            unknown_codes[("Person.type", "*", person_type)] += 1
-        cols["id"].append(r["id"])
-        cols["name"].append(r.get("name") or "")
-        cols["type"].append(person_type)
-        cols["career"].append(r.get("career") or [])
-        cols["comments"].append(r.get("comments", 0))
-        cols["collects"].append(r.get("collects", 0))
-        cols["summary"].append(r.get("summary") or "")
-        cols["infobox"].append(r.get("infobox") or "")
-    schema = pa.schema(
+    person_schema = pa.schema(
         [
             ("id", pa.int64()),
             ("name", pa.string()),
@@ -356,36 +351,32 @@ def build_parquet() -> dict[str, int]:
             ("infobox", pa.string()),
         ]
     )
-    stats["Person"] = write_parquet("person", schema, cols)
+
+    def person_rows() -> Iterator[tuple[Any, ...]]:
+        for r in iter_jsonl("person"):
+            if r["id"] in person_ids:
+                continue
+            person_ids.add(r["id"])
+            person_type = r.get("type")
+            if person_type not in PERSON_TYPES:
+                unknown_codes[("Person.type", "*", person_type)] += 1
+            yield (
+                r["id"],
+                r.get("name") or "",
+                person_type,
+                r.get("career") or [],
+                r.get("comments", 0),
+                r.get("collects", 0),
+                r.get("summary") or "",
+                r.get("infobox") or "",
+            )
+
+    stats["Person"] = write_parquet_rows(
+        "person", person_schema, person_rows()
+    )
 
     character_ids: set[int] = set()
-    cols = {
-        k: []
-        for k in (
-            "id",
-            "name",
-            "role",
-            "comments",
-            "collects",
-            "summary",
-            "infobox",
-        )
-    }
-    for r in iter_jsonl("character"):
-        if r["id"] in character_ids:
-            continue
-        character_ids.add(r["id"])
-        role = r.get("role")
-        if role not in CHARACTER_ROLES:
-            unknown_codes[("Character.role", "*", role)] += 1
-        cols["id"].append(r["id"])
-        cols["name"].append(r.get("name") or "")
-        cols["role"].append(role)
-        cols["comments"].append(r.get("comments", 0))
-        cols["collects"].append(r.get("collects", 0))
-        cols["summary"].append(r.get("summary") or "")
-        cols["infobox"].append(r.get("infobox") or "")
-    schema = pa.schema(
+    character_schema = pa.schema(
         [
             ("id", pa.int64()),
             ("name", pa.string()),
@@ -396,52 +387,31 @@ def build_parquet() -> dict[str, int]:
             ("infobox", pa.string()),
         ]
     )
-    stats["Character"] = write_parquet("character", schema, cols)
+
+    def character_rows() -> Iterator[tuple[Any, ...]]:
+        for r in iter_jsonl("character"):
+            if r["id"] in character_ids:
+                continue
+            character_ids.add(r["id"])
+            role = r.get("role")
+            if role not in CHARACTER_ROLES:
+                unknown_codes[("Character.role", "*", role)] += 1
+            yield (
+                r["id"],
+                r.get("name") or "",
+                role,
+                r.get("comments", 0),
+                r.get("collects", 0),
+                r.get("summary") or "",
+                r.get("infobox") or "",
+            )
+
+    stats["Character"] = write_parquet_rows(
+        "character", character_schema, character_rows()
+    )
 
     episode_ids: set[int] = set()
-    cols = {
-        k: []
-        for k in (
-            "id",
-            "name",
-            "name_cn",
-            "description",
-            "airdate",
-            "disc",
-            "duration",
-            "sort",
-            "type",
-            "subject_id",
-        )
-    }
-    ep_edges: dict[str, list[int]] = {"from_id": [], "to_id": []}
-    dropped = 0
-    for r in iter_jsonl("episode"):
-        if r["id"] in episode_ids:
-            continue
-        episode_ids.add(r["id"])
-        episode_type = r.get("type")
-        if episode_type not in EPISODE_TYPES:
-            unknown_codes[("Episode.type", "*", episode_type)] += 1
-        cols["id"].append(r["id"])
-        cols["name"].append(r.get("name") or "")
-        cols["name_cn"].append(r.get("name_cn") or "")
-        cols["description"].append(r.get("description") or "")
-        cols["airdate"].append(r.get("airdate") or "")
-        cols["disc"].append(r.get("disc", 0))
-        cols["duration"].append(r.get("duration") or "")
-        sort = r.get("sort")
-        cols["sort"].append(float(sort) if sort is not None else None)
-        cols["type"].append(episode_type)
-        # kept on the node too: for orphan episodes (subject deleted) the
-        # edge below is skipped and this is the only record of ownership
-        cols["subject_id"].append(r["subject_id"])
-        if r["subject_id"] in subject_type:
-            ep_edges["from_id"].append(r["id"])
-            ep_edges["to_id"].append(r["subject_id"])
-        else:
-            dropped += 1
-    schema = pa.schema(
+    episode_schema = pa.schema(
         [
             ("id", pa.int64()),
             ("name", pa.string()),
@@ -455,15 +425,64 @@ def build_parquet() -> dict[str, int]:
             ("subject_id", pa.int64()),
         ]
     )
-    stats["Episode"] = write_parquet("episode", schema, cols)
-    if dropped:
+    episode_dropped = 0
+
+    def episode_rows() -> Iterator[tuple[Any, ...]]:
+        nonlocal episode_dropped
+        for r in iter_jsonl("episode"):
+            if r["id"] in episode_ids:
+                continue
+            episode_ids.add(r["id"])
+            episode_type = r.get("type")
+            if episode_type not in EPISODE_TYPES:
+                unknown_codes[("Episode.type", "*", episode_type)] += 1
+            if r["subject_id"] not in subject_type:
+                episode_dropped += 1
+            sort = r.get("sort")
+            yield (
+                r["id"],
+                r.get("name") or "",
+                r.get("name_cn") or "",
+                r.get("description") or "",
+                r.get("airdate") or "",
+                r.get("disc", 0),
+                r.get("duration") or "",
+                float(sort) if sort is not None else None,
+                episode_type,
+                # Kept on the node too: for orphan episodes (subject deleted)
+                # the edge below is skipped and this records ownership.
+                r["subject_id"],
+            )
+
+    stats["Episode"] = write_parquet_rows(
+        "episode", episode_schema, episode_rows()
+    )
+    if episode_dropped:
         print(
-            f"  episode: {dropped} orphan nodes kept, EPISODE_OF edges "
+            f"  episode: {episode_dropped} orphan nodes kept, "
+            f"EPISODE_OF edges "
             f"skipped (subject deleted)"
         )
 
     edge_schema = pa.schema([("from_id", pa.int64()), ("to_id", pa.int64())])
-    stats["EPISODE_OF"] = write_parquet("episode_of", edge_schema, ep_edges)
+
+    def episode_edge_rows() -> Iterator[tuple[Any, ...]]:
+        batches = pq.ParquetFile(PARQUET / "episode.parquet").iter_batches(
+            batch_size=PARQUET_BATCH_ROWS,
+            columns=["id", "subject_id"],
+        )
+        for batch in batches:
+            episode_column = batch.column(0).to_pylist()
+            subject_column = batch.column(1).to_pylist()
+            for episode_id, subject_id in zip(
+                episode_column, subject_column, strict=True
+            ):
+                if subject_id in subject_type:
+                    yield (episode_id, subject_id)
+
+    stats["EPISODE_OF"] = write_parquet_rows(
+        "episode_of", edge_schema, episode_edge_rows()
+    )
 
     # ---- edges ----
     def edge_file(
@@ -475,21 +494,23 @@ def build_parquet() -> dict[str, int]:
             [("from_id", pa.int64()), ("to_id", pa.int64())]
             + [(n, t) for n, t in spec]
         )
-        cols: dict[str, list[Any]] = {f.name: [] for f in schema}
-        kept = dangling = 0
-        for row in rows:
-            if row is None:
-                dangling += 1
-                continue
-            for f, v in zip(schema, row, strict=True):
-                cols[f.name].append(v)
-            kept += 1
+        dangling = 0
+
+        def kept_rows() -> Iterator[tuple[Any, ...]]:
+            nonlocal dangling
+            for row in rows:
+                if row is None:
+                    dangling += 1
+                    continue
+                yield row
+
+        kept = write_parquet_rows(name, schema, kept_rows())
         if dangling:
             print(
                 f"  {name}: {dangling:,} dangling rows filtered "
                 f"(endpoint deleted upstream)"
             )
-        stats[name.upper()] = write_parquet(name, schema, cols)
+        stats[name.upper()] = kept
         return kept
 
     def subject_relation_rows() -> Iterator[tuple[Any, ...] | None]:
