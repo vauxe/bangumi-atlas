@@ -68,13 +68,16 @@ uv run python scripts/verify_site.py
 
 ### 快速等价验证
 
+#### 布局与烘焙改动
+
 改动布局或烘焙逻辑时，可先在原始 Parquet 的确定性代表子集上比较旧提交与当前工作树，
 无需信任可能中断过的旧产物：
 
 ```bash
+BASELINE_REF=origin/main  # 或换成改动前的完整提交号
 uv run python scripts/verify_build_equivalence.py \
-  --baseline-ref 75c1bfd \
-  --max-rss-mib 768 \
+  --baseline-ref "$BASELINE_REF" \
+  --max-rss-mib 1024 \
   --min-available-mib 1024
 ```
 
@@ -89,8 +92,55 @@ uv run python scripts/verify_build_equivalence.py \
 `data/verifications/equivalence-*/`，不会覆盖当前 `data/layout` 或 `site/data`。进度、峰值
 RSS、日志路径和最终差异保存在其中的 `report.json`；失败现场会保留，便于继续诊断。
 
-在 `dump-2026-07-28` 上，上述默认子集完整比较约 15 秒，实测峰值 RSS 637 MiB；实际值
-会随机器与上游数据变化。子集验证用于快速回归，发布前仍须执行完整数据管道。
+`--max-rss-mib` 是验证进程组的硬上限，`--min-available-mib` 是为系统保留的可用内存
+下限。任一门禁触发都应先减小 `--subjects`、`--people`、`--characters` 或停止其他构建，
+不要关闭内存监控后重跑。实际峰值会随机器与上游数据变化。
+
+#### 原始数据与数据库改动
+
+上述命令从已经生成的 Parquet 开始，**不会运行 `build_db.py`**。因此修改 JSONL 解析、
+字段投影、Parquet 写入或数据库导入时，仅运行上述命令或单元测试，不能据此声明
+`build_db.py` 的产物与旧实现一致。此类改动的子集验收必须满足以下步骤：
+
+1. 从同一份原始 dump 确定性选择 subject、person、character，并按关系闭包回投到全部
+   9 个 JSONL 文件；两边必须使用同一份 `VERSION`、相同的 9 个子集文件摘要和同一份
+   映射快照。
+2. 子集应覆盖全部 5 种 subject 类型、全部事实表、剧集分页边界和高关联实体。关系闭包
+   不会自然覆盖悬空关系、孤儿剧集或源数据中不存在的重复关系；报告必须说明这些路径的
+   实际行数，缺失的异常路径由合成用例或全量独立校验补充，不能默认为已经覆盖。
+3. 验证分批写入时，至少让受影响的表超过 `PARQUET_BATCH_ROWS`（当前为 10,000 行），
+   不能只验证单个 row group。
+4. 从 Git 基线提取旧版构建脚本，与当前版本分别写入两个隔离目录；禁止复用或覆盖
+   `data/parquet`、`data/db` 和可能中断过的旧产物。两个构建必须严格串行，并使用与上节
+   相同的 RSS、系统可用内存和超时门禁。
+5. 对 11 张 Parquet 表逐一比较精确 schema、行数、顺序和每行字段值，并确认 DDL 与
+   导入映射没有意外变化；再分别查询两份 LadybugDB，确认数据库内容与各自 Parquet
+   一致。流式写入可能改变 row group，不能把 Parquet 文件是否逐字节一致作为逻辑等价
+   条件。
+6. 最后分别以旧、新 Parquet 继续运行同一版 `layout.py`、`bake_site.py` 和
+   `verify_site.py`，再比较坐标、语义 manifest 和所有逻辑站点产物，防止物理分批差异
+   传播到发布结果。
+
+报告至少应保存基线完整提交号、dump 与映射版本、入选 ID 或其摘要、每个源文件和表的
+行数、精确比较结果、各阶段峰值 RSS、退出原因及日志路径。只有这些步骤全部通过，才能
+声明“该真实子集在旧、新 `build_db.py` 间逻辑等价”；它仍不等于全量等价证明。
+
+分批写入的边界、空输入 schema 和中断时保留已发布文件由以下单元测试快速覆盖：
+
+```bash
+uv run python -m unittest tests.test_build_db.ParquetProjectionTests
+```
+
+单元测试不能替代真实子集差分。若当前 dump 的 `fact-summary` 全为空，真实子集只能覆盖
+规范空 pack；非空摘要路径还必须由合成用例覆盖：
+
+```bash
+uv run python -m unittest \
+  tests.test_bake_site.FactSummaryTests.test_emits_non_empty_text_addressed_by_fact_ref
+```
+
+子集验证用于快速回归；发布前仍须对当前实现执行完整数据管道和独立校验。旧全量产物
+如果曾中断或不完整，只能作为故障现场，不能作为正确性基线。
 
 ## 4. 客户端
 
