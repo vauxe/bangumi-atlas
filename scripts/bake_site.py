@@ -11,14 +11,18 @@ FactRef incidence、存在位)、四类长文本侧车 + text.idx、自适应前
 """
 
 import argparse
+import gzip
 import hashlib
+import heapq
 import shutil
 import sys
+import tempfile
 import time
 from collections import Counter, defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from functools import partial
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
 
 import numpy as np
 import orjson
@@ -49,6 +53,8 @@ LABELS_TOP = 20_000
 SIZE_BUDGET = 1_000_000_000  # GH Pages 1GB 硬限(发布门禁按 site/ 全量)
 SIZE_WARN = 900_000_000
 FILE_BUDGET = 20_000  # CF Pages 迁移预案的文件数上限
+FACT_BATCH_ROWS = 100_000
+INCIDENCE_SHARDS = 64
 
 # 人物类型与角色分类没有上游映射文件;这是站点显示映射的权威声明,
 # 参与 mappings.json 摘要。未覆盖的原始码由客户端按数值显示。
@@ -56,6 +62,10 @@ PERSON_TYPE_NAMES = {1: "个人", 2: "公司", 3: "组合"}
 CHARACTER_ROLE_NAMES = {1: "角色", 2: "机体", 3: "舰船", 4: "组织"}
 
 failures: list[str] = []
+
+type FactRow = tuple[tuple[int, ...], tuple[Any, ...]]
+type RankLookup = dict[int, np.ndarray]
+type IncidenceEntry = tuple[int, str, list[Any]]
 
 # 归一链:日文新字体 → 繁体(jp2t) → 简体(t2s),再小写。
 # 契约:索引键与客户端查询从同一张单字映射表逐字折叠。
@@ -108,13 +118,20 @@ class PackFile:
 
     def __init__(self, name: str) -> None:
         self.name = name
-        self.blob = bytearray()
+        self.path = SITE / name
+        self.size = 0
         self.sizes: list[int] = []
+        self._writer: BinaryIO | None = open(  # noqa: SIM115
+            self.path, "wb", buffering=0
+        )
 
     def add(self, gz: bytes) -> list[int]:
         sr.require_member_size(gz, self.name)
-        off = len(self.blob)
-        self.blob += gz
+        if self._writer is None:
+            raise RuntimeError(f"{self.name} is already closed")
+        off = self.size
+        self._writer.write(gz)
+        self.size += len(gz)
         self.sizes.append(len(gz))
         return [off, len(gz)]
 
@@ -122,9 +139,17 @@ class PackFile:
         return self.add(sr.gzip_member(obj, level))
 
     def write(self) -> None:
-        if len(self.blob) > sr.PACK_CAP:
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
+        if self.size > sr.PACK_CAP:
             failures.append(f"{self.name} 超过单 pack 80MB 上限")
-        (SITE / self.name).write_bytes(bytes(self.blob))
+
+    def discard(self) -> None:
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
+        self.path.unlink(missing_ok=True)
 
 
 class RolloverPack:
@@ -136,26 +161,37 @@ class RolloverPack:
 
     def __init__(self, stem: str) -> None:
         self.stem = stem
-        self.blobs: list[bytearray] = [bytearray()]
+        self.file_sizes = [0]
         self.sizes: list[int] = []
+        self._writer: BinaryIO | None = open(  # noqa: SIM115
+            SITE / self.files[0], "wb", buffering=0
+        )
 
     def add(self, gz: bytes) -> list[int]:
         sr.require_member_size(gz, self.stem)
-        if len(self.blobs[-1]) + len(gz) > sr.PACK_CAP:
-            self.blobs.append(bytearray())
-        file_idx = len(self.blobs) - 1
-        off = len(self.blobs[file_idx])
-        self.blobs[file_idx] += gz
+        if self._writer is None:
+            raise RuntimeError(f"{self.stem} is already closed")
+        if self.file_sizes[-1] + len(gz) > sr.PACK_CAP:
+            self._writer.close()
+            self.file_sizes.append(0)
+            self._writer = open(  # noqa: SIM115
+                SITE / self.files[-1], "wb", buffering=0
+            )
+        file_idx = len(self.file_sizes) - 1
+        off = self.file_sizes[file_idx]
+        self._writer.write(gz)
+        self.file_sizes[file_idx] += len(gz)
         self.sizes.append(len(gz))
         return [file_idx, off, len(gz)]
 
     @property
     def files(self) -> list[str]:
-        return [f"{self.stem}-{i}.pack" for i in range(len(self.blobs))]
+        return [f"{self.stem}-{i}.pack" for i in range(len(self.file_sizes))]
 
     def write(self) -> None:
-        for fname, blob in zip(self.files, self.blobs, strict=True):
-            (SITE / fname).write_bytes(bytes(blob))
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
 
 
 def emit_ranged(
@@ -198,9 +234,484 @@ def emit_ranged(
     return ranges
 
 
+def emit_sorted_entity_parquet(
+    pack: PackFile,
+    parquet: Path,
+    columns: list[str],
+    *,
+    width: int,
+    level: int,
+    row_for_index: Callable[[dict[str, list[Any]], int, int], Any],
+    batch_size: int = 65_536,
+) -> tuple[list[list[int]], int]:
+    """Stream an ID-sorted entity table, retaining one ID window."""
+    ranges: list[list[int]] = []
+    items: list[tuple[int, Any]] = []
+    current_window: int | None = None
+    previous_id = -1
+    row_offset = 0
+
+    def encode_rows(chunk: list[tuple[int, Any]]) -> Any:
+        return {
+            "i": [item[0] for item in chunk],
+            "r": [item[1] for item in chunk],
+        }
+
+    def flush() -> None:
+        nonlocal items
+        if items:
+            ranges.extend(emit_ranged(pack, items, width, level, encode_rows))
+            items = []
+
+    parquet_file = pq.ParquetFile(parquet)
+    for batch in parquet_file.iter_batches(
+        batch_size=batch_size, columns=columns
+    ):
+        values = batch.to_pydict()
+        for index, raw_id in enumerate(values["id"]):
+            source_id = int(raw_id)
+            if source_id < previous_id:
+                raise ValueError(f"{parquet.name} must be sorted by id")
+            previous_id = source_id
+            window = source_id // width
+            if current_window is None:
+                current_window = window
+            elif window != current_window:
+                flush()
+                current_window = window
+            items.append(
+                (
+                    source_id,
+                    row_for_index(values, index, row_offset + index),
+                )
+            )
+        row_offset += batch.num_rows
+    flush()
+    return ranges, row_offset
+
+
+def collect_parquet_vocab(
+    parquet: Path,
+    column: str,
+    strings_for_value: Callable[[Any], Iterable[str]],
+    *,
+    batch_size: int = 65_536,
+) -> list[str]:
+    """Collect a deterministic vocabulary without materializing the table."""
+    strings: set[str] = set()
+    parquet_file = pq.ParquetFile(parquet)
+    for batch in parquet_file.iter_batches(
+        batch_size=batch_size, columns=[column]
+    ):
+        for value in batch.column(0).to_pylist():
+            strings.update(strings_for_value(value))
+    return vocab_sorted(strings)
+
+
+def subject_entity_row(
+    table: dict[str, list[Any]],
+    i: int,
+    text_index: int,
+    *,
+    text_bits: dict[str, np.ndarray],
+    meta_id: dict[str, int],
+    tag_id: dict[str, int],
+) -> list[Any]:
+    return [
+        table["type"][i],
+        table["platform_code"][i],
+        table["date"][i],
+        table["score"][i],
+        table["rank"][i],
+        int(table["nsfw"][i]),
+        table["wish"][i],
+        table["done"][i],
+        table["doing"][i],
+        table["on_hold"][i],
+        table["dropped"][i],
+        int(table["series"][i]),
+        table["score_details"][i],
+        [meta_id[t] for t in table["meta_tags"][i]],
+        [[tag_id[t["name"]], t["count"]] for t in table["tags"][i]],
+        int(bool(text_bits["summary"][text_index])),
+        int(bool(text_bits["infobox"][text_index])),
+    ]
+
+
+def person_entity_row(
+    table: dict[str, list[Any]],
+    i: int,
+    text_index: int,
+    *,
+    text_bits: dict[str, np.ndarray],
+    career_id: dict[str, int],
+) -> list[Any]:
+    return [
+        table["type"][i],
+        [career_id[c] for c in table["career"][i]],
+        table["comments"][i],
+        table["collects"][i],
+        int(bool(text_bits["summary"][text_index])),
+        int(bool(text_bits["infobox"][text_index])),
+    ]
+
+
+def character_entity_row(
+    table: dict[str, list[Any]],
+    i: int,
+    text_index: int,
+    *,
+    text_bits: dict[str, np.ndarray],
+) -> list[Any]:
+    return [
+        table["role"][i],
+        table["comments"][i],
+        table["collects"][i],
+        int(bool(text_bits["summary"][text_index])),
+        int(bool(text_bits["infobox"][text_index])),
+    ]
+
+
 def load_layout() -> dict[str, np.ndarray]:
     t = pq.read_table(LAYOUT)
     return {c: np.asarray(t.column(c)) for c in t.column_names}
+
+
+def read_text_presence(
+    table: str, columns: tuple[str, ...]
+) -> dict[str, np.ndarray]:
+    """Read long-text columns one at a time and retain only presence bits."""
+    present: dict[str, np.ndarray] = {}
+    for column in columns:
+        values = pq.read_table(
+            PARQUET / f"{table}.parquet", columns=[column]
+        ).column(column)
+        present[column] = pc.not_equal(values, "").to_numpy(
+            zero_copy_only=False
+        )
+    return present
+
+
+def emit_sorted_parquet_text(
+    pack: RolloverPack,
+    parquet: Path,
+    column: str,
+    *,
+    width: int,
+    level: int,
+    batch_size: int = 65_536,
+) -> tuple[list[list[int]], dict[str, int]]:
+    """Stream an ID-sorted text column, retaining only one ID window."""
+    ranges: list[list[int]] = []
+    items: list[tuple[int, Any]] = []
+    current_window: int | None = None
+    previous_id = -1
+    non_empty = 0
+    empty = 0
+    raw_bytes = 0
+
+    def encode_text(chunk: list[tuple[int, Any]]) -> Any:
+        return {
+            "i": [item[0] for item in chunk],
+            "t": [item[1] for item in chunk],
+        }
+
+    def flush() -> None:
+        nonlocal items
+        if items:
+            ranges.extend(emit_ranged(pack, items, width, level, encode_text))
+            items = []
+
+    parquet_file = pq.ParquetFile(parquet)
+    for batch in parquet_file.iter_batches(
+        batch_size=batch_size, columns=["id", column]
+    ):
+        values = batch.to_pydict()
+        for raw_id, text in zip(values["id"], values[column], strict=True):
+            source_id = int(raw_id)
+            if source_id < previous_id:
+                raise ValueError(f"{parquet.name} must be sorted by id")
+            previous_id = source_id
+            window = source_id // width
+            if current_window is None:
+                current_window = window
+            elif window != current_window:
+                flush()
+                current_window = window
+            if text:
+                items.append((source_id, text))
+                non_empty += 1
+                raw_bytes += len(text.encode("utf-8"))
+            else:
+                empty += 1
+    flush()
+    return ranges, {
+        "non_empty": non_empty,
+        "empty": empty,
+        "raw_bytes": raw_bytes,
+    }
+
+
+def emit_fact_summary(
+    items: Iterable[tuple[int, Any]],
+    *,
+    empty_count: int,
+    raw_bytes: int,
+) -> tuple[dict[str, Any], dict[str, int], list[int]]:
+    """Write non-empty VOICE_CREDIT summaries addressed by FactRef."""
+    family = "fact-summary"
+    width = sr.TEXT_BLOCK_IDS[family]
+    level = sr.GZIP_LEVELS[family]
+    ordered_items = sorted(dict(items).items())
+    pack = RolloverPack(family)
+    ranges = emit_ranged(
+        pack,
+        ordered_items,
+        width,
+        level,
+        lambda chunk: {
+            "i": [fact_ref for fact_ref, _text in chunk],
+            "t": [text for _fact_ref, text in chunk],
+        },
+    )
+    pack.write()
+    sizes = pack.sizes
+    return (
+        {
+            "gzip": level,
+            "width": width,
+            "files": pack.files,
+            "ranges": ranges,
+        },
+        {
+            "non_empty": len(ordered_items),
+            "empty": empty_count,
+            "raw_bytes": raw_bytes,
+            "compressed_bytes": sum(sizes),
+        },
+        sizes,
+    )
+
+
+def collect_fact_encodings(
+    encodings: list[bytes],
+    fact_kind: str,
+    rows: Iterable[FactRow],
+    *,
+    row_count: int,
+) -> np.ndarray:
+    """Consume one fact source once, retaining compact canonical bytes."""
+    if row_count < 0:
+        raise ValueError("fact row count must not be negative")
+    edges = np.empty((row_count, 2), dtype=np.uint32)
+    actual = 0
+    for actual, (participants, attrs) in enumerate(rows, start=1):
+        if actual > row_count:
+            raise ValueError("fact source yielded more rows than declared")
+        encoded = sr.canonical_fact(fact_kind, participants, attrs)
+        encodings.append(encoded)
+        edges[actual - 1] = participants[:2]
+    if actual != row_count:
+        raise ValueError(
+            f"fact source yielded {actual} rows, expected {row_count}"
+        )
+    return edges
+
+
+def write_fact_run(
+    directory: Path,
+    run_number: int,
+    fact_kind: str,
+    rows: Iterable[FactRow],
+    *,
+    row_count: int,
+) -> tuple[Path, np.ndarray]:
+    """Sort one bounded fact batch and spill it to a newline-delimited run."""
+    encodings: list[bytes] = []
+    edges = collect_fact_encodings(
+        encodings, fact_kind, rows, row_count=row_count
+    )
+    encodings.sort()
+    path = directory / f"fact-{run_number:06d}.jsonl.gz"
+    with gzip.open(path, "wb", compresslevel=1) as writer:
+        for encoded in encodings:
+            if b"\n" in encoded:
+                raise ValueError("canonical JSON fact contains a raw newline")
+            writer.write(encoded + b"\n")
+    return path, edges
+
+
+def read_fact_run(path: Path) -> Iterator[bytes]:
+    """Yield canonical facts from one already-sorted disk run."""
+    with gzip.open(path, "rb") as reader:
+        for line in reader:
+            if not line.endswith(b"\n"):
+                raise ValueError(f"truncated fact run: {path}")
+            yield line[:-1]
+
+
+def merge_fact_runs(
+    runs_by_kind: dict[str, list[Path]],
+) -> Iterator[tuple[bytes, int]]:
+    """Merge bounded runs into canonical FactRef order with multiplicity."""
+    paths = [path for runs in runs_by_kind.values() for path in runs]
+    merged = heapq.merge(*(read_fact_run(path) for path in paths))
+    previous: bytes | None = None
+    multiplicity = 0
+    for encoded in merged:
+        if previous is None:
+            previous = encoded
+            multiplicity = 1
+        elif encoded == previous:
+            multiplicity += 1
+        else:
+            yield previous, multiplicity
+            previous = encoded
+            multiplicity = 1
+    if previous is not None:
+        yield previous, multiplicity
+
+
+def build_rank_lookup(keys: np.ndarray) -> RankLookup:
+    """Build compact source-ID segments that map EntityKey to VisualRank."""
+    if keys.ndim != 1 or len(keys) > sr.RANK_SENTINEL:
+        raise ValueError("rank keys must be a one-dimensional u24-sized array")
+    kinds = keys >> np.uint32(24)
+    if len(keys) and not np.isin(kinds, sr.KINDS).all():
+        raise ValueError("rank keys contain an unknown entity kind")
+
+    ranks = np.arange(len(keys), dtype=np.uint32)
+    lookup: RankLookup = {}
+    for kind in sr.KINDS:
+        selected = kinds == kind
+        ids = (keys[selected] & sr.MAX_SOURCE_ID).astype(np.int64)
+        if not len(ids):
+            lookup[kind] = np.empty(0, dtype=np.uint32)
+            continue
+        if len(np.unique(ids)) != len(ids):
+            raise ValueError(f"rank keys contain duplicate kind {kind} IDs")
+        segment = np.full(
+            int(ids.max()) + 1, sr.RANK_SENTINEL, dtype=np.uint32
+        )
+        segment[ids] = ranks[selected]
+        lookup[kind] = segment
+    return lookup
+
+
+def entity_rank(lookup: RankLookup, key: int) -> int:
+    """Look up one EntityKey, returning the published missing sentinel."""
+    segment = lookup.get(key >> 24)
+    source_id = key & sr.MAX_SOURCE_ID
+    if segment is None or source_id >= len(segment):
+        return sr.RANK_SENTINEL
+    return int(segment[source_id])
+
+
+def entity_ranks(lookup: RankLookup, keys: np.ndarray) -> np.ndarray:
+    """Vectorized EntityKey lookup with the same missing sentinel."""
+    key_array = np.asarray(keys, dtype=np.uint32)
+    result = np.full(key_array.shape, sr.RANK_SENTINEL, dtype=np.uint32)
+    kinds = key_array >> np.uint32(24)
+    ids = key_array & sr.MAX_SOURCE_ID
+    for kind, segment in lookup.items():
+        selected = kinds == kind
+        selected_ids = ids[selected]
+        values = np.full(len(selected_ids), sr.RANK_SENTINEL, dtype=np.uint32)
+        valid = selected_ids < len(segment)
+        values[valid] = segment[selected_ids[valid]]
+        result[selected] = values
+    return result
+
+
+class IncidenceSpool:
+    """Spill incidence into bounded contiguous bucket shards."""
+
+    def __init__(
+        self,
+        directory: Path,
+        lookup: RankLookup,
+        node_count: int,
+        *,
+        buckets: int,
+        shards: int,
+    ) -> None:
+        if buckets <= 0 or shards <= 0 or buckets % shards:
+            raise ValueError(
+                "incidence buckets must divide evenly into shards"
+            )
+        directory.mkdir(parents=True, exist_ok=True)
+        self._directory = directory
+        self._lookup = lookup
+        self._present = np.zeros(node_count, dtype=bool)
+        self._external: set[int] = set()
+        self._buckets = buckets
+        self._shards = shards
+        self._buckets_per_shard = buckets // shards
+        self._closed = False
+        self._writers: list[gzip.GzipFile] = []
+        try:
+            for shard in range(shards):
+                self._writers.append(
+                    gzip.open(  # noqa: SIM115 -- closed together in close()
+                        directory / f"incidence-{shard:03d}.jsonl.gz",
+                        "wb",
+                        compresslevel=1,
+                    )
+                )
+        except BaseException:
+            for writer in self._writers:
+                writer.close()
+            raise
+
+    def append(self, key: int, entry: IncidenceEntry) -> None:
+        if self._closed:
+            raise RuntimeError("incidence spool is already closed")
+        rank = entity_rank(self._lookup, key)
+        if rank == sr.RANK_SENTINEL:
+            self._external.add(key)
+        else:
+            self._present[rank] = True
+        bucket = key % self._buckets
+        shard = bucket // self._buckets_per_shard
+        encoded = jdump([key, *entry])
+        if b"\n" in encoded:
+            raise ValueError("incidence JSON contains a raw newline")
+        self._writers[shard].write(encoded + b"\n")
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        for writer in self._writers:
+            writer.close()
+        self._writers.clear()
+        self._closed = True
+
+    def bucket_range(self, shard: int) -> range:
+        if not 0 <= shard < self._shards:
+            raise IndexError("incidence shard is out of range")
+        start = shard * self._buckets_per_shard
+        return range(start, start + self._buckets_per_shard)
+
+    def read_shard(self, shard: int) -> dict[int, list[IncidenceEntry]]:
+        if not self._closed:
+            raise RuntimeError("close incidence spool before reading it")
+        self.bucket_range(shard)
+        groups: dict[int, list[IncidenceEntry]] = defaultdict(list)
+        path = self._directory / f"incidence-{shard:03d}.jsonl.gz"
+        with gzip.open(path, "rb") as reader:
+            for line in reader:
+                row = orjson.loads(line)
+                groups[int(row[0])].append(
+                    (
+                        int(row[1]),
+                        cast("str", row[2]),
+                        cast("list[Any]", row[3]),
+                    )
+                )
+        return groups
+
+    def __len__(self) -> int:
+        return int(self._present.sum()) + len(self._external)
 
 
 def fold_factory(
@@ -226,6 +737,80 @@ def build_charmap(chars: set[str]) -> tuple[dict[str, str], int]:
         else:
             dropped += 1
     return charmap, dropped
+
+
+def build_search_index(names: Sequence[str], cn_names: Sequence[str]) -> None:
+    """Build the adaptive prefix search index in an isolated memory scope."""
+    chars: set[str] = set()
+    for name, cn_name in zip(names, cn_names, strict=True):
+        for value in (name, cn_name):
+            if value:
+                chars.update(str(value).lower())
+    charmap, charmap_dropped = build_charmap(chars)
+    if charmap_dropped:
+        log(
+            f"  截断:charmap 丢弃多字映射 {charmap_dropped:,} 个"
+            f"(逐字契约下无法表达,原字直存)"
+        )
+    fold = fold_factory(charmap)
+    entries: list[tuple[str, str, int]] = []
+    for rank, (name, cn_name) in enumerate(zip(names, cn_names, strict=True)):
+        for text in dict.fromkeys(str(t) for t in (name, cn_name) if t):
+            normalized = fold(text)
+            if normalized:
+                entries.append((normalized, text, rank))
+    entries.sort(key=lambda entry: entry[2])  # 全局热度序
+    search_pack = PackFile("search.pack")
+    search_level = sr.GZIP_LEVELS["search"]
+    search_dir: dict[str, Any] = {}
+    n_leaves = 0
+    n_internal = 0
+
+    def next_char(normalized: str, prefix_len: int) -> str:
+        # Python 字符串按码点索引;客户端以 codePointAt 对齐同一规则
+        return normalized[prefix_len]
+
+    def emit_search(prefix: str, items: list[tuple[str, str, int]]) -> None:
+        nonlocal n_leaves, n_internal
+        rows = [[entry[0], entry[1], entry[2]] for entry in items]
+        gz = sr.gzip_member(rows, search_level)
+        if len(gz) <= sr.SEARCH_LEAF_CAP:
+            search_dir[prefix] = {"l": search_pack.add(gz)}
+            n_leaves += 1
+            return
+        n_internal += 1
+        top = [
+            [entry[0], entry[1], entry[2]] for entry in items[: sr.SEARCH_TOP]
+        ]
+        search_dir[prefix] = {
+            "t": search_pack.add(sr.gzip_member(top, search_level))
+        }
+        children: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
+        for entry in items:
+            if entry[0] != prefix:
+                children[next_char(entry[0], len(prefix))].append(entry)
+        for char in sorted(children):
+            emit_search(prefix + char, children[char])
+
+    roots: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
+    for entry in entries:
+        roots[next_char(entry[0], 0)].append(entry)
+    for char in sorted(roots):
+        emit_search(char, roots[char])
+    search_pack.write()
+    (SITE / "search.idx.json").write_bytes(jdump(search_dir))
+    (SITE / "charmap.json").write_bytes(jdump(charmap))
+    search_q = quantiles(search_pack.sizes)
+    reconcile(
+        "搜索条目数(根分组对账)",
+        len(entries),
+        sum(len(values) for values in roots.values()),
+    )
+    log(
+        f"搜索:{len(entries):,} 条,叶 {n_leaves:,}/内部 {n_internal:,},"
+        f"{search_pack.size / 1e6:,.1f}MB,最大成员 "
+        f"{search_q['max']:,}B"
+    )
 
 
 def vocab_sorted(strings: set[str]) -> list[str]:
@@ -326,13 +911,14 @@ def main() -> None:  # noqa: PLR0915
     # 离线布局输出尺度任意;发布坐标归一到规范世界跨度,保证探索端
     # 聚焦层级、工作集字号和节点尺寸的绝对 zoom 语义
     coords_r, world_scale = normalize_world_scale(coords_r)
-    rank_of_key: dict[int, int] = {int(k): i for i, k in enumerate(key_r)}
+    rank_lookup = build_rank_lookup(key_r)
     log(
         f"节点 {n:,},rank 排序完成(dump 版本 {dump_version}),"
         f"世界尺度 ×{world_scale:.3f} → 跨度 {CANONICAL_WORLD_SPAN:g}"
     )
+    del lay, order
 
-    # ---- 实体结构列(文本只取存在位;字符串本体走侧车流程)----
+    # ---- 排名对齐列(先只读几何、名称和标签所需字段)----
     sub_t = pq.read_table(
         PARQUET / "subject.parquet",
         columns=[
@@ -340,91 +926,76 @@ def main() -> None:  # noqa: PLR0915
             "type",
             "name",
             "name_cn",
-            "platform_code",
-            "date",
             "score",
-            "rank",
             "nsfw",
-            "wish",
-            "done",
-            "doing",
-            "on_hold",
-            "dropped",
-            "series",
-            "score_details",
             "meta_tags",
-            "tags",
         ],
     )
-    sub_text_bits = {
-        "summary": pc.not_equal(
-            pq.read_table(
-                PARQUET / "subject.parquet", columns=["summary"]
-            ).column("summary"),
-            "",
-        ).to_numpy(zero_copy_only=False),
-        "infobox": pc.not_equal(
-            pq.read_table(
-                PARQUET / "subject.parquet", columns=["infobox"]
-            ).column("infobox"),
-            "",
-        ).to_numpy(zero_copy_only=False),
-    }
-    sub = sub_t.to_pydict()
+    sub_index = sub_t.to_pydict()
     del sub_t
     per_t = pq.read_table(
         PARQUET / "person.parquet",
-        columns=[
-            "id",
-            "name",
-            "type",
-            "career",
-            "comments",
-            "collects",
-            "summary",
-            "infobox",
-        ],
+        columns=["id", "name"],
     )
-    per = per_t.to_pydict()
+    per_names = per_t.to_pydict()
     del per_t
     cha_t = pq.read_table(
         PARQUET / "character.parquet",
-        columns=[
-            "id",
-            "name",
-            "role",
-            "comments",
-            "collects",
-            "summary",
-            "infobox",
-        ],
+        columns=["id", "name"],
     )
-    cha = cha_t.to_pydict()
+    cha_names = cha_t.to_pydict()
     del cha_t
 
-    # info: 几何标志、名字、搜索与标签所需的最小视图
-    info: dict[int, dict[str, Any]] = {}
-    for i in range(len(sub["id"])):
-        k = sr.entity_key(sr.KIND_SUBJECT, sub["id"][i])
-        info[k] = {
-            "name": sub["name"][i],
-            "cn": sub["name_cn"][i],
-            "nsfw": sub["nsfw"][i],
-            "media": sub["type"][i],
-            "mt": sub["meta_tags"][i],
-            "score": sub["score"][i],
-        }
-    for i in range(len(per["id"])):
-        k = sr.entity_key(sr.KIND_PERSON, per["id"][i])
-        info[k] = {"name": per["name"][i], "cn": "", "nsfw": False}
-    for i in range(len(cha["id"])):
-        k = sr.entity_key(sr.KIND_CHARACTER, cha["id"][i])
-        info[k] = {"name": cha["name"][i], "cn": "", "nsfw": False}
-    covered = sum(1 for k in key_r if int(k) in info)
-    reconcile("节点属性覆盖全部入图节点", n, covered)
-    reconcile("库实体数 = 入图节点数", len(info), n)
+    # 名称、几何标志和标签按 VisualRank 对齐,避免百万个嵌套字典。
+    names_r = [""] * n
+    cn_names_r = [""] * n
+    present_r = np.zeros(n, dtype=bool)
+    nsfw_arr = np.zeros(n, dtype=bool)
+    media_vals = np.zeros(n, dtype=np.int64)
+    score_values = np.zeros(n, dtype=np.float64)
+    meta_tags_r: list[list[str] | None] = [None] * n
+
+    def ranks_for(kind: int, ids: list[Any]) -> np.ndarray:
+        source_ids = np.asarray(ids, dtype=np.uint32)
+        keys = (np.uint32(kind) << np.uint32(24)) | source_ids
+        return entity_ranks(rank_lookup, keys)
+
+    sub_ranks = ranks_for(sr.KIND_SUBJECT, sub_index["id"])
+    for i, rank_value in enumerate(sub_ranks):
+        rank = int(rank_value)
+        if rank == sr.RANK_SENTINEL:
+            continue
+        present_r[rank] = True
+        names_r[rank] = sub_index["name"][i]
+        cn_names_r[rank] = sub_index["name_cn"][i]
+        nsfw_arr[rank] = bool(sub_index["nsfw"][i])
+        media_vals[rank] = int(sub_index["type"][i])
+        score_values[rank] = float(sub_index["score"][i] or 0)
+        meta_tags_r[rank] = sub_index["meta_tags"][i]
+    per_ranks = ranks_for(sr.KIND_PERSON, per_names["id"])
+    for i, rank_value in enumerate(per_ranks):
+        rank = int(rank_value)
+        if rank != sr.RANK_SENTINEL:
+            present_r[rank] = True
+            names_r[rank] = per_names["name"][i]
+    cha_ranks = ranks_for(sr.KIND_CHARACTER, cha_names["id"])
+    for i, rank_value in enumerate(cha_ranks):
+        rank = int(rank_value)
+        if rank != sr.RANK_SENTINEL:
+            present_r[rank] = True
+            names_r[rank] = cha_names["name"][i]
+
+    entity_counts = {
+        "subject": len(sub_index["id"]),
+        "person": len(per_names["id"]),
+        "character": len(cha_names["id"]),
+    }
+    database_entities = sum(entity_counts.values())
+    reconcile("节点属性覆盖全部入图节点", n, int(present_r.sum()))
+    reconcile("库实体数 = 入图节点数", database_entities, n)
     if failures:
         sys.exit(f"FAILED: 布局与库不同步({failures}),先重跑 layout.py 再烘焙")
+    del present_r, sub_ranks, per_ranks, cha_ranks, per_names, cha_names
 
     # ---- 几何 SoA(25B/节点,定长记录支持 Range 点查)----
     coords_f32 = coords_r.astype("<f4")
@@ -440,32 +1011,26 @@ def main() -> None:  # noqa: PLR0915
     size_u8 = np.minimum(255, size_raw).astype(np.uint8)
     (SITE / "size.bin").write_bytes(size_u8.tobytes())
     flags = np.zeros(n, dtype=np.uint8)
-    nsfw_arr = np.array(
-        [bool(info[int(k)]["nsfw"]) for k in key_r], dtype=bool
-    )
     flags |= nsfw_arr.astype(np.uint8)
     flags |= (iso_r.astype(np.uint8)) << 1
-    media_vals = np.array(
-        [int(info[int(k)].get("media", 0)) for k in key_r], dtype=np.int64
-    )
     assert media_vals.max() < 8, "media 超出 flags bit2-4 容量,契约需扩位"
     flags |= (media_vals.astype(np.uint8)) << 2
     (SITE / "flags.bin").write_bytes(flags.tobytes())
     score_u8 = np.zeros(n, dtype=np.uint8)
-    for i, k in enumerate(key_r):
-        s = info[int(k)].get("score")
-        if s:
-            score_u8[i] = int(round(float(s) * 10))
+    has_score = score_values != 0
+    score_u8[has_score] = np.round(score_values[has_score] * 10).astype(
+        np.uint8
+    )
     (SITE / "score.bin").write_bytes(score_u8.tobytes())
     tag_counts: Counter[str] = Counter()
-    for k in key_r:
-        tag_counts.update(info[int(k)].get("mt") or [])
+    for meta_tags in meta_tags_r:
+        tag_counts.update(meta_tags or [])
     top_tags = [t for t, _ in tag_counts.most_common(32)]
     tag_bit = {t: i for i, t in enumerate(top_tags)}
     tag_mask = np.zeros(n, dtype=np.uint32)
-    for i, k in enumerate(key_r):
+    for i, meta_tags in enumerate(meta_tags_r):
         m = 0
-        for tg in info[int(k)].get("mt") or []:
+        for tg in meta_tags or []:
             b = tag_bit.get(tg)
             if b is not None:
                 m |= 1 << b
@@ -482,26 +1047,37 @@ def main() -> None:  # noqa: PLR0915
     ):
         reconcile(f"{fname} 字节数", n * stride, (SITE / fname).stat().st_size)
     log("几何 SoA 写出完成")
+    del (
+        sub_index,
+        meta_tags_r,
+        nsfw_arr,
+        media_vals,
+        score_values,
+        iso_r,
+        coords_f32,
+        size_raw,
+        size_u8,
+        flags,
+        score_u8,
+        has_score,
+        tag_counts,
+        tag_bit,
+        tag_mask,
+    )
 
     # ---- rank-by-key.bin:按实体种类拼接的 u24 反向索引 ----
     rank_segments: dict[str, dict[str, int]] = {}
     rank_buf = bytearray()
     for kind in sr.KINDS:
-        ids = [
-            int(k) & sr.MAX_SOURCE_ID for k in key_r if int(k) >> 24 == kind
-        ]
-        count = (max(ids) + 1) if ids else 0
-        seg = np.full(count, sr.RANK_SENTINEL, dtype="<u4")
-        for k, rank in rank_of_key.items():
-            if k >> 24 == kind:
-                seg[k & sr.MAX_SOURCE_ID] = rank
+        seg = rank_lookup[kind].astype("<u4", copy=False)
         as_u8 = seg.view(np.uint8).reshape(-1, 4)[:, :3]
         rank_segments[str(kind)] = {
             "offset": len(rank_buf),
-            "count": count,
+            "count": len(seg),
         }
         rank_buf += as_u8.tobytes()
     (SITE / "rank-by-key.bin").write_bytes(bytes(rank_buf))
+    del key_r, rank_buf
     reconcile(
         "rank-by-key.bin 字节数",
         sum(seg["count"] * 3 for seg in rank_segments.values()),
@@ -515,10 +1091,11 @@ def main() -> None:  # noqa: PLR0915
         name_offsets = [0]
         oversize = False
         for start in range(0, n, name_block_size):
-            rows = []
-            for k in key_r[start : start + name_block_size]:
-                d = info[int(k)]
-                rows.append([d["name"], d["cn"] or None])
+            end = min(n, start + name_block_size)
+            rows = [
+                [names_r[rank], cn_names_r[rank] or None]
+                for rank in range(start, end)
+            ]
             gz = sr.gzip_member(rows, sr.GZIP_LEVELS["names"])
             if len(gz) > sr.MEMBER_CAP:
                 oversize = True
@@ -527,6 +1104,7 @@ def main() -> None:  # noqa: PLR0915
             name_offsets.append(off + length)
         if not oversize:
             break
+        name_pack.discard()
         name_block_size //= 2
         log(f"  名称成员超硬上限,块宽折半为 {name_block_size}")
         if name_block_size < 64:
@@ -549,14 +1127,124 @@ def main() -> None:  # noqa: PLR0915
         f"名字表:{len(name_pack.sizes):,} 成员,"
         f"P99 {name_q['p99']:,}B,最大 {name_q['max']:,}B"
     )
+    del name_offsets, name_pack
 
-    # ---- 词表(career / meta_tags / tags.name)----
-    career_vocab = vocab_sorted({c for lst in per["career"] for c in lst})
-    meta_vocab = vocab_sorted({t for lst in sub["meta_tags"] for t in lst})
-    tag_vocab = vocab_sorted({tg["name"] for lst in sub["tags"] for tg in lst})
-    career_id = {s: i for i, s in enumerate(career_vocab)}
+    # ---- 实体结构 pack(三类实体顺序加载、立即编码和释放)----
+    entities_pack = PackFile("entities.pack")
+    ent_level = sr.GZIP_LEVELS["entities"]
+    ent_ranges: dict[str, list[list[int]]] = {}
+
+    subject_path = PARQUET / "subject.parquet"
+    meta_vocab = collect_parquet_vocab(
+        subject_path, "meta_tags", lambda values: values
+    )
+    tag_vocab = collect_parquet_vocab(
+        subject_path,
+        "tags",
+        lambda values: (tag["name"] for tag in values),
+    )
+    sub_text_bits = read_text_presence("subject", ("summary", "infobox"))
     meta_id = {s: i for i, s in enumerate(meta_vocab)}
     tag_id = {s: i for i, s in enumerate(tag_vocab)}
+
+    subject_row = partial(
+        subject_entity_row,
+        text_bits=sub_text_bits,
+        meta_id=meta_id,
+        tag_id=tag_id,
+    )
+
+    subject_ranges, subject_rows = emit_sorted_entity_parquet(
+        entities_pack,
+        subject_path,
+        [
+            "id",
+            "type",
+            "platform_code",
+            "date",
+            "score",
+            "rank",
+            "nsfw",
+            "wish",
+            "done",
+            "doing",
+            "on_hold",
+            "dropped",
+            "series",
+            "score_details",
+            "meta_tags",
+            "tags",
+        ],
+        width=sr.ENTITY_BLOCK_IDS,
+        level=ent_level,
+        row_for_index=subject_row,
+    )
+    ent_ranges[str(sr.KIND_SUBJECT)] = subject_ranges
+    reconcile("subject 实体结构行数", entity_counts["subject"], subject_rows)
+    del sub_text_bits, meta_id, tag_id, subject_row, subject_ranges
+
+    person_path = PARQUET / "person.parquet"
+    career_vocab = collect_parquet_vocab(
+        person_path, "career", lambda values: values
+    )
+    per_text_bits = read_text_presence("person", ("summary", "infobox"))
+    career_id = {s: i for i, s in enumerate(career_vocab)}
+
+    person_row = partial(
+        person_entity_row,
+        text_bits=per_text_bits,
+        career_id=career_id,
+    )
+
+    person_ranges, person_rows = emit_sorted_entity_parquet(
+        entities_pack,
+        person_path,
+        ["id", "type", "career", "comments", "collects"],
+        width=sr.ENTITY_BLOCK_IDS,
+        level=ent_level,
+        row_for_index=person_row,
+    )
+    ent_ranges[str(sr.KIND_PERSON)] = person_ranges
+    reconcile("person 实体结构行数", entity_counts["person"], person_rows)
+    del per_text_bits, career_id, person_row, person_ranges
+
+    character_path = PARQUET / "character.parquet"
+    cha_text_bits = read_text_presence("character", ("summary", "infobox"))
+
+    character_row = partial(
+        character_entity_row,
+        text_bits=cha_text_bits,
+    )
+
+    character_ranges, character_rows = emit_sorted_entity_parquet(
+        entities_pack,
+        character_path,
+        ["id", "role", "comments", "collects"],
+        width=sr.ENTITY_BLOCK_IDS,
+        level=ent_level,
+        row_for_index=character_row,
+    )
+    ent_ranges[str(sr.KIND_CHARACTER)] = character_ranges
+    reconcile(
+        "character 实体结构行数",
+        entity_counts["character"],
+        character_rows,
+    )
+    del cha_text_bits, character_row, character_ranges
+
+    entities_pack.write()
+    (SITE / "entities.idx").write_bytes(
+        sr.gzip_member({"width": sr.ENTITY_BLOCK_IDS, "k": ent_ranges}, 6)
+    )
+    reconcile("实体结构行数", n, sum(entity_counts.values()))
+    ent_q = quantiles(entities_pack.sizes)
+    log(
+        f"实体结构:{ent_q['members']:,} 成员,"
+        f"{entities_pack.size / 1e6:,.1f}MB,最大 {ent_q['max']:,}B"
+    )
+    del entities_pack, ranks_for
+
+    # ---- 词表(career / meta_tags / tags.name)----
     vocab_pack = PackFile("vocab.pack")
     vocab_level = sr.GZIP_LEVELS["vocab"]
     vocab_dir: dict[str, list[list[int]]] = {
@@ -583,328 +1271,285 @@ def main() -> None:  # noqa: PLR0915
         f"词表:career {len(career_vocab):,}、meta {len(meta_vocab):,}、"
         f"tags {len(tag_vocab):,}"
     )
+    del career_vocab, meta_vocab, tag_vocab, vocab_pack
 
-    # ---- 实体结构 pack(除名称与长文本外的全部字段)----
-    entities_pack = PackFile("entities.pack")
-    ent_level = sr.GZIP_LEVELS["entities"]
-    ent_ranges: dict[str, list[list[int]]] = {}
-    sub_rows: list[tuple[int, Any]] = []
-    for i in range(len(sub["id"])):
-        sub_rows.append(
-            (
-                sub["id"][i],
-                [
-                    sub["type"][i],
-                    sub["platform_code"][i],
-                    sub["date"][i],
-                    sub["score"][i],
-                    sub["rank"][i],
-                    int(sub["nsfw"][i]),
-                    sub["wish"][i],
-                    sub["done"][i],
-                    sub["doing"][i],
-                    sub["on_hold"][i],
-                    sub["dropped"][i],
-                    int(sub["series"][i]),
-                    sub["score_details"][i],
-                    [meta_id[t] for t in sub["meta_tags"][i]],
-                    [[tag_id[t["name"]], t["count"]] for t in sub["tags"][i]],
-                    int(bool(sub_text_bits["summary"][i])),
-                    int(bool(sub_text_bits["infobox"][i])),
-                ],
-            )
-        )
-    sub_rows.sort(key=lambda r: r[0])
-    per_rows: list[tuple[int, Any]] = []
-    for i in range(len(per["id"])):
-        per_rows.append(
-            (
-                per["id"][i],
-                [
-                    per["type"][i],
-                    [career_id[c] for c in per["career"][i]],
-                    per["comments"][i],
-                    per["collects"][i],
-                    int(bool(per["summary"][i])),
-                    int(bool(per["infobox"][i])),
-                ],
-            )
-        )
-    per_rows.sort(key=lambda r: r[0])
-    cha_rows: list[tuple[int, Any]] = []
-    for i in range(len(cha["id"])):
-        cha_rows.append(
-            (
-                cha["id"][i],
-                [
-                    cha["role"][i],
-                    cha["comments"][i],
-                    cha["collects"][i],
-                    int(bool(cha["summary"][i])),
-                    int(bool(cha["infobox"][i])),
-                ],
-            )
-        )
-    cha_rows.sort(key=lambda r: r[0])
-
-    def encode_rows(chunk: list[tuple[int, Any]]) -> Any:
-        return {"i": [c[0] for c in chunk], "r": [c[1] for c in chunk]}
-
-    for ent_kind, ent_rows in (
-        (sr.KIND_SUBJECT, sub_rows),
-        (sr.KIND_PERSON, per_rows),
-        (sr.KIND_CHARACTER, cha_rows),
-    ):
-        ent_ranges[str(ent_kind)] = emit_ranged(
-            entities_pack,
-            ent_rows,
-            sr.ENTITY_BLOCK_IDS,
-            ent_level,
-            encode_rows,
-        )
-    entities_pack.write()
-    (SITE / "entities.idx").write_bytes(
-        sr.gzip_member({"width": sr.ENTITY_BLOCK_IDS, "k": ent_ranges}, 6)
-    )
-    reconcile(
-        "实体结构行数",
-        n,
-        len(sub_rows) + len(per_rows) + len(cha_rows),
-    )
-    ent_q = quantiles(entities_pack.sizes)
-    log(
-        f"实体结构:{ent_q['members']:,} 成员,"
-        f"{len(entities_pack.blob) / 1e6:,.1f}MB,最大 {ent_q['max']:,}B"
-    )
-
-    # ---- 事实:规范编码 → FactRef → incidence 分桶 ----
+    # ---- 事实:有界排序段 → FactRef → incidence 磁盘分片 ----
     log("事实规范化…")
-    fact_rows: dict[str, list[tuple[tuple[int, ...], tuple[Any, ...]]]] = {}
     edge_key_pairs: list[np.ndarray] = []  # 骨架边输入(key 对)
+    source_rows = 0
+    run_number = 0
 
-    def read_cols(table: str, cols: list[str]) -> dict[str, list[Any]]:
-        return pq.read_table(
-            PARQUET / f"{table}.parquet", columns=cols
-        ).to_pydict()
+    with tempfile.TemporaryDirectory(prefix="bangumi-atlas-facts-") as temp:
+        temp_path = Path(temp)
+        run_path = temp_path / "runs"
+        run_path.mkdir()
+        runs_by_kind: dict[str, list[Path]] = defaultdict(list)
 
-    rel = read_cols(
-        "relates_to", ["from_id", "to_id", "relation_type", "sort_order"]
-    )
-    fact_rows["RELATES_TO"] = [
-        (
-            (
-                sr.entity_key(sr.KIND_SUBJECT, rel["from_id"][i]),
-                sr.entity_key(sr.KIND_SUBJECT, rel["to_id"][i]),
-            ),
-            (rel["relation_type"][i], rel["sort_order"][i]),
-        )
-        for i in range(len(rel["from_id"]))
-    ]
-    wo = read_cols("worked_on", ["from_id", "to_id", "position", "appear_eps"])
-    fact_rows["WORKED_ON"] = [
-        (
-            (
-                sr.entity_key(sr.KIND_PERSON, wo["from_id"][i]),
-                sr.entity_key(sr.KIND_SUBJECT, wo["to_id"][i]),
-            ),
-            (wo["position"][i], wo["appear_eps"][i]),
-        )
-        for i in range(len(wo["from_id"]))
-    ]
-    ap = read_cols("appears_in", ["from_id", "to_id", "type", "sort_order"])
-    fact_rows["APPEARS_IN"] = [
-        (
-            (
-                sr.entity_key(sr.KIND_CHARACTER, ap["from_id"][i]),
-                sr.entity_key(sr.KIND_SUBJECT, ap["to_id"][i]),
-            ),
-            (ap["type"][i], ap["sort_order"][i]),
-        )
-        for i in range(len(ap["from_id"]))
-    ]
-    vo = read_cols(
-        "voiced", ["from_id", "to_id", "subject_id", "type", "summary"]
-    )
-    fact_rows["VOICE_CREDIT"] = [
-        (
-            (
-                sr.entity_key(sr.KIND_PERSON, vo["from_id"][i]),
-                sr.entity_key(sr.KIND_CHARACTER, vo["to_id"][i]),
-                sr.entity_key(sr.KIND_SUBJECT, vo["subject_id"][i]),
-            ),
-            (vo["type"][i], vo["summary"][i]),
-        )
-        for i in range(len(vo["from_id"]))
-    ]
-    pr = read_cols(
-        "person_rel",
-        ["from_id", "to_id", "relation_type", "spoiler", "ended"],
-    )
-    fact_rows["PERSON_REL"] = [
-        (
-            (
-                sr.entity_key(sr.KIND_PERSON, pr["from_id"][i]),
-                sr.entity_key(sr.KIND_PERSON, pr["to_id"][i]),
-            ),
-            (
-                pr["relation_type"][i],
-                int(pr["spoiler"][i]),
-                int(pr["ended"][i]),
-            ),
-        )
-        for i in range(len(pr["from_id"]))
-    ]
-    cr = read_cols(
-        "character_rel",
-        ["from_id", "to_id", "relation_type", "spoiler", "ended"],
-    )
-    fact_rows["CHARACTER_REL"] = [
-        (
-            (
-                sr.entity_key(sr.KIND_CHARACTER, cr["from_id"][i]),
-                sr.entity_key(sr.KIND_CHARACTER, cr["to_id"][i]),
-            ),
-            (
-                cr["relation_type"][i],
-                int(cr["spoiler"][i]),
-                int(cr["ended"][i]),
-            ),
-        )
-        for i in range(len(cr["from_id"]))
-    ]
-    del rel, wo, ap, pr, cr
-
-    source_rows = sum(len(v) for v in fact_rows.values())
-    fact_mult: dict[bytes, int] = defaultdict(int)
-    fact_meta: dict[bytes, tuple[str, tuple[int, ...], tuple[Any, ...]]] = {}
-    for fact_kind, kind_rows in fact_rows.items():
-        for f_parts, f_attrs in kind_rows:
-            enc = sr.canonical_fact(fact_kind, f_parts, f_attrs)
-            fact_mult[enc] += 1
-            if enc not in fact_meta:
-                fact_meta[enc] = (fact_kind, f_parts, f_attrs)
-        # 骨架边:每行首两个参与者(VOICE_CREDIT 取 person-character)
-        ea = np.asarray([p[0][0] for p in kind_rows], dtype=np.uint32)
-        eb = np.asarray([p[0][1] for p in kind_rows], dtype=np.uint32)
-        edge_key_pairs.append(np.stack([ea, eb], axis=1))
-    del fact_rows
-    merged_rows = source_rows - sum(fact_mult.values()) + len(fact_mult)
-    fact_refs = {enc: i for i, enc in enumerate(sorted(fact_mult))}
-    n_facts = len(fact_refs)
-    log(
-        f"事实 {source_rows:,} 行 → {n_facts:,} 个"
-        f"(合并完全重复 {source_rows - n_facts:,} 行,"
-        f"multiplicity 保留;去重敏感对账 {merged_rows:,})"
-    )
-
-    # incidence:每个不同参与者一条;写入桶前按热度排序
-    voice_unresolved = 0
-    incid: dict[int, list[tuple[int, str, list[Any]]]] = defaultdict(list)
-    n_incidence = 0
-    for enc, ref in fact_refs.items():
-        inc_kind, inc_parts, inc_attrs = fact_meta[enc]
-        mult = fact_mult[enc]
-        if inc_kind == "VOICE_CREDIT":
-            disk_attrs: tuple[Any, ...] = (
-                inc_attrs[0],
-                int(bool(inc_attrs[1])),
-            )
-            if inc_parts[2] not in info:
-                voice_unresolved += 1
-        else:
-            disk_attrs = inc_attrs
-        for inc_key in dict.fromkeys(inc_parts):
-            tup = sr.incidence_tuple(ref, mult, inc_key, inc_parts, disk_attrs)
-            others = cast("list[int]", tup[3])
-            heat = min(
-                (rank_of_key.get(o, sr.RANK_SENTINEL) for o in others),
-                default=rank_of_key.get(inc_key, sr.RANK_SENTINEL),
-            )
-            incid[inc_key].append((heat, sr.FACT_TAGS[inc_kind], tup))
-            n_incidence += 1
-    del fact_meta, fact_mult
-    log(f"incidence {n_incidence:,} 条,覆盖实体 {len(incid):,}")
-
-    pages_pack = PackFile("pages.pack")
-    pages_level = sr.GZIP_LEVELS["pages"]
-    facts_pack = PackFile("facts.pack")
-    facts_level = sr.GZIP_LEVELS["facts"]
-    bucket_entries: list[dict[str, Any]] = [
-        dict() for _ in range(sr.FACT_BUCKETS)
-    ]
-    inline_written = 0
-    paged_written = 0
-    for key, lst in incid.items():
-        lst.sort(key=lambda e: (e[0], e[1], e[2][0]))
-        totals: Counter[str] = Counter(tag for _, tag, _ in lst)
-        inline = lst[: sr.FACT_INLINE]
-        over = lst[sr.FACT_INLINE :]
-        groups: dict[str, list[list[Any]]] = defaultdict(list)
-        for _, tag, tup in inline:
-            groups[tag].append(tup)
-        entry: dict[str, Any] = {
-            "g": dict(groups),
-            "n": dict(totals),
-        }
-        inline_written += len(inline)
-        if over:
-            page_rows = [[tag, *tup] for _, tag, tup in over]
-            entry["op"] = [
-                pages_pack.add(member)
-                for member in sr.gzip_pages(
-                    page_rows, pages_level, sr.PAGE_SIZE
+        def spill_source(
+            table: str,
+            columns: list[str],
+            fact_kind: str,
+            row_for_index: Callable[[dict[str, list[Any]], int], FactRow],
+        ) -> None:
+            nonlocal run_number, source_rows
+            parquet = pq.ParquetFile(PARQUET / f"{table}.parquet")
+            for batch in parquet.iter_batches(
+                batch_size=FACT_BATCH_ROWS, columns=columns
+            ):
+                values = batch.to_pydict()
+                row_count = batch.num_rows
+                path, edges = write_fact_run(
+                    run_path,
+                    run_number,
+                    fact_kind,
+                    (row_for_index(values, i) for i in range(row_count)),
+                    row_count=row_count,
                 )
-            ]
-            paged_written += len(over)
-        bucket_entries[key % sr.FACT_BUCKETS][str(key)] = entry
-    del incid
-    reconcile(
-        "incidence inline + 分页", n_incidence, inline_written + paged_written
-    )
+                runs_by_kind[fact_kind].append(path)
+                edge_key_pairs.append(edges)
+                source_rows += row_count
+                run_number += 1
 
-    def pack_bucket(bucket: dict[str, Any]) -> list[list[int]]:
-        members: list[list[int]] = []
+        spill_source(
+            "relates_to",
+            ["from_id", "to_id", "relation_type", "sort_order"],
+            "RELATES_TO",
+            lambda row, i: (
+                (
+                    sr.entity_key(sr.KIND_SUBJECT, row["from_id"][i]),
+                    sr.entity_key(sr.KIND_SUBJECT, row["to_id"][i]),
+                ),
+                (row["relation_type"][i], row["sort_order"][i]),
+            ),
+        )
+        spill_source(
+            "worked_on",
+            ["from_id", "to_id", "position", "appear_eps"],
+            "WORKED_ON",
+            lambda row, i: (
+                (
+                    sr.entity_key(sr.KIND_PERSON, row["from_id"][i]),
+                    sr.entity_key(sr.KIND_SUBJECT, row["to_id"][i]),
+                ),
+                (row["position"][i], row["appear_eps"][i]),
+            ),
+        )
+        spill_source(
+            "appears_in",
+            ["from_id", "to_id", "type", "sort_order"],
+            "APPEARS_IN",
+            lambda row, i: (
+                (
+                    sr.entity_key(sr.KIND_CHARACTER, row["from_id"][i]),
+                    sr.entity_key(sr.KIND_SUBJECT, row["to_id"][i]),
+                ),
+                (row["type"][i], row["sort_order"][i]),
+            ),
+        )
+        spill_source(
+            "voiced",
+            ["from_id", "to_id", "subject_id", "type", "summary"],
+            "VOICE_CREDIT",
+            lambda row, i: (
+                (
+                    sr.entity_key(sr.KIND_PERSON, row["from_id"][i]),
+                    sr.entity_key(sr.KIND_CHARACTER, row["to_id"][i]),
+                    sr.entity_key(sr.KIND_SUBJECT, row["subject_id"][i]),
+                ),
+                (row["type"][i], row["summary"][i]),
+            ),
+        )
+        spill_source(
+            "person_rel",
+            ["from_id", "to_id", "relation_type", "spoiler", "ended"],
+            "PERSON_REL",
+            lambda row, i: (
+                (
+                    sr.entity_key(sr.KIND_PERSON, row["from_id"][i]),
+                    sr.entity_key(sr.KIND_PERSON, row["to_id"][i]),
+                ),
+                (
+                    row["relation_type"][i],
+                    int(row["spoiler"][i]),
+                    int(row["ended"][i]),
+                ),
+            ),
+        )
+        spill_source(
+            "character_rel",
+            ["from_id", "to_id", "relation_type", "spoiler", "ended"],
+            "CHARACTER_REL",
+            lambda row, i: (
+                (
+                    sr.entity_key(sr.KIND_CHARACTER, row["from_id"][i]),
+                    sr.entity_key(sr.KIND_CHARACTER, row["to_id"][i]),
+                ),
+                (
+                    row["relation_type"][i],
+                    int(row["spoiler"][i]),
+                    int(row["ended"][i]),
+                ),
+            ),
+        )
 
-        def emit(keys: list[str]) -> None:
-            gz = sr.gzip_member({k: bucket[k] for k in keys}, facts_level)
-            if len(gz) > sr.MEMBER_CAP and len(keys) > 1:
-                mid = len(keys) // 2
-                emit(keys[:mid])
-                emit(keys[mid:])
-                return
-            if len(gz) > sr.MEMBER_CAP:
-                raise ValueError("single-entity fact bucket exceeds cap")
-            off, length = facts_pack.add(gz)
-            members.append([off, length, int(keys[-1])])
+        # incidence:每个不同参与者一条;分片后再按热度排序
+        voice_unresolved = 0
+        incid = IncidenceSpool(
+            temp_path / "incidence",
+            rank_lookup,
+            n,
+            buckets=sr.FACT_BUCKETS,
+            shards=INCIDENCE_SHARDS,
+        )
+        n_incidence = 0
+        n_facts = 0
+        fs_items: list[tuple[int, Any]] = []
+        fs_empty = 0
+        fs_raw = 0
+        try:
+            for ref, (encoded, mult) in enumerate(
+                merge_fact_runs(runs_by_kind)
+            ):
+                n_facts = ref + 1
+                decoded = orjson.loads(encoded)
+                inc_kind = cast("str", decoded[0])
+                inc_parts = tuple(cast("list[int]", decoded[1]))
+                inc_attrs = tuple(cast("list[Any]", decoded[2]))
+                if inc_kind == "VOICE_CREDIT":
+                    disk_attrs: tuple[Any, ...] = (
+                        inc_attrs[0],
+                        int(bool(inc_attrs[1])),
+                    )
+                    text = inc_attrs[1]
+                    if text:
+                        fs_items.append((ref, text))
+                        fs_raw += len(str(text).encode("utf-8")) * mult
+                    else:
+                        fs_empty += mult
+                    if (
+                        entity_rank(rank_lookup, inc_parts[2])
+                        == sr.RANK_SENTINEL
+                    ):
+                        voice_unresolved += 1
+                else:
+                    disk_attrs = inc_attrs
+                for inc_key in dict.fromkeys(inc_parts):
+                    tup = sr.incidence_tuple(
+                        ref, mult, inc_key, inc_parts, disk_attrs
+                    )
+                    others = cast("list[int]", tup[3])
+                    heat = min(
+                        (entity_rank(rank_lookup, o) for o in others),
+                        default=entity_rank(rank_lookup, inc_key),
+                    )
+                    incid.append(inc_key, (heat, sr.FACT_TAGS[inc_kind], tup))
+                    n_incidence += 1
+        finally:
+            incid.close()
+        log(
+            f"事实 {source_rows:,} 行 → {n_facts:,} 个"
+            f"(合并完全重复 {source_rows - n_facts:,} 行,"
+            f"multiplicity 保留;去重敏感对账 {n_facts:,})"
+        )
+        log(f"incidence {n_incidence:,} 条,覆盖实体 {len(incid):,}")
 
-        skeys = sorted(bucket, key=int)
-        if skeys:
-            emit(skeys)
-        return members
+        pages_pack = PackFile("pages.pack")
+        pages_level = sr.GZIP_LEVELS["pages"]
+        facts_pack = PackFile("facts.pack")
+        facts_level = sr.GZIP_LEVELS["facts"]
+        fact_dir: list[list[list[int]]] = [[] for _ in range(sr.FACT_BUCKETS)]
+        inline_written = 0
+        paged_written = 0
 
-    fact_dir = [pack_bucket(bucket) for bucket in bucket_entries]
-    del bucket_entries
-    facts_pack.write()
-    (SITE / "facts.idx").write_bytes(
-        sr.gzip_member({"buckets": sr.FACT_BUCKETS, "b": fact_dir}, 6)
-    )
-    fact_q = quantiles(facts_pack.sizes)
-    log(
-        f"事实打包:{fact_q['members']:,} 成员,"
-        f"{len(facts_pack.blob) / 1e6:,.1f}MB,最大 {fact_q['max']:,}B"
-    )
+        def pack_bucket(bucket: dict[str, Any]) -> list[list[int]]:
+            members: list[list[int]] = []
+
+            def emit(keys: list[str]) -> None:
+                gz = sr.gzip_member({k: bucket[k] for k in keys}, facts_level)
+                if len(gz) > sr.MEMBER_CAP and len(keys) > 1:
+                    mid = len(keys) // 2
+                    emit(keys[:mid])
+                    emit(keys[mid:])
+                    return
+                if len(gz) > sr.MEMBER_CAP:
+                    raise ValueError("single-entity fact bucket exceeds cap")
+                off, length = facts_pack.add(gz)
+                members.append([off, length, int(keys[-1])])
+
+            skeys = sorted(bucket, key=int)
+            if skeys:
+                emit(skeys)
+            return members
+
+        for shard in range(INCIDENCE_SHARDS):
+            incidence_groups = incid.read_shard(shard)
+            bucket_range = incid.bucket_range(shard)
+            bucket_start = bucket_range.start
+            bucket_entries: list[dict[str, Any]] = [{} for _ in bucket_range]
+            for key, lst in incidence_groups.items():
+                lst.sort(key=lambda e: (e[0], e[1], e[2][0]))
+                totals: Counter[str] = Counter(tag for _, tag, _ in lst)
+                inline = lst[: sr.FACT_INLINE]
+                over = lst[sr.FACT_INLINE :]
+                groups: dict[str, list[list[Any]]] = defaultdict(list)
+                for _, tag, tup in inline:
+                    groups[tag].append(tup)
+                entry: dict[str, Any] = {
+                    "g": dict(groups),
+                    "n": dict(totals),
+                }
+                inline_written += len(inline)
+                if over:
+                    page_rows = [[tag, *tup] for _, tag, tup in over]
+                    entry["op"] = [
+                        pages_pack.add(member)
+                        for member in sr.gzip_pages(
+                            page_rows, pages_level, sr.PAGE_SIZE
+                        )
+                    ]
+                    paged_written += len(over)
+                    del page_rows
+                bucket_number = key % sr.FACT_BUCKETS
+                bucket_entries[bucket_number - bucket_start][str(key)] = entry
+                del lst, totals, inline, over, groups, entry
+            for offset, bucket_data in enumerate(bucket_entries):
+                fact_dir[bucket_start + offset] = pack_bucket(bucket_data)
+            del incidence_groups, bucket_entries, bucket_data
+
+        reconcile(
+            "incidence inline + 分页",
+            n_incidence,
+            inline_written + paged_written,
+        )
+        facts_pack.write()
+        (SITE / "facts.idx").write_bytes(
+            sr.gzip_member({"buckets": sr.FACT_BUCKETS, "b": fact_dir}, 6)
+        )
+        fact_q = quantiles(facts_pack.sizes)
+        log(
+            f"事实打包:{fact_q['members']:,} 成员,"
+            f"{facts_pack.size / 1e6:,.1f}MB,最大 {fact_q['max']:,}B"
+        )
+        del incid, fact_dir
 
     # ---- 骨架边(与旧格式一致:保底 top-1 + 权重补足)----
     edges = np.concatenate(edge_key_pairs)
-    ra = np.fromiter(
-        (rank_of_key[int(k)] for k in edges[:, 0]), np.int64, len(edges)
-    )
-    rb = np.fromiter(
-        (rank_of_key[int(k)] for k in edges[:, 1]), np.int64, len(edges)
-    )
-    und = np.unique(np.minimum(ra, rb) * (1 << 21) + np.maximum(ra, rb))
-    er = np.stack([und >> 21, und & ((1 << 21) - 1)], axis=1)
+    edge_key_pairs.clear()
+    ra = entity_ranks(rank_lookup, edges[:, 0])
+    rb = entity_ranks(rank_lookup, edges[:, 1])
+    if (ra == sr.RANK_SENTINEL).any() or (rb == sr.RANK_SENTINEL).any():
+        raise KeyError("skeleton edge references an entity outside the layout")
+    packed_edges = np.minimum(ra, rb).astype(np.uint64)
+    packed_edges <<= np.uint64(21)
+    packed_edges |= np.maximum(ra, rb)
+    und = np.unique(packed_edges)
+    del packed_edges, ra, rb
+    er = np.empty((len(und), 2), dtype=np.uint32)
+    er[:, 0] = und >> np.uint64(21)
+    er[:, 1] = und & np.uint64((1 << 21) - 1)
+    del und
     log(f"边 {len(edges):,} 行 → 无向去重 {len(er):,} 条")
+    del edges
     deg = np.zeros(n, dtype=np.int64)
     np.add.at(deg, er[:, 0], 1)
     np.add.at(deg, er[:, 1], 1)
@@ -912,21 +1557,22 @@ def main() -> None:  # noqa: PLR0915
         deg[er[:, 0]] * deg[er[:, 1]]
     )
     order_w = np.argsort(-w, kind="stable")
-    a_s, b_s = er[order_w, 0], er[order_w, 1]
-    inf = len(er)
+    ordered_edges = er[order_w]
+    del er, order_w, w
+    inf = len(ordered_edges)
     first = np.full(n, inf, dtype=np.int64)
-    ua, ia = np.unique(a_s, return_index=True)
+    ua, ia = np.unique(ordered_edges[:, 0], return_index=True)
     first[ua] = ia
-    ub, ib = np.unique(b_s, return_index=True)
+    ub, ib = np.unique(ordered_edges[:, 1], return_index=True)
     first[ub] = np.minimum(first[ub], ib)
     baseline = np.unique(first[first < inf])
-    keep_mask = np.zeros(len(er), dtype=bool)
+    keep_mask = np.zeros(len(ordered_edges), dtype=bool)
     keep_mask[baseline] = True
     short = SKELETON_TARGET - int(keep_mask.sum())
     if short > 0:
         keep_mask[np.where(~keep_mask)[0][:short]] = True
     kept = np.where(keep_mask)[0]
-    skel = er[order_w[kept]].astype(np.uint32)
+    skel = ordered_edges[kept]
     if len(skel) > SKELETON_TARGET:
         log(
             f"WARNING: 骨架边 {len(skel):,} 条超出目标 "
@@ -934,6 +1580,21 @@ def main() -> None:  # noqa: PLR0915
         )
     (SITE / "edges.bin").write_bytes(skel.tobytes())
     log(f"骨架边 {len(skel):,} 条(按权重降序,客户端前缀优先)")
+    n_edges_skeleton = len(skel)
+    del (
+        collect_r,
+        deg,
+        ordered_edges,
+        first,
+        ua,
+        ia,
+        ub,
+        ib,
+        baseline,
+        keep_mask,
+        kept,
+        skel,
+    )
 
     # ---- Episode 从属集合(结构记录;description 只留存在位)----
     eps_t = pq.read_table(
@@ -976,21 +1637,29 @@ def main() -> None:  # noqa: PLR0915
         )
     orphan_groups = sum(
         1
-        for sid in eps_by_subject
-        if sr.entity_key(sr.KIND_SUBJECT, sid) not in info
+        for subject_id in eps_by_subject
+        if entity_rank(
+            rank_lookup,
+            sr.entity_key(sr.KIND_SUBJECT, subject_id),
+        )
+        == sr.RANK_SENTINEL
     )
     orphan_eps = sum(
-        len(v)
-        for sid, v in eps_by_subject.items()
-        if sr.entity_key(sr.KIND_SUBJECT, sid) not in info
+        len(episodes)
+        for subject_id, episodes in eps_by_subject.items()
+        if entity_rank(
+            rank_lookup,
+            sr.entity_key(sr.KIND_SUBJECT, subject_id),
+        )
+        == sr.RANK_SENTINEL
     )
-    for v in eps_by_subject.values():
-        v.sort(
-            key=lambda e: (
-                e[7],
-                e[4],
-                e[6] if e[6] is not None else float("inf"),
-                e[0],
+    for episodes in eps_by_subject.values():
+        episodes.sort(
+            key=lambda episode: (
+                episode[7],
+                episode[4],
+                episode[6] if episode[6] is not None else float("inf"),
+                episode[0],
             )
         )
     episodes_pack = PackFile("episodes.pack")
@@ -998,21 +1667,29 @@ def main() -> None:  # noqa: PLR0915
     eps_items: list[tuple[int, Any]] = []
     eps_inline_rows = 0
     eps_paged_rows = 0
-    for sid in sorted(eps_by_subject):
-        ep_rows = eps_by_subject[sid]
-        entry = {"e": ep_rows[: sr.EPISODE_INLINE], "n": len(ep_rows)}
-        eps_inline_rows += len(entry["e"])
-        ep_over = ep_rows[sr.EPISODE_INLINE :]
-        if ep_over:
-            entry["op"] = [
+    for subject_id in sorted(eps_by_subject):
+        episodes = eps_by_subject[subject_id]
+        episode_entry: dict[str, Any] = {
+            "e": episodes[: sr.EPISODE_INLINE],
+            "n": len(episodes),
+        }
+        eps_inline_rows += len(episode_entry["e"])
+        overflow = episodes[sr.EPISODE_INLINE :]
+        if overflow:
+            episode_entry["op"] = [
                 pages_pack.add(member)
-                for member in sr.gzip_pages(ep_over, pages_level, sr.PAGE_SIZE)
+                for member in sr.gzip_pages(
+                    overflow, pages_level, sr.PAGE_SIZE
+                )
             ]
-            eps_paged_rows += len(ep_over)
-        eps_items.append((sid, entry))
+            eps_paged_rows += len(overflow)
+        eps_items.append((subject_id, episode_entry))
 
     def encode_eps(chunk: list[tuple[int, Any]]) -> Any:
-        return {"i": [c[0] for c in chunk], "g": [c[1] for c in chunk]}
+        return {
+            "i": [item[0] for item in chunk],
+            "g": [item[1] for item in chunk],
+        }
 
     eps_ranges = emit_ranged(
         episodes_pack,
@@ -1033,7 +1710,16 @@ def main() -> None:  # noqa: PLR0915
     log(
         f"分集:{len(eps_by_subject):,} 组(孤儿组 {orphan_groups:,}/"
         f"{orphan_eps:,} 条),{eps_q['members']:,} 成员,"
-        f"{len(episodes_pack.blob) / 1e6:,.1f}MB"
+        f"{episodes_pack.size / 1e6:,.1f}MB"
+    )
+    del (
+        eps,
+        eps_desc_bits,
+        eps_by_subject,
+        eps_items,
+        episodes_pack,
+        eps_ranges,
+        pages_pack,
     )
 
     # ---- 长文本侧车(四类;空值只计数,不写负载)----
@@ -1049,9 +1735,6 @@ def main() -> None:  # noqa: PLR0915
                 f"{sr.TEXT_P99_CAP:,};调小声明范围宽度后重建"
             )
 
-    def encode_text(chunk: list[tuple[int, Any]]) -> Any:
-        return {"i": [c[0] for c in chunk], "t": [c[1] for c in chunk]}
-
     def emit_entity_text(family: str, columns: str) -> None:
         width = sr.TEXT_BLOCK_IDS[family]
         level = sr.GZIP_LEVELS[family]
@@ -1065,23 +1748,17 @@ def main() -> None:  # noqa: PLR0915
             (sr.KIND_PERSON, "person"),
             (sr.KIND_CHARACTER, "character"),
         ):
-            t = pq.read_table(
-                PARQUET / f"{table}.parquet", columns=["id", columns]
-            ).to_pydict()
-            items: list[tuple[int, Any]] = []
-            for i in range(len(t["id"])):
-                text = t[columns][i]
-                if text:
-                    items.append((t["id"][i], text))
-                    non_empty += 1
-                    raw_bytes += len(text.encode("utf-8"))
-                else:
-                    empty += 1
-            items.sort(key=lambda r: r[0])
-            ranges[str(kind)] = emit_ranged(
-                pack, items, width, level, encode_text
+            kind_ranges, kind_stats = emit_sorted_parquet_text(
+                pack,
+                PARQUET / f"{table}.parquet",
+                columns,
+                width=width,
+                level=level,
             )
-            del t, items
+            ranges[str(kind)] = kind_ranges
+            non_empty += kind_stats["non_empty"]
+            empty += kind_stats["empty"]
+            raw_bytes += kind_stats["raw_bytes"]
         pack.write()
         text_dir[family] = {
             "gzip": level,
@@ -1109,25 +1786,29 @@ def main() -> None:  # noqa: PLR0915
     width = sr.TEXT_BLOCK_IDS[family]
     level = sr.GZIP_LEVELS[family]
     desc_pack = RolloverPack(family)
-    desc_t = pq.read_table(
-        PARQUET / "episode.parquet",
-        columns=["id", "subject_id", "description"],
-    ).to_pydict()
     desc_by_subject: dict[int, list[list[Any]]] = defaultdict(list)
     desc_non_empty = 0
     desc_empty = 0
     desc_raw = 0
-    for i in range(len(desc_t["id"])):
-        text = desc_t["description"][i]
-        if text:
-            desc_by_subject[desc_t["subject_id"][i]].append(
-                [desc_t["id"][i], text]
-            )
-            desc_non_empty += 1
-            desc_raw += len(text.encode("utf-8"))
-        else:
-            desc_empty += 1
-    del desc_t
+    desc_parquet = pq.ParquetFile(PARQUET / "episode.parquet")
+    for batch in desc_parquet.iter_batches(
+        batch_size=65_536,
+        columns=["id", "subject_id", "description"],
+    ):
+        desc = batch.to_pydict()
+        for episode_id, subject_id, text in zip(
+            desc["id"],
+            desc["subject_id"],
+            desc["description"],
+            strict=True,
+        ):
+            if text:
+                desc_by_subject[subject_id].append([episode_id, text])
+                desc_non_empty += 1
+                desc_raw += len(text.encode("utf-8"))
+            else:
+                desc_empty += 1
+        del desc
     for pairs in desc_by_subject.values():
         pairs.sort(key=lambda p: p[0])
     desc_ranges: list[list[int]] = []
@@ -1194,135 +1875,33 @@ def main() -> None:  # noqa: PLR0915
 
     # 事实文本(VOICE_CREDIT.summary):以 FactRef 寻址
     family = "fact-summary"
-    fs_pack = RolloverPack(family)
-    fs_items: list[tuple[int, Any]] = []
-    fs_empty = 0
-    fs_raw = 0
-    for i in range(len(vo["from_id"])):
-        text = vo["summary"][i]
-        if not text:
-            fs_empty += 1
-            continue
-        participants = (
-            sr.entity_key(sr.KIND_PERSON, vo["from_id"][i]),
-            sr.entity_key(sr.KIND_CHARACTER, vo["to_id"][i]),
-            sr.entity_key(sr.KIND_SUBJECT, vo["subject_id"][i]),
+    fact_summary_dir, fact_summary_stats, fact_summary_sizes = (
+        emit_fact_summary(
+            fs_items,
+            empty_count=fs_empty,
+            raw_bytes=fs_raw,
         )
-        enc = sr.canonical_fact(
-            "VOICE_CREDIT", participants, (vo["type"][i], text)
-        )
-        fs_items.append((fact_refs[enc], text))
-        fs_raw += len(text.encode("utf-8"))
-    del vo
-    fs_items = sorted(dict(fs_items).items())
-    fs_ranges = emit_ranged(
-        fs_pack,
-        fs_items,
-        sr.TEXT_BLOCK_IDS[family],
-        sr.GZIP_LEVELS[family],
-        encode_text,
     )
-    fs_pack.write()
-    text_dir[family] = {
-        "gzip": sr.GZIP_LEVELS[family],
-        "width": sr.TEXT_BLOCK_IDS[family],
-        "files": fs_pack.files,
-        "ranges": fs_ranges,
-    }
-    text_stats[family] = {
-        "non_empty": len(fs_items),
-        "empty": fs_empty,
-        "raw_bytes": fs_raw,
-        "compressed_bytes": sum(fs_pack.sizes),
-    }
-    text_quantile_gate(family, fs_pack.sizes)
+    text_dir[family] = fact_summary_dir
+    text_stats[family] = fact_summary_stats
+    text_quantile_gate(family, fact_summary_sizes)
     (SITE / "text.idx").write_bytes(sr.gzip_member({"families": text_dir}, 6))
-    del fact_refs
+    del fs_items
 
     # ---- 显示映射 ----
     mappings, _ = collect_mappings()
     (SITE / "mappings.json").write_bytes(jdump(mappings))
     mapping_digest = sr.sha256_hex(sr.canonical_json(mappings))
+    del mappings
 
     # ---- 搜索:规范化前缀自适应树 ----
-    chars: set[str] = set()
-    for k in key_r:
-        di = info[int(k)]
-        for text in (di["name"], di["cn"]):
-            if text:
-                chars.update(str(text).lower())
-    charmap, charmap_dropped = build_charmap(chars)
-    if charmap_dropped:
-        log(
-            f"  截断:charmap 丢弃多字映射 {charmap_dropped:,} 个"
-            f"(逐字契约下无法表达,原字直存)"
-        )
-    fold = fold_factory(charmap)
-    entries: list[tuple[str, str, int]] = []
-    for rank, k in enumerate(key_r):
-        di = info[int(k)]
-        for text in dict.fromkeys(str(t) for t in (di["name"], di["cn"]) if t):
-            nk = fold(text)
-            if nk:
-                entries.append((nk, text, rank))
-    entries.sort(key=lambda e: e[2])  # 全局热度序
-    search_pack = PackFile("search.pack")
-    search_level = sr.GZIP_LEVELS["search"]
-    search_dir: dict[str, Any] = {}
-    n_leaves = 0
-    n_internal = 0
-
-    def next_char(norm: str, prefix_len: int) -> str:
-        # Python 字符串按码点索引;客户端以 codePointAt 对齐同一规则
-        return norm[prefix_len]
-
-    def emit_search(prefix: str, items: list[tuple[str, str, int]]) -> None:
-        nonlocal n_leaves, n_internal
-        rows = [[e[0], e[1], e[2]] for e in items]
-        gz = sr.gzip_member(rows, search_level)
-        if len(gz) <= sr.SEARCH_LEAF_CAP:
-            search_dir[prefix] = {"l": search_pack.add(gz)}
-            n_leaves += 1
-            return
-        n_internal += 1
-        top = [[e[0], e[1], e[2]] for e in items[: sr.SEARCH_TOP]]
-        node: dict[str, Any] = {
-            "t": search_pack.add(sr.gzip_member(top, search_level))
-        }
-        search_dir[prefix] = node
-        children: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
-        for e in items:
-            if e[0] != prefix:
-                children[next_char(e[0], len(prefix))].append(e)
-        for ch in sorted(children):
-            emit_search(prefix + ch, children[ch])
-
-    roots: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
-    for e in entries:
-        roots[next_char(e[0], 0)].append(e)
-    for ch in sorted(roots):
-        emit_search(ch, roots[ch])
-    search_pack.write()
-    (SITE / "search.idx.json").write_bytes(jdump(search_dir))
-    (SITE / "charmap.json").write_bytes(jdump(charmap))
-    search_q = quantiles(search_pack.sizes)
-    reconcile(
-        "搜索条目数(根分组对账)",
-        len(entries),
-        sum(len(v) for v in roots.values()),
-    )
-    log(
-        f"搜索:{len(entries):,} 条,叶 {n_leaves:,}/内部 {n_internal:,},"
-        f"{len(search_pack.blob) / 1e6:,.1f}MB,最大成员 "
-        f"{search_q['max']:,}B"
-    )
+    build_search_index(names_r, cn_names_r)
 
     # ---- 标签表(社区标签名取社区 top 节点,位置取几何中心)----
     labels: list[list[Any]] = []
     for rank in range(min(LABELS_TOP, n)):
-        dl = info[int(key_r[rank])]
-        labels.append([rank, str(dl["cn"] or dl["name"])])
-    comm_labels = build_community_labels(comm_r, coords_r, key_r, info)
+        labels.append([rank, str(cn_names_r[rank] or names_r[rank])])
+    comm_labels = build_community_labels(comm_r, coords_r, names_r, cn_names_r)
     n_comm_total = len(np.unique(comm_r[comm_r != 0xFFFF]))
     reconcile("社区标签覆盖全部社区", n_comm_total, len(comm_labels))
     charset = sorted(
@@ -1372,9 +1951,7 @@ def main() -> None:  # noqa: PLR0915
         y_lo = y_hi = 0
     counts = {
         "entities": {
-            "subject": len(sub_rows),
-            "person": len(per_rows),
-            "character": len(cha_rows),
+            **entity_counts,
         },
         "facts": n_facts,
         "fact_source_rows": source_rows,
@@ -1446,7 +2023,7 @@ def main() -> None:  # noqa: PLR0915
             "segments": rank_segments,
         },
         "n_nodes": n,
-        "n_edges_skeleton": len(skel),
+        "n_edges_skeleton": n_edges_skeleton,
         "name_block_size": name_block_size,
         "bbox": [lo, hi],
         "year_range": [y_lo, y_hi],

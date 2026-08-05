@@ -19,16 +19,11 @@ class CommunityLabelTests(unittest.TestCase):
             ],
             dtype=np.float32,
         )
-        keys = np.array([101, 102, 103, 104], dtype=np.uint32)
-        info = {
-            101: {"name": "top", "cn": "首选名"},
-            102: {"name": "second", "cn": ""},
-            103: {"name": "solo", "cn": ""},
-            104: {"name": "isolated", "cn": ""},
-        }
+        names = ["top", "second", "solo", "isolated"]
+        cn_names = ["首选名", "", "", ""]
 
         self.assertEqual(
-            build_community_labels(communities, coordinates, keys, info),
+            build_community_labels(communities, coordinates, names, cn_names),
             {
                 7: ["首选名", [1.0, 2.0, 3.0]],
                 8: ["solo", [10.0, 11.0, 12.0]],

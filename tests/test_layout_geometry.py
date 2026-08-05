@@ -26,6 +26,67 @@ from scripts.layout import (
 
 
 class TopologyLayoutTests(unittest.TestCase):
+    def test_node_keys_map_to_compact_indices(self) -> None:
+        keys = np.array([0x01000001, 0x01000004, 0x02000002], dtype=np.uint32)
+        endpoint_keys = np.array(
+            [
+                [0x02000002, 0x01000001],
+                [0x01000004, 0x02000002],
+            ],
+            dtype=np.uint32,
+        )
+
+        mapped = layout.map_node_keys(keys, endpoint_keys)
+
+        self.assertEqual(mapped.dtype, np.dtype(np.uint32))
+        np.testing.assert_array_equal(mapped, [[2, 0], [1, 2]])
+        with self.assertRaisesRegex(ValueError, "edge endpoint"):
+            layout.map_node_keys(
+                keys, np.array([[0x01000002, 0x01000004]], dtype=np.uint32)
+            )
+
+    def test_graph_build_does_not_require_a_python_edge_list(self) -> None:
+        class ArrayWithoutToList(np.ndarray):
+            def tolist(self) -> list[object]:
+                raise AssertionError(
+                    "edge array must not become a Python list"
+                )
+
+        edges = np.array(
+            [[0, 1], [1, 0], [1, 2], [2, 2]], dtype=np.uint32
+        ).view(ArrayWithoutToList)
+
+        graph = layout.build_graph(3, edges)
+
+        self.assertEqual(graph.vcount(), 3)
+        self.assertEqual(graph.get_edgelist(), [(0, 1), (1, 2)])
+
+    def test_hierarchical_layout_consumes_raw_numpy_edges(self) -> None:
+        edges = np.array(
+            [
+                *[(a, b) for a in range(5) for b in range(a + 1, 5)],
+                *[(a, b) for a in range(5, 10) for b in range(a + 1, 10)],
+                (4, 5),
+                (10, 11),
+                (12, 13),
+                (13, 14),
+                (4, 5),
+                (14, 14),
+            ],
+            dtype=np.uint32,
+        )
+        keys = np.arange(200, 215, dtype=np.uint32)
+
+        coords, communities, report = hierarchical_connected_layout(
+            edges, keys, target_islands=2
+        )
+
+        self.assertEqual(coords.shape, (15, 3))
+        self.assertTrue(np.isfinite(coords).all())
+        self.assertEqual(len(np.unique(communities[:10])), 2)
+        self.assertEqual(report["n_components"], 3)
+        self.assertEqual(report["n_satellite_islands"], 2)
+
     def test_layout_is_computed_in_three_dimensions(self) -> None:
         coords = run_layout(ig.Graph.Ring(4))
 
@@ -275,8 +336,7 @@ class CommunityIslandTests(unittest.TestCase):
         self.assertTrue((np.ptp(centers, axis=0) > 0).all())
 
     def test_builds_macro_communities_and_component_satellites(self) -> None:
-        graph = ig.Graph(n=15, directed=False)
-        graph.add_edges(
+        edges = np.array(
             [
                 *[(a, b) for a in range(5) for b in range(a + 1, 5)],
                 *[(a, b) for a in range(5, 10) for b in range(a + 1, 10)],
@@ -284,12 +344,13 @@ class CommunityIslandTests(unittest.TestCase):
                 (10, 11),
                 (12, 13),
                 (13, 14),
-            ]
+            ],
+            dtype=np.uint32,
         )
         keys = np.arange(200, 215, dtype=np.uint32)
 
-        first = hierarchical_connected_layout(graph, keys, target_islands=2)
-        second = hierarchical_connected_layout(graph, keys, target_islands=2)
+        first = hierarchical_connected_layout(edges, keys, target_islands=2)
+        second = hierarchical_connected_layout(edges, keys, target_islands=2)
         coords, communities, report = first
 
         np.testing.assert_array_equal(first[0], second[0])

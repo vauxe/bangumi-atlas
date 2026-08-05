@@ -93,18 +93,61 @@ def load_nodes() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     )
 
 
-def load_edges(index: dict[int, int]) -> np.ndarray:
-    parts = []
+def map_node_keys(keys: np.ndarray, endpoints: np.ndarray) -> np.ndarray:
+    """Map sorted entity keys to compact u32 vertex indices."""
+    if keys.ndim != 1 or endpoints.ndim == 0:
+        raise ValueError("node keys and edge endpoints must be arrays")
+    if len(keys) > 1 and (keys[1:] <= keys[:-1]).any():
+        raise ValueError("node keys must be strictly increasing")
+
+    positions = np.searchsorted(keys, endpoints)
+    found = positions < len(keys)
+    matched = np.zeros(endpoints.shape, dtype=bool)
+    matched[found] = keys[positions[found]] == endpoints[found]
+    if not matched.all():
+        missing = int(endpoints[~matched][0])
+        raise ValueError(f"edge endpoint {missing} has no matching node")
+    if len(keys) > np.iinfo(np.uint32).max:
+        raise ValueError("node count exceeds compact u32 edge indices")
+    return positions.astype(np.uint32)
+
+
+def load_edges(keys: np.ndarray) -> np.ndarray:
+    counts = [
+        pq.ParquetFile(PARQUET / f"{fname}.parquet").metadata.num_rows
+        for fname, *_ in EDGE_FILES
+    ]
+    edges = np.empty((sum(counts), 2), dtype=np.uint32)
+    offset = 0
     for fname, src_col, src_t, dst_col, dst_t in EDGE_FILES:
         t = pq.read_table(
             PARQUET / f"{fname}.parquet", columns=[src_col, dst_col]
         )
-        a = node_key(src_t, np.asarray(t.column(src_col), dtype=np.uint32))
-        b = node_key(dst_t, np.asarray(t.column(dst_col), dtype=np.uint32))
-        parts.append(np.stack([a, b], axis=1))
-    edges = np.concatenate(parts)
-    lookup = np.vectorize(index.__getitem__, otypes=[np.int64])
-    return lookup(edges)
+        end = offset + len(t)
+        src_keys = node_key(
+            src_t, np.asarray(t.column(src_col), dtype=np.uint32)
+        )
+        edges[offset:end, 0] = map_node_keys(keys, src_keys)
+        dst_keys = node_key(
+            dst_t, np.asarray(t.column(dst_col), dtype=np.uint32)
+        )
+        edges[offset:end, 1] = map_node_keys(keys, dst_keys)
+        offset = end
+    return edges
+
+
+def build_graph(count: int, edges: np.ndarray) -> ig.Graph:
+    """Build a simple graph without expanding edges into Python objects."""
+    edge_array = np.asarray(edges)
+    if edge_array.ndim != 2 or edge_array.shape[1] != 2:
+        raise ValueError("graph edges must have two endpoints")
+    if count < 0 or (
+        edge_array.size and (edge_array.min() < 0 or edge_array.max() >= count)
+    ):
+        raise ValueError("graph edge endpoint is outside the vertex range")
+    graph = ig.Graph(n=count, edges=edge_array, directed=False)
+    graph.simplify()
+    return graph
 
 
 def run_layout(g: ig.Graph) -> np.ndarray:
@@ -481,16 +524,47 @@ def satellite_island_centers(
     raise RuntimeError("satellite island packing did not converge")
 
 
+def _simple_induced_edges(
+    edges: np.ndarray,
+    vertices: np.ndarray,
+    vertex_count: int,
+) -> np.ndarray:
+    """Return dense, unique undirected edges induced by selected vertices."""
+    if vertices.ndim != 1 or (
+        len(vertices)
+        and (vertices.min() < 0 or vertices.max() >= vertex_count)
+    ):
+        raise ValueError("induced vertices are outside the graph")
+    if len(vertices) == 0:
+        return np.empty((0, 2), dtype=np.uint32)
+
+    remap = np.full(vertex_count, -1, dtype=np.int32)
+    remap[vertices] = np.arange(len(vertices), dtype=np.int32)
+    mapped = remap[np.asarray(edges)]
+    mapped = mapped[(mapped[:, 0] >= 0) & (mapped[:, 1] >= 0)]
+    if not len(mapped):
+        return np.empty((0, 2), dtype=np.uint32)
+
+    low = np.minimum(mapped[:, 0], mapped[:, 1]).astype(np.uint64)
+    high = np.maximum(mapped[:, 0], mapped[:, 1]).astype(np.uint64)
+    keep = low != high
+    codes = np.unique(low[keep] * np.uint64(len(vertices)) + high[keep])
+    simple = np.empty((len(codes), 2), dtype=np.uint32)
+    simple[:, 0] = codes // np.uint64(len(vertices))
+    simple[:, 1] = codes % np.uint64(len(vertices))
+    return simple
+
+
 def hierarchical_connected_layout(
-    graph: ig.Graph,
+    edges: np.ndarray,
     keys: np.ndarray,
     *,
     target_islands: int = TARGET_COMMUNITY_ISLANDS,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, int | float]]:
     """Build separated giant-component communities and component satellites."""
-    count = graph.vcount()
+    count = len(keys)
     if keys.shape != (count,):
-        raise ValueError("connected graph and keys must align")
+        raise ValueError("connected edges and keys must align")
     if count == 0:
         return (
             np.empty((0, 3), dtype=np.float32),
@@ -510,12 +584,25 @@ def hierarchical_connected_layout(
             },
         )
 
-    components = np.asarray(graph.connected_components().membership)
+    graph = build_graph(count, edges)
+    components = np.asarray(
+        graph.connected_components().membership, dtype=np.int32
+    )
     component_sizes = np.bincount(components)
     giant_component = int(np.argmax(component_sizes))
     giant_vertices = np.flatnonzero(components == giant_component)
-    giant = graph.subgraph(giant_vertices.tolist())
-    giant_edges = np.asarray(giant.get_edgelist(), dtype=np.int64)
+    small_vertices = np.flatnonzero(components != giant_component)
+    # igraph preserves a component-sensitive edge order for this induced
+    # graph. UMAP consumes that order, so retain the tiny native subgraph
+    # while still releasing the million-node parent before the giant layout.
+    small_graph = (
+        graph.subgraph(small_vertices.tolist())
+        if len(small_vertices)
+        else None
+    )
+    del graph
+    giant_edges = _simple_induced_edges(edges, giant_vertices, count)
+    giant = build_graph(len(giant_vertices), giant_edges)
 
     fine = detect_communities(giant)
     macro = coarsen_communities(giant_edges, fine, target_islands)
@@ -523,6 +610,7 @@ def hierarchical_connected_layout(
     macro_graph = _community_supergraph(giant_edges, macro)
     macro_desired = run_macro_layout(macro_graph)
     giant_desired = run_layout(giant)
+    del fine, giant, giant_edges, macro_graph
     giant_coords, macro_centers, _macro_radii = place_islands(
         giant_desired,
         keys[giant_vertices],
@@ -541,18 +629,17 @@ def hierarchical_connected_layout(
     communities[giant_vertices] = macro
     giant_radius = float(np.linalg.norm(giant_coords, axis=1).max())
 
-    small_vertices = np.flatnonzero(components != giant_component)
     satellite_count = 0
     satellite_gap = 0.0
     satellite_radius = 0.0
-    if len(small_vertices):
-        small_graph = graph.subgraph(small_vertices.tolist())
+    if small_graph is not None:
         _, satellite = np.unique(
             components[small_vertices], return_inverse=True
         )
         satellite = satellite.astype(np.int64)
         satellite_count = int(satellite.max()) + 1
         small_desired = run_layout(small_graph)
+        del small_graph
         local, satellite_radii = _local_island_geometry(
             small_desired,
             keys[small_vertices],
@@ -663,6 +750,7 @@ def shape_layout(
 
 
 _SHAPE_LOGIC = (
+    build_graph,
     run_layout,
     detect_communities,
     _community_supergraph,
@@ -677,6 +765,7 @@ _SHAPE_LOGIC = (
     tighten_islands,
     _fibonacci_unit_sphere,
     satellite_island_centers,
+    _simple_induced_edges,
     hierarchical_connected_layout,
     _isolated_halo,
     wrap_isolated_shell,
@@ -749,9 +838,8 @@ def main() -> None:
     argparse.ArgumentParser().parse_args()
 
     keys, years, collects = load_nodes()
-    index = {int(k): i for i, k in enumerate(keys)}
     print(f"节点 {len(keys):,}", flush=True)
-    edges = load_edges(index)
+    edges = load_edges(keys)
     print(f"边 {len(edges):,}", flush=True)
 
     degree = np.zeros(len(keys), dtype=np.int64)
@@ -761,19 +849,15 @@ def main() -> None:
     print(f"孤立节点 {isolated.sum():,}(外层球壳)", flush=True)
 
     connected = np.flatnonzero(~isolated)
-    remap = -np.ones(len(keys), dtype=np.int64)
-    remap[connected] = np.arange(len(connected))
+    remap = np.full(len(keys), -1, dtype=np.int32)
+    remap[connected] = np.arange(len(connected), dtype=np.int32)
     sub_edges = remap[edges]
 
     communities = np.full(len(keys), 0xFFFF, dtype=np.uint16)
 
-    graph = ig.Graph(
-        n=len(connected), edges=sub_edges.tolist(), directed=False
-    )
-    graph.simplify()
     started = time.time()
     connected_coords, connected_communities, hierarchy = (
-        hierarchical_connected_layout(graph, keys[connected])
+        hierarchical_connected_layout(sub_edges, keys[connected])
     )
     communities[connected] = connected_communities
     print(
