@@ -38,7 +38,13 @@ from site_contracts import (
     validate_layout_report,
     validate_name_pack,
 )
-from world_scale import CANONICAL_WORLD_SPAN, normalize_world_scale
+from world_scale import (
+    CANONICAL_WORLD_SPAN,
+    MIN_NODE_CENTER_DISTANCE,
+    find_minimum_distance_violation,
+    normalize_world_scale,
+    separate_published_nodes,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 PARQUET = ROOT / "data" / "parquet"
@@ -908,15 +914,44 @@ def main() -> None:  # noqa: PLR0915
     coords_r = np.stack(
         [lay["x"][order], lay["y"][order], lay["z"][order]], axis=1
     )
+    # 全局去重叠会使用 O(n) 批量索引，先释放布局原始列和
+    # 排序索引，避免与它们叠加在峰值内存中。
+    del lay, order
     # 离线布局输出尺度任意;发布坐标归一到规范世界跨度,保证探索端
     # 聚焦层级、工作集字号和节点尺寸的绝对 zoom 语义
     coords_r, world_scale = normalize_world_scale(coords_r)
+    # 必须在最终世界尺度上解决物理重叠;若放在 layout.py 中,
+    # 此处的 600 跨度归一会再次缩小已经分开的中心距。
+    coords_r, separation_report = separate_published_nodes(coords_r)
+    distance_violation = find_minimum_distance_violation(coords_r)
+    if distance_violation is not None:
+        bad_rank_a, bad_rank_b, bad_distance = distance_violation
+        sys.exit(
+            f"FAILED: 发布坐标 rank {bad_rank_a}/{bad_rank_b} 中心距 "
+            f"{bad_distance:.6f} < {MIN_NODE_CENTER_DISTANCE:g}"
+        )
+    published_layout = {
+        **layout_report,
+        "minimum_node_center_distance": MIN_NODE_CENTER_DISTANCE,
+        "separation": {
+            "moved_nodes": separation_report.moved_nodes,
+            "max_displacement": separation_report.max_displacement,
+            "placement_clearance": separation_report.placement_clearance,
+            "assignment_rounds": separation_report.assignment_rounds,
+        },
+    }
     rank_lookup = build_rank_lookup(key_r)
     log(
         f"节点 {n:,},rank 排序完成(dump 版本 {dump_version}),"
-        f"世界尺度 ×{world_scale:.3f} → 跨度 {CANONICAL_WORLD_SPAN:g}"
+        f"世界尺度 ×{world_scale:.3f} → 名义跨度 "
+        f"{CANONICAL_WORLD_SPAN:g}"
     )
-    del lay, order
+    log(
+        f"全局物理去重叠: {separation_report.moved_nodes:,}/{n:,} "
+        f"节点移动,最大位移 "
+        f"{separation_report.max_displacement:.4f},"
+        f"最小中心距 {MIN_NODE_CENTER_DISTANCE:g}"
+    )
 
     # ---- 排名对齐列(先只读几何、名称和标签所需字段)----
     sub_t = pq.read_table(
@@ -998,7 +1033,7 @@ def main() -> None:  # noqa: PLR0915
     del present_r, sub_ranks, per_ranks, cha_ranks, per_names, cha_names
 
     # ---- 几何 SoA(25B/节点,定长记录支持 Range 点查)----
-    coords_f32 = coords_r.astype("<f4")
+    coords_f32 = coords_r.astype("<f4", copy=False)
     lo = [float(v) for v in coords_f32.min(0)]
     hi = [float(v) for v in coords_f32.max(0)]
     (SITE / "positions.bin").write_bytes(coords_f32.tobytes())
@@ -2028,7 +2063,7 @@ def main() -> None:  # noqa: PLR0915
         "bbox": [lo, hi],
         "year_range": [y_lo, y_hi],
         "tags": top_tags,
-        "layout": layout_report,
+        "layout": published_layout,
         "files": file_meta,
         "core_bytes": core_bytes,
         "total_bytes": total_bytes,
