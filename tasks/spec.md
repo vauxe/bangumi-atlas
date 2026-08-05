@@ -74,7 +74,10 @@ Use snake_case, explicit array shapes, seeded igraph randomness, Ruff's
 - Every degree-zero node lies on one outer sphere beyond all connected nodes.
 - The largest component is partitioned into 30-80 macro communities on the
   current snapshot.
-- Macro-community bounding spheres do not overlap and have a positive gap.
+- Macro-community 95%-core spheres keep a positive gap while sparse edge
+  points may interleave.
+- Published median within-community 3D nearest-neighbor distance increases
+  over the first community-island rebuild.
 - Non-giant connected components lie outside the giant body and inside the
   isolated shell.
 - Output is deterministic for identical input and remains genuinely 3D.

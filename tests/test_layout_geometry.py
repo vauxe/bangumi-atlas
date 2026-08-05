@@ -144,6 +144,59 @@ class TopologyLayoutTests(unittest.TestCase):
 
 
 class CommunityIslandTests(unittest.TestCase):
+    def test_tightens_island_centers_while_spreading_local_nodes(
+        self,
+    ) -> None:
+        island_count = 8
+        core = layout._fibonacci_unit_sphere(20)
+        template = np.vstack([core, [8.0, 0.0, 0.0]])
+        template -= template.mean(axis=0)
+        local = np.tile(template, (island_count, 1))
+        islands = np.repeat(np.arange(island_count), len(template))
+        full_radii = np.array(
+            [
+                np.linalg.norm(local[islands == group], axis=1).max()
+                for group in range(island_count)
+            ]
+        )
+        base_centers = pack_island_centers(
+            layout._fibonacci_unit_sphere(island_count),
+            full_radii,
+            ISLAND_GAP,
+        )
+
+        coords, centers, actual_radii, core_radii = layout.tighten_islands(
+            local,
+            islands,
+            base_centers,
+        )
+
+        base_center_distance = np.linalg.norm(
+            base_centers[:, None] - base_centers[None, :], axis=2
+        )
+        center_distance = np.linalg.norm(
+            centers[:, None] - centers[None, :], axis=2
+        )
+        pairs = np.triu_indices(island_count, 1)
+        self.assertLess(
+            float(np.median(center_distance[pairs])),
+            float(np.median(base_center_distance[pairs])) * 0.6,
+        )
+        self.assertGreaterEqual(
+            minimum_island_gap(centers, core_radii),
+            TYPICAL_NODE_DISTANCE - 1e-9,
+        )
+        self.assertGreater(
+            float(np.median(actual_radii / full_radii)),
+            1.45,
+        )
+        for group in range(island_count):
+            np.testing.assert_allclose(
+                coords[islands == group].mean(axis=0),
+                centers[group],
+                atol=1e-6,
+            )
+
     def test_packs_island_bounding_spheres_with_a_deterministic_gap(
         self,
     ) -> None:
@@ -253,7 +306,15 @@ class CommunityIslandTests(unittest.TestCase):
         self.assertEqual(report["n_community_islands"], 2)
         self.assertEqual(report["n_satellite_islands"], 2)
         self.assertGreaterEqual(
-            report["min_community_island_gap"], ISLAND_GAP - 1e-9
+            report["min_community_core_gap"],
+            layout.COMMUNITY_CORE_GAP - 1e-9,
+        )
+        self.assertLess(
+            report["min_community_island_gap"],
+            report["min_community_core_gap"],
+        )
+        self.assertEqual(
+            report["community_node_spread"], layout.COMMUNITY_NODE_SPREAD
         )
         self.assertGreaterEqual(
             report["min_satellite_island_gap"], ISLAND_GAP - 1e-9
