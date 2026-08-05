@@ -852,7 +852,7 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def layout_input_digest(parquet: Path = PARQUET) -> str:
+def layout_input_digest(parquet: Path) -> str:
     """Identify every Parquet file that can affect layout output."""
     entries = [
         [name, _file_sha256(parquet / name)] for name in LAYOUT_INPUT_FILES

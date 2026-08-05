@@ -467,6 +467,24 @@ class LayoutCacheTests(unittest.TestCase):
             )
         )
 
+    def write_valid_cache(self, root: Path) -> tuple[Path, Path]:
+        parquet = root / "parquet"
+        output = root / "layout"
+        self.write_inputs(parquet)
+        shape = shape_digest()
+        self.write_outputs(output, shape)
+        layout.write_layout_cache(
+            output, layout.layout_input_digest(parquet), shape
+        )
+        return parquet, output
+
+    def test_input_digest_requires_an_explicit_root(self) -> None:
+        with (
+            mock.patch.object(layout, "_file_sha256", return_value="digest"),
+            self.assertRaises(TypeError),
+        ):
+            layout.layout_input_digest()  # type: ignore[call-arg]
+
     def test_cache_hit_requires_exact_inputs_and_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -530,14 +548,7 @@ class LayoutCacheTests(unittest.TestCase):
 
     def test_main_cache_hit_does_not_load_or_rewrite_layout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            parquet = root / "parquet"
-            output = root / "layout"
-            self.write_inputs(parquet)
-            shape = shape_digest()
-            self.write_outputs(output, shape)
-            input_digest = layout.layout_input_digest(parquet)
-            layout.write_layout_cache(output, input_digest, shape)
+            parquet, output = self.write_valid_cache(Path(directory))
             artifacts = [output / "coords.parquet", output / "report.json"]
             before = {
                 path.name: (path.read_bytes(), path.stat().st_mtime_ns)
@@ -572,16 +583,34 @@ class LayoutCacheTests(unittest.TestCase):
             }
             self.assertEqual(after, before)
 
-    def test_force_removes_cache_before_recompute(self) -> None:
+    def test_force_skips_cache_check_and_removes_stamp(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            parquet = root / "parquet"
-            output = root / "layout"
-            self.write_inputs(parquet)
-            shape = shape_digest()
-            self.write_outputs(output, shape)
-            input_digest = layout.layout_input_digest(parquet)
-            layout.write_layout_cache(output, input_digest, shape)
+            parquet, output = self.write_valid_cache(Path(directory))
+
+            with (
+                mock.patch.object(layout, "PARQUET", parquet),
+                mock.patch.object(layout, "OUT", output),
+                mock.patch.object(
+                    layout,
+                    "layout_cache_matches",
+                    side_effect=AssertionError("force checked cache"),
+                ),
+                mock.patch.object(
+                    layout,
+                    "load_nodes",
+                    side_effect=RuntimeError("recompute started"),
+                ),
+                mock.patch("sys.argv", ["layout.py", "--force"]),
+                self.assertRaisesRegex(RuntimeError, "recompute started"),
+            ):
+                layout.main()
+
+            self.assertFalse((output / layout.LAYOUT_CACHE_FILE).exists())
+
+    def test_cache_miss_removes_stale_stamp_before_recompute(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parquet, output = self.write_valid_cache(Path(directory))
+            (parquet / layout.LAYOUT_INPUT_FILES[0]).write_bytes(b"changed")
 
             with (
                 mock.patch.object(layout, "PARQUET", parquet),
@@ -591,7 +620,7 @@ class LayoutCacheTests(unittest.TestCase):
                     "load_nodes",
                     side_effect=RuntimeError("recompute started"),
                 ),
-                mock.patch("sys.argv", ["layout.py", "--force"]),
+                mock.patch("sys.argv", ["layout.py"]),
                 self.assertRaisesRegex(RuntimeError, "recompute started"),
             ):
                 layout.main()
