@@ -22,6 +22,7 @@ export function prefersReducedMotion(): boolean {
 }
 
 const FLY_MS = 400;
+const SELECTION_KEEP_VIEW_PX = 80;
 // OrbitView 在 zoom=0 时以一世界单位对应一像素；聚焦采用稳定的局部
 // 空间尺度。zoom=6.2 时 0.28 世界尺度略大于高亮节点的 18 px 直径。
 export const FOCUS_ZOOM = 6.2;
@@ -345,6 +346,19 @@ export class Camera {
         "rotationOrbit",
       ]),
     };
+  }
+
+  /** 单击选择仅在目标离当前枢轴较远时平移视角。OrbitView 在
+   * zoom=0 时一世界单位约为一像素，因此这里用当前 zoom 将三维
+   * 距离换算为保守的屏幕距离；近节点保持完整相机状态不变。 */
+  centerSelection(
+    pos: [number, number, number],
+  ): (OrbitState & Record<string, unknown>) | null {
+    const [tx, ty, tz] = this.viewState.target;
+    const distance = Math.hypot(pos[0] - tx, pos[1] - ty, pos[2] - tz);
+    if (distance * 2 ** this.viewState.zoom <= SELECTION_KEEP_VIEW_PX)
+      return null;
+    return this.flyTo(pos, this.viewState.zoom);
   }
 
   toggleTop(): OrbitState {
