@@ -136,9 +136,7 @@ def _assign_unique_cells(
         positions = np.minimum(positions, len(occupied) - 1)
         free_local = np.flatnonzero(occupied[positions] != candidate_keys)
         if len(free_local):
-            _, first = np.unique(
-                candidate_keys[free_local], return_index=True
-            )
+            _, first = np.unique(candidate_keys[free_local], return_index=True)
             winners_local = free_local[first]
         else:
             winners_local = np.empty(0, dtype=np.int64)
@@ -219,13 +217,11 @@ def separate_published_nodes(
     mixed = final_keys * np.uint64(_HASH_MULTIPLIER) + node_index * np.uint64(
         2_654_435_761
     )
-    output = (
-        assigned_cells.astype(np.float32) * np.float32(lattice_step)
-    )
+    output = assigned_cells.astype(np.float32) * np.float32(lattice_step)
     for axis in range(3):
-        value = (
-            (mixed >> np.uint64(axis * 16)) & np.uint64(0xFFFF)
-        ).astype(np.float64)
+        value = ((mixed >> np.uint64(axis * 16)) & np.uint64(0xFFFF)).astype(
+            np.float64
+        )
         jitter = (value / 65_535.0 * 2.0 - 1.0) * jitter_limit
         output[:, axis] += jitter.astype(np.float32)
 
@@ -271,9 +267,7 @@ def find_minimum_distance_violation(
     tree = cKDTree(published)
     for start in range(0, len(published), 100_000):
         end = min(start + 100_000, len(published))
-        distance, neighbor = tree.query(
-            published[start:end], k=2, workers=1
-        )
+        distance, neighbor = tree.query(published[start:end], k=2, workers=1)
         nearest = distance[:, 1]
         local = int(np.argmin(nearest))
         if float(nearest[local]) < minimum_distance:
