@@ -39,6 +39,25 @@ uv run python scripts/bake_site.py
 uv run python scripts/verify_site.py
 ```
 
+`layout.py` 默认启用本地缓存。它先计算 3 张节点 Parquet 与 6 张关系 Parquet 的逐文件
+内容摘要，再核对完整 `layout.py`、`uv.lock`、`shape_digest`、`coords.parquet` 与
+`report.json` 的摘要和坐标 schema。全部一致才直接复用布局，且不会加载图数据结构或
+重写两份产物；任一项缺失、损坏或变化都视为未命中并完整重算。摘要检查会顺序读取
+输入文件，但不会物化节点、边或 igraph，实测内存远低于完整布局。
+
+`build_db.py` 发布 Parquet 与 `layout.py` 消费 Parquet 使用同一把跨进程锁，不能并发
+观察到正在替换的九张表；Parquet 构建中断还会保留 `.build-in-progress` 标记，布局会
+拒绝继续。布局在发布前再次核对输入与实现身份，缓存标记只在两份产物完整写出后原子
+发布到 `data/layout/cache.json`。需要主动重算时使用：
+
+```bash
+uv run python scripts/layout.py --force
+```
+
+缓存是本机执行优化，不参与 SiteRelease，也不能替代 `verify_site.py`。全新 CI runner
+没有缓存时仍执行完整布局。不要跨机器复制缓存；它刻意复用已经校验的产物字节，不尝试
+证明不同 CPU、BLAS 或依赖二进制重新计算时会产生相同浮点结果。
+
 三处会主动中断构建，均为设计内的报警：
 
 - 快照 SHA-256 与上游 `aux/latest.json` 不符。
@@ -169,15 +188,16 @@ kill %1
 
 1. `data/dump/VERSION` —— 上游每周三滚动，`fetch_dump.py` 始终取最新版本。
 2. `data/mappings/manifest.json` 的 commit 与逐文件 SHA-256。
-3. `data/layout/report.json` —— 身份取 `algo`、`seed` 与 `shape_digest`，三项相同
-   即整形逻辑与常量相同，与上游版本无关；摘要由 `layout.py` 从整形代码算出，改了
-   几何就自动变。`depth_ratio`、邻距和 `edge_compactness` 由数据实测，随上游版本
-   漂移，读作几何质量。
-4. `site/data/manifest.json` 的 `version` —— 相同即整份发布逐字节相同。
+3. `data/layout/report.json` —— `algo`、`seed` 与 `shape_digest` 描述整形算法；摘要由
+   `layout.py` 从整形代码算出，改了几何就自动变。它不包含输入和数值运行时，因此不能
+   单独作为整份坐标逐字节相同的证明。`depth_ratio`、邻距和 `edge_compactness` 由
+   数据实测，随上游版本漂移，读作几何质量。
+4. `site/data/manifest.json` 的 `version` —— 标识发布使用的源数据版本；需要证明整份
+   发布逐字节相同时，仍应比较 SiteRelease 文件清单及内容摘要。
 
-前两项相同时，后两项也应相同：布局固定使用分量分区、Leiden 社区归并、UMAP
-岛内拓扑和加权社区超图，`layout.py` 为 igraph 的随机源播种。若前两项相同而第 4 项
-不同，属于管道故障。
+前两项相同时，后两项的数据版本和布局质量指标应一致。布局固定使用分量分区、Leiden
+社区归并、UMAP 岛内拓扑和加权社区超图，`layout.py` 为 igraph 的随机源播种；但不同
+平台的数值库仍可能产生浮点末位差异，逐字节结论必须由产物摘要给出。
 
 ## 7. 调试开关
 
@@ -190,4 +210,6 @@ kill %1
   一致性护栏约束。
 - `build_db.py --offline`：改用本地枚举快照，校验其来源 commit 与逐文件 SHA-256。
   上游是否有更新仍需联网刷新阶段确认。
+- `layout.py --force`：忽略已通过全部摘要与 schema 校验的布局缓存，强制重算坐标；
+  正常构建无需使用。
 - `npm --prefix web run dev`：写出未压缩的 `site/app.js`，发布前重跑 §4 的 build。

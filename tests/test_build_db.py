@@ -123,6 +123,66 @@ class SourceSchemaTests(unittest.TestCase):
 
 
 class ParquetProjectionTests(unittest.TestCase):
+    def test_interrupted_generation_leaves_blocking_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parquet = Path(directory) / "parquet"
+            with (
+                patch.object(build_db, "PARQUET", parquet),
+                patch.object(
+                    build_db,
+                    "_build_parquet_unlocked",
+                    side_effect=RuntimeError("interrupted"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "interrupted"),
+            ):
+                build_db.build_parquet()
+
+            self.assertTrue(
+                (parquet / build_db.PARQUET_BUILD_MARKER).is_file()
+            )
+
+    def test_hot_loop_matches_previous_writer_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference"
+            candidate = root / "candidate"
+            reference.mkdir()
+            candidate.mkdir()
+            schema = pa.schema(
+                [
+                    ("id", pa.int64()),
+                    ("name", pa.string()),
+                    ("tags", pa.list_(pa.string())),
+                ]
+            )
+            rows = [
+                (index, f"row-{index}", [str(index), "tag"])
+                for index in range(7)
+            ]
+
+            columns = {field.name: [] for field in schema}
+            writer = pq.ParquetWriter(reference / "rows.parquet", schema)
+            for row in rows:
+                for field, value in zip(schema, row, strict=True):
+                    columns[field.name].append(value)
+                if len(columns["id"]) == 3:
+                    writer.write_table(pa.table(columns, schema=schema))
+                    for column in columns.values():
+                        column.clear()
+            if columns["id"]:
+                writer.write_table(pa.table(columns, schema=schema))
+            writer.close()
+
+            with patch.object(build_db, "PARQUET", candidate):
+                build_db.write_parquet_rows(
+                    "rows", schema, iter(rows), batch_rows=3
+                )
+
+            self.assertEqual(
+                (candidate / "rows.parquet").read_bytes(),
+                (reference / "rows.parquet").read_bytes(),
+            )
+
     def test_streaming_writer_flushes_bounded_row_groups(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             parquet = Path(directory)
