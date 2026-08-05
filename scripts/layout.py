@@ -41,6 +41,8 @@ SEED = 7
 # Keep the connected graph volumetric and place structureless nodes around it.
 TYPICAL_NODE_DISTANCE = 0.28
 _JITTER_RADIUS = TYPICAL_NODE_DISTANCE * 0.15
+ISLAND_GAP = TYPICAL_NODE_DISTANCE * 4
+SATELLITE_GAP = TYPICAL_NODE_DISTANCE * 6
 _HALO_GAP = TYPICAL_NODE_DISTANCE * 6
 _GOLDEN_ANGLE = np.pi * (3 - np.sqrt(5.0))
 
@@ -158,6 +160,197 @@ def _shape_connected(desired: np.ndarray, keys: np.ndarray) -> np.ndarray:
         coords *= target_span / body_span
     coords += _jitter(keys)
     return coords
+
+
+def minimum_island_gap(centers: np.ndarray, radii: np.ndarray) -> float:
+    """Return the smallest surface-to-surface distance between islands."""
+    count = len(radii)
+    if centers.shape != (count, 3):
+        raise ValueError("island centers and radii must align")
+    if count < 2:
+        return float("inf")
+    closest = float("inf")
+    for left in range(count - 1):
+        distances = np.linalg.norm(centers[left + 1 :] - centers[left], axis=1)
+        clearances = distances - radii[left + 1 :] - radii[left]
+        closest = min(closest, float(clearances.min()))
+    return closest
+
+
+def _pair_direction(left: int, right: int) -> np.ndarray:
+    """Deterministic 3D direction for coincident island centers."""
+    order = float((left + 1) * 104729 + (right + 1) * 130363)
+    height = 2.0 * ((order * 0.6180339887498949) % 1.0) - 1.0
+    ring = np.sqrt(max(0.0, 1.0 - height * height))
+    angle = order * _GOLDEN_ANGLE
+    return np.array(
+        [np.cos(angle) * ring, height, np.sin(angle) * ring],
+        dtype=np.float64,
+    )
+
+
+def pack_island_centers(
+    desired: np.ndarray,
+    radii: np.ndarray,
+    gap: float,
+) -> np.ndarray:
+    """Relax island centers until their bounding spheres no longer overlap."""
+    count = len(radii)
+    if desired.shape != (count, 3):
+        raise ValueError("desired island centers and radii must align")
+    if not np.isfinite(desired).all() or not np.isfinite(radii).all():
+        raise ValueError("island geometry must be finite")
+    if (radii < 0).any() or gap < 0:
+        raise ValueError("island radii and gap must not be negative")
+    if count == 0:
+        return np.empty((0, 3), dtype=np.float64)
+    if count == 1:
+        return np.zeros((1, 3), dtype=np.float64)
+
+    centers = desired.astype(np.float64, copy=True)
+    centers -= centers.mean(axis=0)
+    pair_distance = np.linalg.norm(
+        centers[:, None, :] - centers[None, :, :], axis=2
+    )
+    nonzero = pair_distance[pair_distance > np.finfo(np.float64).eps]
+    target_distance = 2 * float(np.median(radii)) + gap
+    if len(nonzero):
+        centers *= target_distance / float(np.median(nonzero))
+    else:
+        centers = _fibonacci_unit_sphere(count) * target_distance
+
+    masses = np.maximum(radii, TYPICAL_NODE_DISTANCE / 2) ** 3
+    tolerance = np.finfo(np.float64).eps * 64
+    for _ in range(256):
+        largest_overlap = 0.0
+        for left in range(count - 1):
+            for right in range(left + 1, count):
+                delta = centers[right] - centers[left]
+                distance = float(np.linalg.norm(delta))
+                required = float(radii[left] + radii[right] + gap)
+                overlap = required - distance
+                if overlap <= tolerance:
+                    continue
+                largest_overlap = max(largest_overlap, overlap)
+                direction = (
+                    delta / distance
+                    if distance > tolerance
+                    else _pair_direction(left, right)
+                )
+                total_mass = masses[left] + masses[right]
+                centers[left] -= (
+                    direction * overlap * masses[right] / total_mass
+                )
+                centers[right] += (
+                    direction * overlap * masses[left] / total_mass
+                )
+        centers -= centers.mean(axis=0)
+        if largest_overlap <= tolerance:
+            break
+
+    required_scale = 1.0
+    for left in range(count - 1):
+        distances = np.linalg.norm(centers[left + 1 :] - centers[left], axis=1)
+        required = radii[left + 1 :] + radii[left] + gap
+        required_scale = max(
+            required_scale,
+            float(np.max(required / np.maximum(distances, tolerance))),
+        )
+    centers *= required_scale * (1.0 + 1e-12)
+    return centers
+
+
+def place_islands(
+    desired: np.ndarray,
+    keys: np.ndarray,
+    island: np.ndarray,
+    desired_centers: np.ndarray,
+    gap: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Shape local topology independently, then place separated islands."""
+    if desired.shape != (len(keys), 3) or island.shape != (len(keys),):
+        raise ValueError("island node arrays must align")
+    if len(island) == 0:
+        return (
+            np.empty((0, 3), dtype=np.float64),
+            np.empty((0, 3), dtype=np.float64),
+            np.empty(0, dtype=np.float64),
+        )
+    count = int(island.max()) + 1
+    if island.min() < 0 or not np.array_equal(
+        np.unique(island), np.arange(count)
+    ):
+        raise ValueError("island ids must be dense non-negative integers")
+    if desired_centers.shape != (count, 3):
+        raise ValueError("desired centers must match island count")
+
+    local = np.zeros_like(desired, dtype=np.float64)
+    radii = np.zeros(count, dtype=np.float64)
+    for group in range(count):
+        members = island == group
+        shaped = _shape_connected(desired[members], keys[members])
+        shaped -= shaped.mean(axis=0)
+        local[members] = shaped
+        radii[group] = max(
+            TYPICAL_NODE_DISTANCE / 2,
+            float(np.linalg.norm(shaped, axis=1).max()),
+        )
+    centers = pack_island_centers(desired_centers, radii, gap)
+    return local + centers[island], centers, radii
+
+
+def _fibonacci_unit_sphere(count: int) -> np.ndarray:
+    """Evenly sample deterministic unit directions at any count."""
+    if count == 0:
+        return np.empty((0, 3), dtype=np.float64)
+    order = np.arange(count, dtype=np.float64)
+    height = 1.0 - 2.0 * (order + 0.5) / count
+    ring = np.sqrt(np.maximum(0.0, 1.0 - height**2))
+    angle = order * _GOLDEN_ANGLE
+    coords = np.empty((count, 3), dtype=np.float64)
+    coords[:, 0] = np.cos(angle) * ring
+    coords[:, 1] = height
+    coords[:, 2] = np.sin(angle) * ring
+    return coords
+
+
+def satellite_island_centers(
+    radii: np.ndarray,
+    body_radius: float,
+) -> np.ndarray:
+    """Place small connected components on a sphere outside the giant body."""
+    if not np.isfinite(radii).all() or (radii < 0).any():
+        raise ValueError("satellite radii must be finite and non-negative")
+    if not np.isfinite(body_radius) or body_radius < 0:
+        raise ValueError("body radius must be finite and non-negative")
+    count = len(radii)
+    if count == 0:
+        return np.empty((0, 3), dtype=np.float64)
+
+    units = _fibonacci_unit_sphere(count)
+    padded = radii + ISLAND_GAP / 2
+    area_radius = float(np.sqrt(np.square(padded).sum() / 2.8))
+    sphere_radius = max(
+        body_radius + SATELLITE_GAP + float(radii.max()),
+        area_radius,
+    )
+    max_pair_distance = 2 * float(radii.max()) + ISLAND_GAP
+    for _ in range(8):
+        centers = units * sphere_radius
+        pairs = cKDTree(centers).query_pairs(
+            max_pair_distance, output_type="ndarray"
+        )
+        if not len(pairs):
+            return centers
+        distances = np.linalg.norm(
+            centers[pairs[:, 0]] - centers[pairs[:, 1]], axis=1
+        )
+        required = radii[pairs[:, 0]] + radii[pairs[:, 1]] + ISLAND_GAP
+        scale = float(np.max(required / distances))
+        if scale <= 1.0 + 1e-12:
+            return centers
+        sphere_radius *= scale * (1.0 + 1e-12)
+    raise RuntimeError("satellite island packing did not converge")
 
 
 def _isolated_halo(count: int, inner_radius: float) -> np.ndarray:
