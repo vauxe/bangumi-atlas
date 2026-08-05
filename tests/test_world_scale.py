@@ -4,7 +4,13 @@ import unittest
 
 import numpy as np
 
-from scripts.world_scale import CANONICAL_WORLD_SPAN, normalize_world_scale
+from scripts.world_scale import (
+    CANONICAL_WORLD_SPAN,
+    MIN_NODE_CENTER_DISTANCE,
+    find_minimum_distance_violation,
+    normalize_world_scale,
+    separate_published_nodes,
+)
 
 
 class WorldScaleTests(unittest.TestCase):
@@ -36,6 +42,78 @@ class WorldScaleTests(unittest.TestCase):
             normalize_world_scale(np.zeros((0, 3)))
         with self.assertRaises(ValueError):
             normalize_world_scale(np.zeros((3, 3)))  # 零跨度
+
+    def test_separates_every_published_node_after_float32_rounding(
+        self,
+    ) -> None:
+        coords = np.array(
+            [
+                [-300.0, 0.0, 0.0],
+                [300.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.01, 0.0, 0.0],
+                [0.0, 0.01, 0.0],
+                [0.0, 0.0, 0.0],
+            ],
+            dtype=np.float64,
+        )
+
+        separated, report = separate_published_nodes(coords)
+
+        self.assertEqual(separated.dtype, np.dtype("<f4"))
+        delta = separated[:, None, :] - separated[None, :, :]
+        distance = np.linalg.norm(delta.astype(np.float64), axis=2)
+        distance[np.diag_indices_from(distance)] = np.inf
+        self.assertGreaterEqual(
+            float(distance.min()), MIN_NODE_CENTER_DISTANCE
+        )
+        self.assertGreater(report.moved_nodes, 0)
+        self.assertGreaterEqual(
+            report.placement_clearance, MIN_NODE_CENTER_DISTANCE
+        )
+        self.assertIsNone(find_minimum_distance_violation(separated))
+
+    def test_separation_is_deterministic_and_keeps_anchor_moves_local(
+        self,
+    ) -> None:
+        coords = np.array(
+            [
+                [-300.0, 0.0, 0.0],
+                [300.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [10.0, 10.0, 10.0],
+                [0.0, 0.0, 0.0],
+            ],
+            dtype=np.float64,
+        )
+
+        first, first_report = separate_published_nodes(coords)
+        second, second_report = separate_published_nodes(coords)
+
+        np.testing.assert_array_equal(first, second)
+        anchor_moves = np.linalg.norm(
+            first[:4].astype(np.float64) - coords[:4], axis=1
+        )
+        self.assertLess(float(anchor_moves.max()), 0.27)
+        self.assertEqual(first_report, second_report)
+
+    def test_independent_validator_finds_a_physical_overlap(self) -> None:
+        overlapping = np.array(
+            [[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            dtype="<f4",
+        )
+        clear = np.array(
+            [[0.0, 0.0, 0.0], [0.28, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            dtype="<f4",
+        )
+
+        violation = find_minimum_distance_violation(overlapping)
+
+        self.assertIsNotNone(violation)
+        assert violation is not None
+        self.assertEqual(violation[:2], (0, 1))
+        self.assertAlmostEqual(violation[2], 0.1)
+        self.assertIsNone(find_minimum_distance_violation(clear))
 
 
 if __name__ == "__main__":

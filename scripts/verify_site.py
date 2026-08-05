@@ -21,6 +21,7 @@ import orjson
 import pyarrow.parquet as pq
 import site_release as sr
 from content_fingerprint import RowFingerprint
+from scipy.spatial import cKDTree
 
 ROOT = Path(__file__).resolve().parent.parent
 PARQUET = ROOT / "data" / "parquet"
@@ -30,6 +31,7 @@ SITE_ROOT = ROOT / "site"
 failures: list[str] = []
 artifact_files: dict[str, list[Any]] = {}
 member_spans: dict[str, set[tuple[int, int]]] = defaultdict(set)
+MIN_NODE_CENTER_DISTANCE = 0.28
 
 
 def log(msg: str) -> None:
@@ -94,6 +96,28 @@ def quantile(sizes: list[int], q: float) -> int:
     return arr[min(len(arr) - 1, int(q * len(arr)))]
 
 
+def find_position_overlap(
+    positions: np.ndarray,
+    minimum_distance: float,
+) -> tuple[int, int, float] | None:
+    """独立检查最终 float32 坐标，不复用烘焙器的格点逻辑。"""
+
+    tree = cKDTree(positions)
+    for start in range(0, len(positions), 100_000):
+        end = min(start + 100_000, len(positions))
+        distance, neighbor = tree.query(
+            positions[start:end], k=2, workers=1
+        )
+        nearest = distance[:, 1]
+        local = int(np.argmin(nearest))
+        if float(nearest[local]) < minimum_distance:
+            index = start + local
+            other = int(neighbor[local, 1])
+            first, second = sorted((index, other))
+            return first, second, float(nearest[local])
+    return None
+
+
 def main() -> None:  # noqa: PLR0915
     global artifact_files
     t0 = time.time()
@@ -153,6 +177,31 @@ def main() -> None:  # noqa: PLR0915
     key_r = np.fromfile(site_file("key.bin"), dtype="<u4")
     reconcile("key.bin 记录数", n, len(key_r))
     check("key.bin 无重复键", len(np.unique(key_r)) == n)
+    positions_flat = np.fromfile(site_file("positions.bin"), dtype="<f4")
+    reconcile("positions.bin 记录数", n * 3, len(positions_flat))
+    if len(positions_flat) != n * 3:
+        raise ValueError("positions.bin has an invalid float32 record count")
+    positions = positions_flat.reshape(n, 3)
+    declared_distance = manifest["layout"].get(
+        "minimum_node_center_distance"
+    )
+    reconcile(
+        "layout 声明全局最小节点中心距",
+        MIN_NODE_CENTER_DISTANCE,
+        declared_distance,
+    )
+    violation = find_position_overlap(positions, MIN_NODE_CENTER_DISTANCE)
+    check(
+        "positions.bin 所有节点不重叠",
+        violation is None,
+        ""
+        if violation is None
+        else (
+            f"rank {violation[0]} / {violation[1]} 中心距 "
+            f"{violation[2]:.6f} < {MIN_NODE_CENTER_DISTANCE:g}"
+        ),
+    )
+    del positions_flat, positions
     seg_meta = manifest["rank_index"]["segments"]
     raw = np.frombuffer(site_file("rank-by-key.bin").read_bytes(), np.uint8)
     decoded: dict[int, np.ndarray] = {}
