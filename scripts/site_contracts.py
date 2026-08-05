@@ -16,8 +16,14 @@ from typing import Any
 import orjson
 
 
-def validate_layout_report(report: Any) -> dict[str, Any]:
-    """Reject test or obsolete geometry before it can be published."""
+def validate_layout_report(
+    report: Any, *, shape_digest: str
+) -> dict[str, Any]:
+    """Reject test or obsolete geometry before it can be published.
+
+    shape_digest 由调用方从当前整形代码算出:报告里的摘要与它不等,
+    说明这份坐标出自另一套整形逻辑,只能重跑布局。
+    """
 
     if not isinstance(report, dict):
         raise ValueError("layout report must be an object")
@@ -25,8 +31,11 @@ def validate_layout_report(report: Any) -> dict[str, Any]:
         raise ValueError("stub layout is not publishable")
     if report.get("dimensions") != 3:
         raise ValueError("layout must be three-dimensional")
-    if report.get("geometry") != "topology-3d":
-        raise ValueError("layout geometry must be topology-3d")
+    if report.get("shape_digest") != shape_digest:
+        raise ValueError(
+            "layout shape digest does not match the current shaping code, "
+            "rerun layout.py"
+        )
     return report
 
 

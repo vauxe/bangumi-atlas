@@ -128,10 +128,9 @@ export async function loadManifest(): Promise<Manifest> {
       `positions.bin 应为 ${expectedPositionBytes} 字节,实际为 ` +
         `${positionBytes ?? "缺失"}`,
     );
-  if (m.layout?.dimensions !== 3 || m.layout?.geometry !== "topology-3d")
+  if (m.layout?.dimensions !== 3)
     throw new SiteDataContractError(
-      "布局应为 topology-3d/3D,实际为 " +
-        `${String(m.layout?.geometry ?? "缺失")}`,
+      `布局应为 3D,实际为 ${String(m.layout?.dimensions ?? "缺失")}`,
     );
   const nameBlockSize = m.name_block_size;
   if (

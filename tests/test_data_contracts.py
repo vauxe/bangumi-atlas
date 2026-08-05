@@ -5,6 +5,7 @@ import json
 import struct
 import tempfile
 import unittest
+from functools import partial
 from pathlib import Path
 
 from scripts import site_release as sr
@@ -195,16 +196,20 @@ class SiteContractTests(unittest.TestCase):
         report = {
             "algo": "umap",
             "dimensions": 3,
-            "geometry": "topology-3d",
+            "shape_digest": "d1ce4e5b9",
         }
+        check = partial(validate_layout_report, shape_digest="d1ce4e5b9")
 
-        self.assertIs(validate_layout_report(report), report)
+        self.assertIs(check(report), report)
         with self.assertRaisesRegex(ValueError, "stub"):
-            validate_layout_report({**report, "stub": True})
+            check({**report, "stub": True})
         with self.assertRaisesRegex(ValueError, "three-dimensional"):
-            validate_layout_report({**report, "dimensions": 2})
-        with self.assertRaisesRegex(ValueError, "topology-3d"):
-            validate_layout_report({**report, "geometry": "free-3d"})
+            check({**report, "dimensions": 2})
+        # 整形代码换了一套,旧坐标不能顶着新代码发布
+        with self.assertRaisesRegex(ValueError, "rerun layout.py"):
+            check({**report, "shape_digest": "94d049bb1"})
+        with self.assertRaisesRegex(ValueError, "rerun layout.py"):
+            check({"algo": "umap", "dimensions": 3})
 
     def test_name_pack_validation_reads_every_published_block(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
