@@ -32,6 +32,7 @@ from scipy.spatial import cKDTree
 
 ROOT = Path(__file__).resolve().parent.parent
 PARQUET = ROOT / "data" / "parquet"
+LAYOUT = ROOT / "data" / "layout" / "coords.parquet"
 SITE = ROOT / "site" / "data"
 SITE_ROOT = ROOT / "site"
 
@@ -65,6 +66,117 @@ def _natural(value: Any) -> bool:
         and not isinstance(value, bool)
         and int(value) >= 0
     )
+
+
+def load_array(logical_name: str, dtype: str) -> np.ndarray:
+    """Decode one fixed-width array exactly as the browser does."""
+
+    raw = site_file(logical_name).read_bytes()
+    item_type = np.dtype(dtype)
+    if len(raw) % item_type.itemsize:
+        type_name = f"{item_type.kind}{item_type.itemsize * 8}"
+        raise ValueError(
+            f"{logical_name}: byte length is not a {type_name} array"
+        )
+    return np.frombuffer(raw, dtype=item_type)
+
+
+def canonical_entity_key(value: Any) -> int:
+    """Accept only the decimal object key requested by Data.factEntry()."""
+
+    if not isinstance(value, str):
+        raise ValueError("entity key must be a decimal string")
+    try:
+        key = int(value)
+    except ValueError as error:
+        raise ValueError("entity key must be a decimal string") from error
+    if not _natural(key) or value != str(key):
+        raise ValueError(f"noncanonical entity key: {value!r}")
+    return key
+
+
+def expected_layout_projection(
+    layout: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    """Derive rank-aligned geometry fields from the layout input."""
+
+    collect = np.asarray(layout["collect"])
+    order = np.argsort(-collect, kind="stable")
+    ranked_collect = collect[order]
+    sizes = np.round(18 * np.log2(1 + ranked_collect))
+    return {
+        "key": np.asarray(layout["key"])[order].astype("<u4"),
+        "year": np.asarray(layout["year"])[order].astype("<u2"),
+        "size": np.minimum(255, sizes).astype(np.uint8),
+        "isolated": np.asarray(layout["isolated"])[order].astype(np.uint8),
+    }
+
+
+def expected_year_range(years: np.ndarray) -> list[int]:
+    nonzero = years[years > 0]
+    if not len(nonzero):
+        return [0, 0]
+    lower = int(np.clip(nonzero.min(), 1900, 2035))
+    return [lower, int(np.clip(nonzero.max(), lower, 2035))]
+
+
+def edge_array_is_valid(
+    endpoints: np.ndarray, *, n_nodes: int, n_edges: int
+) -> bool:
+    """Validate only the published skeleton's browser-visible shape."""
+
+    return (
+        isinstance(endpoints, np.ndarray)
+        and endpoints.ndim == 1
+        and _natural(n_nodes)
+        and _natural(n_edges)
+        and len(endpoints) == n_edges * 2
+        and bool((endpoints < n_nodes).all())
+    )
+
+
+def incidence_tuple_is_valid(kind: str, row: Any) -> bool:
+    """Validate the fixed tuple shape before Python can ignore extra fields."""
+
+    attrs = sr.FACT_ATTRS.get(kind)
+    roles = sr.FACT_ROLES.get(kind)
+    return bool(
+        attrs is not None
+        and roles is not None
+        and isinstance(row, list)
+        and len(row) == 4 + len(attrs)
+        and _natural(row[0])
+        and _natural(row[1])
+        and row[1] > 0
+        and _natural(row[2])
+        and 0 < row[2] < 1 << len(roles)
+        and isinstance(row[3], list)
+        and all(_natural(key) for key in row[3])
+        and (
+            kind != "VOICE_CREDIT"
+            or (type(row[-1]) is int and row[-1] in (0, 1))
+        )
+    )
+
+
+def record_fact_participant(
+    masks: np.ndarray,
+    ref: int,
+    key: int,
+    participants: tuple[int, ...],
+) -> bool:
+    """Record one unique participant key for a canonical FactRef."""
+
+    unique = tuple(dict.fromkeys(participants))
+    try:
+        bit = 1 << unique.index(key)
+    except ValueError:
+        return False
+    previous = int(masks[ref])
+    if previous & bit:
+        return False
+    masks[ref] = previous | bit
+    return True
 
 
 def rank_index_layout_is_valid(index: Any, raw_size: int) -> bool:
@@ -279,22 +391,41 @@ def _range_index(ranges: list[list[int]], identity: int) -> int | None:
 
 
 def range_routes_are_valid(
-    ranges: list[list[int]], identities: list[list[int]]
+    ranges: list[list[int]],
+    identities: list[list[int]],
+    *,
+    row_length: int = 4,
+    file_count: int | None = None,
 ) -> bool:
     """Mirror the client's binary range lookup for every stored identity."""
 
-    if len(ranges) != len(identities):
+    if (
+        len(ranges) != len(identities)
+        or not _natural(row_length)
+        or row_length < 2
+        or (file_count is not None and not _natural(file_count))
+    ):
         return False
     previous_end = -1
     for index, (row, member_ids) in enumerate(
         zip(ranges, identities, strict=True)
     ):
         if (
-            len(row) < 2
-            or any(type(value) is not int for value in row)
+            not isinstance(row, list)
+            or len(row) != row_length
+            or any(not _natural(value) for value in row)
             or row[0] > row[1]
             or row[0] <= previous_end
+            or (
+                file_count is not None
+                and (row_length < 3 or row[2] >= file_count)
+            )
+            or not isinstance(member_ids, list)
             or not member_ids
+            or any(not _natural(identity) for identity in member_ids)
+            or member_ids != sorted(set(member_ids))
+            or member_ids[0] != row[0]
+            or member_ids[-1] != row[1]
         ):
             return False
         if any(
@@ -333,8 +464,9 @@ def fact_routes_are_valid(
             if (
                 not isinstance(row, list)
                 or len(row) != 3
-                or any(type(value) is not int for value in row)
+                or any(not _natural(value) for value in row)
                 or not keys
+                or any(not _natural(key) for key in keys)
                 or keys != sorted(set(keys))
                 or row[2] != keys[-1]
                 or row[2] <= previous_last
@@ -357,24 +489,43 @@ def fact_routes_are_valid(
 
 
 def episode_text_routes_are_valid(
-    ranges: list[list[int]], identities: list[list[tuple[int, int]]]
+    ranges: list[list[int]],
+    identities: list[list[tuple[int, int]]],
+    *,
+    file_count: int,
 ) -> bool:
     """Mirror the client's subject/episode range filter for every text row."""
 
-    if len(ranges) != len(identities):
+    if len(ranges) != len(identities) or not _natural(file_count):
         return False
     previous_order: tuple[int, int, int] | None = None
     for index, (row, pairs) in enumerate(zip(ranges, identities, strict=True)):
         if (
-            len(row) not in (5, 7)
-            or any(type(value) is not int for value in row)
+            not isinstance(row, list)
+            or len(row) not in (5, 7)
+            or any(not _natural(value) for value in row)
             or row[0] > row[1]
+            or row[2] >= file_count
             or (len(row) == 7 and row[5] > row[6])
+            or not isinstance(pairs, list)
             or not pairs
+            or any(
+                not isinstance(pair, tuple)
+                or len(pair) != 2
+                or any(not _natural(value) for value in pair)
+                for pair in pairs
+            )
+            or pairs != sorted(set(pairs))
+            or pairs[0][0] != row[0]
+            or pairs[-1][0] != row[1]
+            or (
+                len(row) == 7
+                and (pairs[0][1] != row[5] or pairs[-1][1] != row[6])
+            )
         ):
             return False
         order = (row[0], row[1], row[5] if len(row) == 7 else -1)
-        if previous_order is not None and order < previous_order:
+        if previous_order is not None and order <= previous_order:
             return False
         previous_order = order
         for subject, episode in pairs:
@@ -783,14 +934,60 @@ def main() -> None:  # noqa: PLR0915
         "几何 SoA 文件宽度与 n_nodes 一致",
         geometry_sizes_are_valid(geometry_sizes, n),
     )
-    key_r = np.fromfile(site_file("key.bin"), dtype="<u4")
+    key_r = load_array("key.bin", "<u4")
     reconcile("key.bin 记录数", n, len(key_r))
     check("key.bin 无重复键", len(np.unique(key_r)) == n)
     check(
         "key.bin 实体种类合法",
         bool(np.isin(key_r >> np.uint32(24), sr.KINDS).all()),
     )
-    positions_flat = np.fromfile(site_file("positions.bin"), dtype="<f4")
+    layout_table = pq.read_table(
+        LAYOUT, columns=["key", "collect", "year", "isolated"]
+    )
+    expected_geometry = expected_layout_projection(
+        {
+            column: np.asarray(layout_table.column(column))
+            for column in layout_table.column_names
+        }
+    )
+    del layout_table
+    reconcile("layout 节点数", n, len(expected_geometry["key"]))
+    check(
+        "key.bin rank 顺序 = layout",
+        np.array_equal(key_r, expected_geometry["key"]),
+    )
+    check(
+        "year.bin = layout",
+        np.array_equal(
+            load_array("year.bin", "<u2"), expected_geometry["year"]
+        ),
+    )
+    check(
+        "size.bin = layout collect 编码",
+        np.array_equal(
+            load_array("size.bin", "u1"), expected_geometry["size"]
+        ),
+    )
+    reconcile(
+        "manifest.year_range = layout",
+        expected_year_range(expected_geometry["year"]),
+        manifest["year_range"],
+    )
+    expected_flags = expected_geometry["isolated"] << np.uint8(1)
+    del expected_geometry
+
+    edges = load_array("edges.bin", "<u4")
+    check(
+        "edges.bin 计数与端点范围合法",
+        edge_array_is_valid(
+            edges,
+            n_nodes=n,
+            n_edges=manifest["n_edges_skeleton"],
+        ),
+    )
+    del edges
+
+    positions_flat = load_array("positions.bin", "<f4")
     reconcile("positions.bin 记录数", n * 3, len(positions_flat))
     if len(positions_flat) != n * 3:
         raise ValueError("positions.bin has an invalid float32 record count")
@@ -891,7 +1088,7 @@ def main() -> None:  # noqa: PLR0915
 
     # ---- 实体结构 + 名称:与 parquet 的重复敏感指纹对账 ----
     log("[4] 实体结构与名称")
-    name_idx = np.fromfile(site_file("names.idx"), dtype="<u4")
+    name_idx = load_array("names.idx", "<u4")
     block = manifest["name_block_size"]
     name_index_ok = rank_block_index_is_valid(
         name_idx,
@@ -1056,9 +1253,15 @@ def main() -> None:  # noqa: PLR0915
             manifest["counts"]["entities"][kind_name],
             ent_counts[kind],
         )
+    reconcile("实体总数 = n_nodes", n, sum(ent_counts.values()))
     check("实体成员硬上限", max(ent_sizes) <= sr.MEMBER_CAP)
 
     pq_ent_fp = RowFingerprint()
+    expected_scores = np.zeros(n, dtype=np.uint8)
+    expected_tags = np.zeros(n, dtype=np.uint32)
+    tag_counts: Counter[str] = Counter()
+    tag_first: dict[str, tuple[int, int]] = {}
+    tag_bits = {tag: bit for bit, tag in enumerate(manifest["tags"])}
     subject_columns = [
         "id",
         "name",
@@ -1083,10 +1286,29 @@ def main() -> None:  # noqa: PLR0915
         PARQUET / "subject.parquet", subject_columns
     ):
         for i in range(len(sub["id"])):
+            source_id = sub["id"][i]
+            rank = int(decoded[sr.KIND_SUBJECT][source_id])
+            if rank == sr.RANK_SENTINEL:
+                check("subject 几何投影存在于 rank", False, str(source_id))
+            else:
+                expected_flags[rank] |= np.uint8(
+                    int(bool(sub["nsfw"][i])) | (int(sub["type"][i]) << 2)
+                )
+                score = float(sub["score"][i] or 0)
+                expected_scores[rank] = np.uint8(np.round(score * 10))
+                mask = 0
+                for tag_index, tag in enumerate(sub["meta_tags"][i]):
+                    first = (rank, tag_index)
+                    tag_first[tag] = min(tag_first.get(tag, first), first)
+                    bit = tag_bits.get(tag)
+                    if bit is not None:
+                        mask |= 1 << bit
+                expected_tags[rank] = mask
+            tag_counts.update(sub["meta_tags"][i])
             pq_ent_fp.add(
                 [
                     1,
-                    sub["id"][i],
+                    source_id,
                     sub["name"][i],
                     sub["name_cn"][i],
                     sub["type"][i],
@@ -1141,6 +1363,28 @@ def main() -> None:  # noqa: PLR0915
         "实体结构内容指纹 = parquet",
         site_ent_fp.snapshot() == pq_ent_fp.snapshot(),
     )
+    top_tags = sorted(
+        tag_counts,
+        key=lambda tag: (-tag_counts[tag], tag_first[tag]),
+    )[:32]
+    reconcile("manifest.tags = parquet", top_tags, manifest["tags"])
+    check(
+        "flags.bin = parquet + layout",
+        np.array_equal(load_array("flags.bin", "u1"), expected_flags),
+    )
+    check(
+        "score.bin = parquet",
+        np.array_equal(load_array("score.bin", "u1"), expected_scores),
+    )
+    check(
+        "tags.bin = parquet",
+        np.array_equal(load_array("tags.bin", "<u4"), expected_tags),
+    )
+    del (
+        expected_flags,
+        expected_scores,
+        expected_tags,
+    )
     del ent_idx, ent_sizes, pq_ent_fp, site_ent_fp, vocab
 
     # ---- 文本侧车:非空/空计数、字节数、指纹、存在位 ----
@@ -1186,7 +1430,12 @@ def main() -> None:  # noqa: PLR0915
                     seen_count += 1
             check(
                 f"{family} kind={kind_s} 二分目录可达",
-                range_routes_are_valid(ranges, routed_ids),
+                range_routes_are_valid(
+                    ranges,
+                    routed_ids,
+                    row_length=5,
+                    file_count=len(fam["files"]),
+                ),
             )
         fp_pq = RowFingerprint()
         pq_non_empty = 0
@@ -1271,7 +1520,9 @@ def main() -> None:  # noqa: PLR0915
         desc_routes.append(member_routes)
     check(
         "episode-description 目录按 subject/episode 可达",
-        episode_text_routes_are_valid(fam["ranges"], desc_routes),
+        episode_text_routes_are_valid(
+            fam["ranges"], desc_routes, file_count=len(fam["files"])
+        ),
     )
     fp_pq = RowFingerprint()
     pq_non_empty = 0
@@ -1322,7 +1573,12 @@ def main() -> None:  # noqa: PLR0915
             fact_summary[ref] = text
     check(
         "fact-summary 二分目录可达",
-        range_routes_are_valid(fam["ranges"], fact_summary_routes),
+        range_routes_are_valid(
+            fam["ranges"],
+            fact_summary_routes,
+            row_length=5,
+            file_count=len(fam["files"]),
+        ),
     )
     check(
         "fact-summary 目录与 pack 存在",
@@ -1543,7 +1799,7 @@ def main() -> None:  # noqa: PLR0915
 
             tag_to_kind = {v: k for k, v in sr.FACT_TAGS.items()}
             facts_idx = load_idx("facts.idx")
-            seen_incidence = np.zeros(n_facts, dtype=np.uint8)
+            participant_masks = np.zeros(n_facts, dtype=np.uint8)
             n_inc_seen = 0
             fact_sizes: list[int] = []
             ok_incidence = True
@@ -1553,13 +1809,16 @@ def main() -> None:  # noqa: PLR0915
                 for off, length, _last_key in members:
                     fact_sizes.append(length)
                     member = load_member("facts.pack", off, length)
+                    parsed_entries = [
+                        (canonical_entity_key(key_s), entry)
+                        for key_s, entry in member.items()
+                    ]
                     bucket_route_keys.append(
-                        sorted(int(key) for key in member)
+                        sorted(key for key, _entry in parsed_entries)
                     )
-                    for key_s, entry in member.items():
-                        key = int(key_s)
+                    for key, entry in parsed_entries:
                         if key % sr.FACT_BUCKETS != bucket_i:
-                            check("事实桶键归属", False, key_s)
+                            check("事实桶键归属", False, str(key))
                         items: list[tuple[str, list[Any]]] = []
                         for tag, tuples in entry["g"].items():
                             items.extend((tag, t) for t in tuples)
@@ -1570,9 +1829,13 @@ def main() -> None:  # noqa: PLR0915
                                 items.append((page_item[0], page_item[1:]))
                         totals = Counter(tag for tag, _ in items)
                         if dict(totals) != entry["n"]:
-                            check("事实条目分组计数", False, key_s)
+                            check("事实条目分组计数", False, str(key))
                         for tag, tup in items:
                             f_kind = tag_to_kind[tag]
+                            n_inc_seen += 1
+                            if not incidence_tuple_is_valid(f_kind, tup):
+                                ok_incidence = False
+                                continue
                             ref, mult, role_bits, others, *attrs = tup
                             parts = sr.participants_from_incidence(
                                 f_kind, key, role_bits, others
@@ -1591,11 +1854,14 @@ def main() -> None:  # noqa: PLR0915
                                 exp_enc, exp_mult, _exp_inc = expected.lookup(
                                     ref
                                 )
-                                if enc != exp_enc or mult != exp_mult:
+                                if (
+                                    enc != exp_enc
+                                    or mult != exp_mult
+                                    or not record_fact_participant(
+                                        participant_masks, ref, key, parts
+                                    )
+                                ):
                                     ok_incidence = False
-                                else:
-                                    seen_incidence[ref] += 1
-                            n_inc_seen += 1
                 fact_route_keys.append(bucket_route_keys)
             check(
                 "facts 桶与 last_key 路由可达",
@@ -1609,7 +1875,10 @@ def main() -> None:  # noqa: PLR0915
             )
             check(
                 "每个事实在每个参与者下恰好一条 incidence",
-                bool((seen_incidence == expected.incidence_counts).all()),
+                np.array_equal(
+                    participant_masks,
+                    (1 << expected.incidence_counts) - 1,
+                ),
             )
             reconcile(
                 "incidence 总数",
@@ -1619,7 +1888,7 @@ def main() -> None:  # noqa: PLR0915
             check("事实成员硬上限", max(fact_sizes) <= sr.MEMBER_CAP)
         finally:
             expected.close()
-    del fact_summary, seen_incidence
+    del fact_summary, participant_masks
 
     # ---- 搜索:自适应前缀树与全量排序一致 ----
     log("[8] 搜索索引")
@@ -1653,7 +1922,7 @@ def main() -> None:  # noqa: PLR0915
         ]
         for nm in names_by_rank
     ]
-    alias_idx = np.fromfile(site_file("search.alias.idx"), dtype="<u4")
+    alias_idx = load_array("search.alias.idx", "<u4")
     alias_pack_size = site_file("search.alias.pack").stat().st_size
     alias_blocks = (n + alias_block_size - 1) // alias_block_size
     alias_index_ok = rank_block_index_is_valid(
@@ -1662,25 +1931,30 @@ def main() -> None:  # noqa: PLR0915
         block_size=alias_block_size,
         pack_size=alias_pack_size,
     )
-    actual_alias_rows: list[list[Any]] = []
     if alias_index_ok:
         for block in range(alias_blocks):
             off = int(alias_idx[block])
             end = int(alias_idx[block + 1])
             rows = load_member("search.alias.pack", off, end - off)
+            start_rank = block * alias_block_size
             expected_count = min(
                 alias_block_size,
-                n - block * alias_block_size,
+                n - start_rank,
             )
-            if not isinstance(rows, list) or len(rows) != expected_count:
+            expected_rows = expected_alias_rows[
+                start_rank : start_rank + expected_count
+            ]
+            if (
+                not isinstance(rows, list)
+                or len(rows) != expected_count
+                or not all(search_alias_row_is_valid(row) for row in rows)
+                or rows != expected_rows
+            ):
                 alias_index_ok = False
                 break
-            actual_alias_rows.extend(rows)
     check(
         "搜索别名块完整覆盖全部 rank",
-        alias_index_ok
-        and all(search_alias_row_is_valid(row) for row in actual_alias_rows)
-        and actual_alias_rows == expected_alias_rows,
+        alias_index_ok,
     )
 
     search_dir = orjson.loads(site_file("search.idx.json").read_bytes())
