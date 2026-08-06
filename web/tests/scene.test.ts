@@ -79,6 +79,21 @@ test("keeps normal node color independent of zoom, size, and SDF edge alpha", ()
   assert.match(colorFilter, /color = vec4\([^,\n]+, color\.a\)/);
 });
 
+test("does not interpolate per-node metadata across a billboard", () => {
+  const shaders = new NodeStyleExtension().getShaders() as {
+    inject: Record<string, string>;
+  };
+  const vertexDecl = shaders.inject["vs:#decl"] ?? "";
+  const fragmentDecl = shaders.inject["fs:#decl"] ?? "";
+
+  assert.match(vertexDecl, /flat out vec4 atlas_style;/);
+  assert.match(vertexDecl, /flat out float atlas_year;/);
+  assert.match(vertexDecl, /flat out vec2 atlas_tags;/);
+  assert.match(fragmentDecl, /flat in vec4 atlas_style;/);
+  assert.match(fragmentDecl, /flat in float atlas_year;/);
+  assert.match(fragmentDecl, /flat in vec2 atlas_tags;/);
+});
+
 test("excludes subjects with unknown years when a year filter is active", () => {
   const previousFilters = state.filters;
   const scene = Object.assign(Object.create(Scene.prototype), {
