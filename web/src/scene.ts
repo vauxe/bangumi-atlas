@@ -117,9 +117,10 @@ export class NodeStyleExtension extends LayerExtension {
 in vec4 instanceStyle;
 in float instanceYear;
 in vec2 instanceTags;
-out vec4 atlas_style;
-out float atlas_year;
-out vec2 atlas_tags;`,
+// 节点元数据是离散值；flat 防止 billboard 内插值篡改 flags 等字段。
+flat out vec4 atlas_style;
+flat out float atlas_year;
+flat out vec2 atlas_tags;`,
         "vs:#main-end": `
 atlas_style = instanceStyle;
 atlas_year = instanceYear;
@@ -134,9 +135,9 @@ if (gl_Position.w > 0.0) {
     scatterplot.radiusMaxPixels) / screenRadius;
 }`,
         "fs:#decl": `
-in vec4 atlas_style;
-in float atlas_year;
-in vec2 atlas_tags;`,
+flat in vec4 atlas_style;
+flat in float atlas_year;
+flat in vec2 atlas_tags;`,
         // 颜色、亮度和可见性统一在 shader 中推导；
         // discard 使被滤除节点同时移出拾取与 autoHighlight。
         "fs:DECKGL_FILTER_COLOR": `
