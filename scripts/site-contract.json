@@ -1,0 +1,22 @@
+{
+  "schema": "structural-site-v1",
+  "profile": "explorer-v1",
+  "schema_digest": "4f13c29184622c1b94f7ad2b4766115477ff98a92190535a596ba033a12a084a",
+  "rank": {
+    "encoding": "u24le",
+    "sentinel": 16777215
+  },
+  "limits": {
+    "member_cap": 256000,
+    "member_raw_cap": 2000000,
+    "pack_cap": 80000000,
+    "search_leaf_cap": 64000,
+    "search_top": 12,
+    "search_fold": "unicode-casefold-15.0.0-aliases-v1",
+    "search_fold_max_expansion": 3,
+    "search_ngram_width": 2,
+    "search_ngram_buckets": 65536,
+    "search_ngram_member_ranks": 60000,
+    "search_alias_block_ranks_max": 1024
+  }
+}

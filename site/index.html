@@ -34,13 +34,32 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 button:focus-visible, input:focus-visible, a:focus-visible {
   outline: 2px solid var(--pink);
   outline-offset: 2px; }
-#hits { position: absolute; top: 100%; left: 0; right: 0; z-index: 9;
+#search-panel { position: absolute; top: 100%; left: 0; right: 0; z-index: 9;
   background: var(--panel); border: 1px solid var(--line);
   border-radius: 0 0 16px 16px; text-align: left; max-height: 320px;
   overflow: auto; }
+#search-panel[hidden] { display: none; }
 #hits:empty { display: none; }
 #hits .hit { padding: 8px 16px; cursor: pointer; }
 #hits .hit.active, #hits .hit:hover { background: var(--line); }
+.hit-main { display: flex; align-items: baseline; gap: 8px; }
+.hit-name { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.hit-type { margin-left: auto; flex: none; color: var(--ink-2);
+  font-size: 11px; }
+.hit-alias, #search-status { color: var(--ink-2); font-size: 12px; }
+.hit-alias { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#search-status { padding: 7px 16px; }
+#search-status:empty { display: none; }
+#hits:not(:empty) + #search-status { border-top: 1px solid var(--line); }
+#search-more { width: 100%; padding: 8px 16px; border: 0;
+  border-top: 1px solid var(--line); background: none; color: var(--pink);
+  text-align: left; cursor: pointer; }
+#search-more:hover { background: var(--line); }
+#search-more[aria-disabled="true"] { color: var(--ink-2); cursor: wait; }
+#search-more[hidden] { display: none; }
+#search-panel mark { background: rgba(242, 91, 166, .24); color: inherit;
+  border-radius: 2px; }
 
 #searchwrap-dock { position: fixed; top: 14px; left: 14px;
   width: 320px; z-index: 6; }
@@ -192,12 +211,17 @@ pre.infobox { white-space: pre-wrap; word-break: break-all;
 
 <div id="searchwrap-dock">
   <div id="searchwrap">
-    <input id="search" placeholder="搜索作品 / 人物 / 角色 ✨"
+    <input id="search" type="search" maxlength="128"
+           placeholder="输入名称或片段 ✨"
            autocomplete="off" role="combobox" aria-label="搜索作品、人物或角色"
            aria-autocomplete="list" aria-controls="hits" aria-expanded="false">
+    <div id="search-panel" hidden>
+      <div id="hits" role="listbox" aria-label="搜索建议"></div>
+      <div id="search-status" role="status" aria-live="polite"></div>
+      <button id="search-more" type="button" hidden>查看更多结果</button>
+    </div>
     <button id="dice" type="button" title="随机传送"
             aria-label="随机传送">🎲</button>
-    <div id="hits" role="listbox" aria-label="搜索建议"></div>
   </div>
 </div>
 <div id="leftcol">

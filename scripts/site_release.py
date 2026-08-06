@@ -10,12 +10,20 @@ from __future__ import annotations
 
 import gzip
 import hashlib
-from typing import Any
+from functools import cache
+from numbers import Integral
+from pathlib import Path
+from typing import Any, Final
 
 import orjson
+from opencc import OpenCC
 
-SCHEMA = "structural-site-v1"
-PROFILE = "explorer-v1"
+SITE_CONTRACT_PATH = Path(__file__).with_name("site-contract.json")
+SITE_CONTRACT: dict[str, Any] = orjson.loads(SITE_CONTRACT_PATH.read_bytes())
+SITE_LIMITS: dict[str, Any] = SITE_CONTRACT["limits"]
+
+SCHEMA = str(SITE_CONTRACT["schema"])
+PROFILE = str(SITE_CONTRACT["profile"])
 
 # ---- EntityKey:kind << 24 | source_id ----
 KIND_SUBJECT = 1
@@ -30,14 +38,31 @@ KIND_NAMES = {
 MAX_SOURCE_ID = (1 << 24) - 1
 
 # ---- u24 反向索引(VisualRank by EntityKey)----
-RANK_SENTINEL = 0xFFFFFF
-RANK_ENCODING = "u24le"
+RANK_SENTINEL = int(SITE_CONTRACT["rank"]["sentinel"])
+RANK_ENCODING = str(SITE_CONTRACT["rank"]["encoding"])
 
-# ---- 成员与 pack 门禁(§9.4;256,000 是唯一自动细分触发值)----
-MEMBER_CAP = 256_000
-PACK_CAP = 80_000_000
-SEARCH_LEAF_CAP = 64_000
-SEARCH_TOP = 12
+# ---- 成员与 pack 门禁(压缩字节约束传输,解压字节约束内存)----
+MEMBER_CAP = int(SITE_LIMITS["member_cap"])
+MEMBER_RAW_CAP = int(SITE_LIMITS["member_raw_cap"])
+PACK_CAP = int(SITE_LIMITS["pack_cap"])
+SEARCH_LEAF_CAP = int(SITE_LIMITS["search_leaf_cap"])
+SEARCH_TOP = int(SITE_LIMITS["search_top"])
+SEARCH_UNICODE_VERSION = "15.0.0"
+SEARCH_FOLD = str(SITE_LIMITS["search_fold"])
+SEARCH_FOLD_MAX_EXPANSION = int(SITE_LIMITS["search_fold_max_expansion"])
+SEARCH_CASEFOLD_PATH = Path(__file__).with_name(
+    f"unicode-casefold-{SEARCH_UNICODE_VERSION}.json"
+)
+SEARCH_TRIM_CHARS: Final = (
+    "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+SEARCH_NGRAM_WIDTH = int(SITE_LIMITS["search_ngram_width"])
+SEARCH_NGRAM_BUCKETS = int(SITE_LIMITS["search_ngram_buckets"])
+SEARCH_NGRAM_MEMBER_RANKS = int(SITE_LIMITS["search_ngram_member_ranks"])
+# 发布可确定性缩小该值，客户端将它视为编译期上限。
+SEARCH_ALIAS_BLOCK_RANKS_MAX = int(SITE_LIMITS["search_alias_block_ranks_max"])
 TEXT_P99_CAP = 75_000
 NAME_P99_CAP = 64_000
 
@@ -74,6 +99,39 @@ TEXT_FAMILIES = (
     "episode-description",
     "fact-summary",
 )
+
+
+def release_limits(
+    *, search_alias_block_ranks: int = SEARCH_ALIAS_BLOCK_RANKS_MAX
+) -> dict[str, Any]:
+    """Return the complete manifest limits contract for this profile."""
+
+    return {
+        "member_cap": MEMBER_CAP,
+        "member_raw_cap": MEMBER_RAW_CAP,
+        "pack_cap": PACK_CAP,
+        "fact_buckets": FACT_BUCKETS,
+        "fact_inline": FACT_INLINE,
+        "episode_inline": EPISODE_INLINE,
+        "page_size": PAGE_SIZE,
+        "entity_block_ids": ENTITY_BLOCK_IDS,
+        "episode_block_subjects": EPISODE_BLOCK_SUBJECTS,
+        "search_leaf_cap": SEARCH_LEAF_CAP,
+        "search_top": SEARCH_TOP,
+        "search_fold": SEARCH_FOLD,
+        "search_ngram_width": SEARCH_NGRAM_WIDTH,
+        "search_ngram_buckets": SEARCH_NGRAM_BUCKETS,
+        "search_ngram_member_ranks": SEARCH_NGRAM_MEMBER_RANKS,
+        "search_alias_block_ranks": search_alias_block_ranks,
+        "cache_budget": {
+            "total": 64_000_000,
+            "names": 12_000_000,
+            "structure": 24_000_000,
+            "search": 8_000_000,
+            "text": 20_000_000,
+        },
+    }
+
 
 # ---- 事实种类:角色顺序即参与者的规范顺序 ----
 FACT_KINDS = (
@@ -113,7 +171,7 @@ FACT_ATTRS: dict[str, tuple[str, ...]] = {
 # 磁盘元组布局(参与 schema_digest;两端解码器的唯一权威)
 TUPLE_SCHEMAS: dict[str, Any] = {
     "file": ["bytes", "sha256", "content_addressed_name"],
-    "name": ["name", "name_cn|null"],
+    "name": ["name", "name_cn|null", "entity_kind"],
     "entity": {
         "subject": [
             "type",
@@ -181,10 +239,27 @@ TUPLE_SCHEMAS: dict[str, Any] = {
     },
     "text_member": {"i": "identities", "t": "texts"},
     "episode_text_member": {"i": "subject_ids", "t": "[[episode_id, text]]"},
-    "search_entry": ["norm", "display", "rank"],
+    "search_entry": ["norm", "matched", "rank", "display", "entity_kind"],
+    "search_alias": {
+        "row": ["aliases[[norm,matched]]", "display", "entity_kind"],
+        "block_ranks": SEARCH_ALIAS_BLOCK_RANKS_MAX,
+    },
     "search_node": {
         "leaf": ["offset", "length"],
         "internal": ["top_offset", "top_length"],
+    },
+    "search_ngram": {
+        "hash": "fnv1a32-codepoint",
+        "width": SEARCH_NGRAM_WIDTH,
+        "buckets": SEARCH_NGRAM_BUCKETS,
+        "index": (
+            "u32le bucket member starts, member byte offsets, "
+            "member first/last ranks, then bucket posting counts"
+        ),
+        "postings": (
+            "gzip members of at most "
+            f"{SEARCH_NGRAM_MEMBER_RANKS} u24le VisualRanks"
+        ),
     },
 }
 
@@ -200,13 +275,39 @@ def gzip_member(value: Any, level: int) -> bytes:
     return gzip.compress(canonical_json(value), compresslevel=level, mtime=0)
 
 
+def member_raw_size(member: bytes) -> int:
+    """Read gzip ISIZE; baker-created members are always below 4 GiB."""
+
+    if len(member) < 18 or member[:2] != b"\x1f\x8b":
+        raise ValueError("payload is not a gzip member")
+    return int.from_bytes(member[-4:], "little")
+
+
+def member_fits(
+    member: bytes,
+    *,
+    cap: int = MEMBER_CAP,
+    raw_cap: int = MEMBER_RAW_CAP,
+) -> bool:
+    return len(member) <= cap and member_raw_size(member) <= raw_cap
+
+
 def require_member_size(
-    member: bytes, label: str, cap: int = MEMBER_CAP
+    member: bytes,
+    label: str,
+    cap: int = MEMBER_CAP,
+    raw_cap: int = MEMBER_RAW_CAP,
 ) -> None:
-    """所有 gzip 成员共用的硬门禁；调用方可用更严格的族上限。"""
+    """所有 gzip 成员共用压缩与解压硬门禁。"""
     if len(member) > cap:
         raise ValueError(
             f"{label}: gzip member {len(member):,} exceeds member cap {cap:,}"
+        )
+    raw_size = member_raw_size(member)
+    if raw_size > raw_cap:
+        raise ValueError(
+            f"{label}: decoded gzip member {raw_size:,} exceeds "
+            f"decoded member cap {raw_cap:,}"
         )
 
 
@@ -223,7 +324,7 @@ def gzip_pages(
 
     def emit(chunk: list[Any]) -> None:
         member = gzip_member(chunk, level)
-        if len(member) > cap and len(chunk) > 1:
+        if not member_fits(member, cap=cap) and len(chunk) > 1:
             mid = len(chunk) // 2
             emit(chunk[:mid])
             emit(chunk[mid:])
@@ -247,16 +348,139 @@ def published_object_name(logical_name: str, digest: str) -> str:
     return f"{digest}-{logical_name}"
 
 
+def search_gram_bucket(gram: str) -> int:
+    """Map one Unicode-codepoint bigram to its deterministic posting bucket."""
+    if len(gram) != SEARCH_NGRAM_WIDTH:
+        raise ValueError(
+            f"search gram must contain {SEARCH_NGRAM_WIDTH} code points"
+        )
+    value = (2166136261 ^ SEARCH_NGRAM_WIDTH) & 0xFFFFFFFF
+    for char in gram:
+        value ^= ord(char)
+        value = (value * 16777619) & 0xFFFFFFFF
+    return value & (SEARCH_NGRAM_BUCKETS - 1)
+
+
+@cache
+def search_charmap() -> dict[str, str]:
+    """Load the complete, versioned Unicode case-fold table.
+
+    The query alphabet is not limited to characters already present in the
+    current dump: a user may type an uppercase or compatibility form that the
+    source names never contain. The checked-in table makes weekly artifacts
+    independent from the producer's Python and Unicode database versions.
+    """
+
+    value = orjson.loads(SEARCH_CASEFOLD_PATH.read_bytes())
+    if not isinstance(value, dict) or any(
+        not isinstance(key, str)
+        or len(key) != 1
+        or not isinstance(folded, str)
+        or not folded
+        for key, folded in value.items()
+    ):
+        raise ValueError(f"invalid case-fold table: {SEARCH_CASEFOLD_PATH}")
+    mappings: dict[str, str] = value
+    if any(
+        len(folded) > SEARCH_FOLD_MAX_EXPANSION for folded in mappings.values()
+    ):
+        raise ValueError(
+            "case-fold expansion exceeds "
+            f"{SEARCH_FOLD_MAX_EXPANSION} code points"
+        )
+    if any(
+        "".join(mappings.get(char, char) for char in folded) != folded
+        for folded in mappings.values()
+    ):
+        raise ValueError(
+            f"non-idempotent case-fold table: {SEARCH_CASEFOLD_PATH}"
+        )
+    return mappings
+
+
+def search_fold(text: str) -> str:
+    """Apply the total, deterministic and idempotent query fold."""
+
+    charmap = search_charmap()
+    trimmed = text.strip(SEARCH_TRIM_CHARS)
+    return "".join(charmap.get(char, char) for char in trimmed)
+
+
+@cache
+def _opencc(config: str) -> OpenCC:
+    return OpenCC(config)
+
+
+_JAPANESE_RANGES: Final = (
+    (0x3040, 0x30FF),  # Hiragana and Katakana
+    (0x31F0, 0x31FF),  # Katakana phonetic extensions
+    (0xFF66, 0xFF9D),  # Half-width Katakana
+)
+
+
+def _has_japanese_script(text: str) -> bool:
+    return any(
+        start <= ord(char) <= end
+        for char in text
+        for start, end in _JAPANESE_RANGES
+    )
+
+
+def search_aliases(name: str, name_cn: str) -> list[tuple[str, str]]:
+    """Derive indexed aliases without treating language rules as equality.
+
+    Chinese simplified/traditional and Japanese old/new forms are independent
+    whole-string recall aliases. Japanese conversion is only enabled when the
+    source contains Japanese script, avoiding ambiguous Han-only conversions
+    such as 沪 -> 濾. The original spelling always remains indexed.
+    """
+
+    aliases: list[tuple[str, str]] = []
+    seen_keys: set[str] = set()
+    sources = dict.fromkeys(text for text in (name_cn, name) if text)
+    for source in sources:
+        variants = [
+            source,
+            _opencc("t2s").convert(source),
+            _opencc("s2t").convert(source),
+        ]
+        if _has_japanese_script(source):
+            variants.extend(
+                (
+                    _opencc("jp2t").convert(source),
+                    _opencc("t2jp").convert(source),
+                )
+            )
+        for matched in dict.fromkeys(variants):
+            key = search_fold(matched)
+            if key and key not in seen_keys:
+                seen_keys.add(key)
+                aliases.append((key, matched))
+    return aliases
+
+
+def is_entity_kind(value: object) -> bool:
+    return (
+        isinstance(value, Integral)
+        and not isinstance(value, bool)
+        and int(value) in KINDS
+    )
+
+
 def entity_key(kind: int, source_id: int) -> int:
     """EntityKey = kind << 24 | source_id;越界即格式升级,不截断。"""
-    if kind not in KINDS:
+    if not is_entity_kind(kind):
         raise ValueError(f"unknown entity kind {kind}")
-    if not 0 <= source_id <= MAX_SOURCE_ID:
+    if (
+        not isinstance(source_id, Integral)
+        or isinstance(source_id, bool)
+        or not 0 <= int(source_id) <= MAX_SOURCE_ID
+    ):
         raise ValueError(
             f"source id {source_id} exceeds 24-bit EntityKey; "
             "upgrade the key format instead of truncating"
         )
-    return (kind << 24) | source_id
+    return (int(kind) << 24) | int(source_id)
 
 
 def canonical_fact(
@@ -331,7 +555,7 @@ def manifest_version(manifest_sans_version: dict[str, Any]) -> str:
 
 def schema_digest() -> str:
     """实体、事实、文本引用和磁盘元组定义的摘要。"""
-    return sha256_hex(
+    digest = sha256_hex(
         canonical_json(
             {
                 "schema": SCHEMA,
@@ -342,6 +566,12 @@ def schema_digest() -> str:
             }
         )
     )
+    expected = str(SITE_CONTRACT["schema_digest"])
+    if digest != expected:
+        raise ValueError(
+            f"{SITE_CONTRACT_PATH} schema_digest is stale: {digest}"
+        )
+    return digest
 
 
 # explorer-v1 字段策略:每个源字段必须显式声明(§3)

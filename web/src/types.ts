@@ -42,6 +42,7 @@ export interface Manifest {
   text_layout: Record<string, TextLayout>;
   limits: {
     member_cap: number;
+    member_raw_cap: number;
     pack_cap: number;
     fact_buckets: number;
     fact_inline: number;
@@ -51,6 +52,11 @@ export interface Manifest {
     episode_block_subjects: number;
     search_leaf_cap: number;
     search_top: number;
+    search_fold: string;
+    search_ngram_width: number;
+    search_ngram_buckets: number;
+    search_ngram_member_ranks: number;
+    search_alias_block_ranks: number;
     cache_budget: {
       total: number;
       names: number;
@@ -94,7 +100,13 @@ export interface Geometry {
   sparse: Map<number, [number, number, number]>;
 }
 
-export type NameRow = [original: string, chinese: string | null];
+export type EntityKind = 1 | 2 | 3;
+
+export type NameRow = [
+  original: string,
+  chinese: string | null,
+  entityKind: EntityKind,
+];
 
 /** 按 rank 分块、按需填充的名字缓存。 */
 export interface Names {
@@ -102,7 +114,21 @@ export interface Names {
   get(rank: number): string | null;
   /** 原名与中文名的完整行(Data.entity 组合结构实体用)。 */
   row(rank: number): NameRow | null;
-  load(ranks: Iterable<number>): Promise<void>;
+  /** 可选信号取消尚未完成的名称块读取。 */
+  load(ranks: Iterable<number>, signal?: AbortSignal): Promise<void>;
+}
+
+export type SearchAlias = [normalized: string, matched: string];
+export type SearchAliasRow = [
+  aliases: SearchAlias[],
+  display: string,
+  entityKind: EntityKind,
+];
+
+/** 子串候选最终校验所用的派生搜索别名，不污染实体名称权威。 */
+export interface SearchAliases {
+  row(rank: number): SearchAliasRow | null;
+  load(ranks: Iterable<number>, signal?: AbortSignal): Promise<void>;
 }
 
 // ---- 结构语义契约(设计 §7)----
@@ -271,7 +297,14 @@ export interface Mappings {
   character_role: Record<string, string>;
 }
 
-export type SearchEntry = [norm: string, display: string, rank: number];
+/** 搜索投影内嵌主名称和种类，避免常规前缀联想扇出读取名字块。 */
+export type SearchEntry = [
+  norm: string,
+  matched: string,
+  rank: number,
+  display: string,
+  entityKind: EntityKind,
+];
 
 export type SearchNode =
   | { l: [number, number] }

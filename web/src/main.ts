@@ -13,6 +13,7 @@ import {
   loadGzJson,
   loadManifest,
   openNames,
+  openSearchAliases,
   openGeometry,
   pointByRank,
   rankOfKey,
@@ -63,6 +64,7 @@ async function boot(): Promise<void> {
   const gstream = openGeometry(manifest);
   const geo = gstream.geo;
   const names = openNames(manifest);
+  const searchAliases = openSearchAliases(manifest);
   const data = new Data(manifest, names);
 
   const drawer = new Drawer($("#drawer"), {
@@ -476,8 +478,17 @@ async function boot(): Promise<void> {
   };
 
   // ---- 搜索(命中 → flyTo + 选中 + 亮邻居)----
-  new Search($("#search"), $("#hits"), (rank) =>
-    runTask(select(rank, "fly"), "搜索结果加载"),
+  new Search(
+    {
+      box: $("#search"),
+      panel: $("#search-panel"),
+      list: $("#hits"),
+      status: $("#search-status"),
+      more: $("#search-more"),
+    },
+    searchAliases,
+    manifest.limits.search_top,
+    (rank) => runTask(select(rank, "fly"), "搜索结果加载"),
   );
 
   // ---- 骰子:随机传送(跳过隐藏节点;冷启动屏同款)----

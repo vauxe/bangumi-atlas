@@ -73,7 +73,7 @@ function makeDrawer(
     geo: { key: new Uint32Array(256) },
     names: {
       get: (rank: number) => `节点 ${rank}`,
-      row: (rank: number) => [`节点 ${rank}`, null],
+      row: (rank: number) => [`节点 ${rank}`, null, 1] as const,
       load: async () => undefined,
     },
     manifest: {},
@@ -259,7 +259,7 @@ test("renders every published common neighbor instead of dropping the tail", asy
   const drawer = makeDrawer(element, {
     names: {
       get: (rank) => `节点 ${rank}`,
-      row: (rank) => [`节点 ${rank}`, null],
+      row: (rank) => [`节点 ${rank}`, null, 1],
       load: async (ranks) => {
         loaded.push(...ranks);
       },

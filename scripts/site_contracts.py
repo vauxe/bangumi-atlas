@@ -98,9 +98,11 @@ def validate_name_pack(
                 )
             if any(
                 not isinstance(row, list)
-                or len(row) != 2
+                or len(row) != 3
                 or not isinstance(row[0], str)
                 or (row[1] is not None and not isinstance(row[1], str))
+                or type(row[2]) is not int
+                or row[2] not in (1, 2, 3)
                 for row in rows
             ):
                 raise ValueError(f"names block {block}: invalid row")

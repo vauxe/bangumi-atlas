@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import random
 import sys
 import tempfile
 import unittest
@@ -19,32 +20,283 @@ class StreamingPackTests(unittest.TestCase):
     def test_pack_file_streams_members_and_preserves_offsets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             site = Path(directory)
+            first = bake_site.sr.gzip_member("abc", 1)
+            second = bake_site.sr.gzip_member("defg", 1)
             with patch.object(bake_site, "SITE", site):
                 pack = bake_site.PackFile("rows.pack")
 
-                self.assertEqual(pack.add(b"abc"), [0, 3])
-                self.assertEqual(pack.add(b"defg"), [3, 4])
-                self.assertEqual((site / "rows.pack").read_bytes(), b"abcdefg")
+                self.assertEqual(pack.add(first), [0, len(first)])
+                self.assertEqual(pack.add(second), [len(first), len(second)])
+                self.assertEqual(
+                    (site / "rows.pack").read_bytes(), first + second
+                )
                 pack.write()
 
-            self.assertEqual((site / "rows.pack").read_bytes(), b"abcdefg")
+            self.assertEqual((site / "rows.pack").read_bytes(), first + second)
 
     def test_rollover_pack_streams_each_bounded_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             site = Path(directory)
+            first = bake_site.sr.gzip_member("abcdefghij", 1)
+            second = bake_site.sr.gzip_member("def", 1)
+            third = bake_site.sr.gzip_member("gh", 1)
+            pack_cap = len(second) + len(third)
+            self.assertLessEqual(len(first), pack_cap)
+            self.assertGreater(len(first) + len(second), pack_cap)
             with (
                 patch.object(bake_site, "SITE", site),
-                patch.object(bake_site.sr, "PACK_CAP", 5),
+                patch.object(bake_site.sr, "PACK_CAP", pack_cap),
             ):
                 pack = bake_site.RolloverPack("text")
 
-                self.assertEqual(pack.add(b"abc"), [0, 0, 3])
-                self.assertEqual(pack.add(b"def"), [1, 0, 3])
-                self.assertEqual(pack.add(b"gh"), [1, 3, 2])
+                self.assertEqual(pack.add(first), [0, 0, len(first)])
+                self.assertEqual(pack.add(second), [1, 0, len(second)])
+                self.assertEqual(pack.add(third), [1, len(second), len(third)])
                 self.assertEqual(pack.files, ["text-0.pack", "text-1.pack"])
-                self.assertEqual((site / "text-0.pack").read_bytes(), b"abc")
-                self.assertEqual((site / "text-1.pack").read_bytes(), b"defgh")
+                self.assertEqual((site / "text-0.pack").read_bytes(), first)
+                self.assertEqual(
+                    (site / "text-1.pack").read_bytes(), second + third
+                )
                 pack.write()
+
+
+class SearchIndexTests(unittest.TestCase):
+    def test_alias_pack_halves_block_width_until_members_fit(self) -> None:
+        random_text = random.Random(0).randbytes(180_000).hex()
+        cases = {
+            "compressed": random_text,
+            "decoded": "x" * 1_100_000,
+        }
+        for label, display in cases.items():
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as directory:
+                    site = Path(directory)
+                    rows = [[[], display, 1], [[], display, 1]]
+                    with (
+                        patch.object(bake_site, "SITE", site),
+                        patch.object(
+                            bake_site.sr, "SEARCH_ALIAS_BLOCK_RANKS_MAX", 2
+                        ),
+                    ):
+                        block_size = bake_site.write_search_alias_pack(rows)
+
+                    index = bake_site.np.frombuffer(
+                        (site / "search.alias.idx").read_bytes(), dtype="<u4"
+                    )
+                    pack = (site / "search.alias.pack").read_bytes()
+
+                self.assertEqual(block_size, 1)
+                self.assertEqual(len(index), 3)
+                self.assertTrue(
+                    all(
+                        len(
+                            bake_site.orjson.loads(
+                                gzip.decompress(pack[int(start) : int(end)])
+                            )
+                        )
+                        == 1
+                        for start, end in zip(
+                            index[:-1], index[1:], strict=True
+                        )
+                    )
+                )
+
+    def test_search_index_publishes_complete_fold_and_language_aliases(
+        self,
+    ) -> None:
+        names = ["Straße", "虎伥", "沪"]
+        cn_names = ["", "", ""]
+        kinds = [1, 3, 1]
+
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory)
+            with patch.object(bake_site, "SITE", site):
+                bake_site.build_search_index(names, cn_names, kinds)
+
+            charmap = bake_site.orjson.loads(
+                (site / "charmap.json").read_bytes()
+            )
+            alias_index = bake_site.np.frombuffer(
+                (site / "search.alias.idx").read_bytes(), dtype="<u4"
+            )
+            alias_pack = (site / "search.alias.pack").read_bytes()
+            aliases: list[list[object]] = []
+            for start, end in zip(
+                alias_index[:-1], alias_index[1:], strict=True
+            ):
+                aliases.extend(
+                    bake_site.orjson.loads(
+                        gzip.decompress(alias_pack[int(start) : int(end)])
+                    )
+                )
+
+        self.assertEqual(charmap["ẞ"], "ss")
+        self.assertEqual(
+            {key for key, _matched in aliases[1][0]},
+            {"虎伥", "虎倀"},
+        )
+        self.assertEqual(
+            {key for key, _matched in aliases[2][0]},
+            {"沪", "滬"},
+        )
+        self.assertEqual(aliases[1][1:], ["虎伥", 3])
+
+    def test_search_tree_handles_long_shared_prefix_iteratively(self) -> None:
+        shared = "a" * 1_100
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory)
+            with (
+                patch.object(bake_site, "SITE", site),
+                patch.object(bake_site.sr, "SEARCH_LEAF_CAP", 1),
+            ):
+                bake_site.build_search_index(
+                    [f"{shared}b", f"{shared}c"],
+                    ["", ""],
+                    [1, 1],
+                )
+
+            search_dir = bake_site.orjson.loads(
+                (site / "search.idx.json").read_bytes()
+            )
+
+        self.assertIn(shared, search_dir)
+
+    def test_bigram_postings_preserve_global_rank_order(self) -> None:
+        names = ["The Garden", "境界線上のホライゾン", "月姫"]
+        cn_names = ["空之境界", "", "月之公主"]
+        kinds = [1, 2, 3]
+
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory)
+            with (
+                patch.object(bake_site, "SITE", site),
+                patch.object(bake_site.sr, "SEARCH_NGRAM_MEMBER_RANKS", 1),
+            ):
+                bake_site.build_search_index(names, cn_names, kinds)
+
+            index = bake_site.np.frombuffer(
+                (site / "search.ngram.idx").read_bytes(), dtype="<u4"
+            )
+            postings = (site / "search.ngram.pack").read_bytes()
+
+        bucket_count = bake_site.sr.SEARCH_NGRAM_BUCKETS
+        bucket_members = index[: bucket_count + 1]
+        member_count = int(bucket_members[-1])
+        offsets_start = bucket_count + 1
+        first_start = offsets_start + member_count + 1
+        last_start = first_start + member_count
+        counts_start = last_start + member_count
+        offsets = index[offsets_start:first_start]
+        counts = index[counts_start:]
+        self.assertEqual(len(index), bucket_count * 2 + member_count * 3 + 2)
+
+        def ranks_for(gram: str) -> list[int]:
+            bucket = bake_site.sr.search_gram_bucket(gram)
+            raw = b""
+            for member in range(
+                int(bucket_members[bucket]),
+                int(bucket_members[bucket + 1]),
+            ):
+                start, end = int(offsets[member]), int(offsets[member + 1])
+                raw += gzip.decompress(postings[start:end])
+            ranks = [
+                raw[i] | (raw[i + 1] << 8) | (raw[i + 2] << 16)
+                for i in range(0, len(raw), 3)
+            ]
+            self.assertEqual(len(ranks), int(counts[bucket]))
+            return ranks
+
+        self.assertEqual(ranks_for("之境"), [0])
+        self.assertEqual(ranks_for("境界"), [0, 1])
+
+    def test_internal_search_member_keeps_an_exact_low_rank_match(
+        self,
+    ) -> None:
+        names = [f"a-name-{rank}" for rank in range(14)] + ["a"]
+        cn_names = [""] * len(names)
+        kinds = [1] * len(names)
+
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory)
+            with (
+                patch.object(bake_site, "SITE", site),
+                patch.object(bake_site.sr, "SEARCH_LEAF_CAP", 1),
+            ):
+                bake_site.build_search_index(names, cn_names, kinds)
+
+            search_dir = bake_site.orjson.loads(
+                (site / "search.idx.json").read_bytes()
+            )
+            offset, length = search_dir["a"]["t"]
+            rows = bake_site.orjson.loads(
+                gzip.decompress(
+                    (site / "search.pack").read_bytes()[
+                        offset : offset + length
+                    ]
+                )
+            )
+
+        self.assertEqual(rows[0], ["a", "a", 14, "a", 1])
+        self.assertEqual(len(rows), bake_site.sr.SEARCH_TOP + 1)
+
+    def test_internal_search_member_keeps_every_exact_match(self) -> None:
+        names = ["a"] * (bake_site.sr.SEARCH_TOP + 2)
+        cn_names = [""] * len(names)
+        kinds = [1] * len(names)
+
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory)
+            with (
+                patch.object(bake_site, "SITE", site),
+                patch.object(bake_site.sr, "SEARCH_LEAF_CAP", 1),
+            ):
+                bake_site.build_search_index(names, cn_names, kinds)
+
+            search_dir = bake_site.orjson.loads(
+                (site / "search.idx.json").read_bytes()
+            )
+            offset, length = search_dir["a"]["t"]
+            rows = bake_site.orjson.loads(
+                gzip.decompress(
+                    (site / "search.pack").read_bytes()[
+                        offset : offset + length
+                    ]
+                )
+            )
+
+        self.assertEqual([row[2] for row in rows], list(range(len(names))))
+
+    def test_internal_search_top_counts_unique_entities_not_alias_rows(
+        self,
+    ) -> None:
+        names = [f"a-name-{rank}" for rank in range(14)]
+        cn_names = [f"a-alias-{rank}" for rank in range(14)]
+        kinds = [1] * len(names)
+
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory)
+            with (
+                patch.object(bake_site, "SITE", site),
+                patch.object(bake_site.sr, "SEARCH_LEAF_CAP", 1),
+            ):
+                bake_site.build_search_index(names, cn_names, kinds)
+
+            search_dir = bake_site.orjson.loads(
+                (site / "search.idx.json").read_bytes()
+            )
+            offset, length = search_dir["a"]["t"]
+            rows = bake_site.orjson.loads(
+                gzip.decompress(
+                    (site / "search.pack").read_bytes()[
+                        offset : offset + length
+                    ]
+                )
+            )
+
+        self.assertEqual(
+            [row[2] for row in rows],
+            list(range(bake_site.sr.SEARCH_TOP)),
+        )
 
 
 class WindowedEntityPackTests(unittest.TestCase):
