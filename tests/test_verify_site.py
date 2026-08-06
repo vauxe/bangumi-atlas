@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -90,6 +91,24 @@ class ExpectedFactStoreTests(unittest.TestCase):
 
 
 class RoutingContractTests(unittest.TestCase):
+    def test_binary_array_loader_rejects_trailing_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "index.bin"
+            path.write_bytes(b"\x01\x00\x00\x00x")
+            with (
+                patch.object(verify_site, "site_file", return_value=path),
+                self.assertRaisesRegex(ValueError, "u32 array"),
+            ):
+                verify_site.load_array("index.bin", "<u4")
+
+    def test_fact_keys_use_the_browser_decimal_spelling(self) -> None:
+        self.assertEqual(
+            verify_site.canonical_entity_key("16777217"), 16777217
+        )
+        for value in ("016777217", "+16777217", " 16777217", "-1"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                verify_site.canonical_entity_key(value)
+
     def test_verifier_caps_gzip_output_while_decompressing(self) -> None:
         member = gzip.compress(b"x" * 1_000, compresslevel=9, mtime=0)
 
@@ -227,6 +246,32 @@ class RoutingContractTests(unittest.TestCase):
             )
         )
 
+    def test_range_directory_rejects_noncanonical_wire_rows(self) -> None:
+        self.assertTrue(
+            verify_site.range_routes_are_valid(
+                [[1, 3, 0, 0, 10]],
+                [[1, 3]],
+                row_length=5,
+                file_count=1,
+            )
+        )
+        for ranges, identities in (
+            ([[1, 3, -1, 0, 10]], [[1, 3]]),
+            ([[1, 3, 1, 0, 10]], [[1, 3]]),
+            ([[1, 3, 0, 0, 10, 11]], [[1, 3]]),
+            ([[1, 3, 0, 0, 10]], [[1, 1, 3]]),
+            ([[1, 3, 0, 0, 10]], [[True, 3]]),
+        ):
+            with self.subTest(ranges=ranges, identities=identities):
+                self.assertFalse(
+                    verify_site.range_routes_are_valid(
+                        ranges,
+                        identities,
+                        row_length=5,
+                        file_count=1,
+                    )
+                )
+
     def test_fact_directory_last_key_routes_to_the_same_member(self) -> None:
         index = {
             "buckets": 2,
@@ -246,11 +291,108 @@ class RoutingContractTests(unittest.TestCase):
         identities = [[(1, 10), (1, 20)], [(1, 21), (1, 30)]]
 
         self.assertTrue(
-            verify_site.episode_text_routes_are_valid(ranges, identities)
+            verify_site.episode_text_routes_are_valid(
+                ranges, identities, file_count=1
+            )
         )
         ranges[0][0] = 2
         self.assertFalse(
-            verify_site.episode_text_routes_are_valid(ranges, identities)
+            verify_site.episode_text_routes_are_valid(
+                ranges, identities, file_count=1
+            )
+        )
+
+    def test_episode_text_directory_rejects_duplicate_or_invalid_ids(
+        self,
+    ) -> None:
+        ranges = [[1, 1, 0, 0, 10, 10, 20]]
+        self.assertFalse(
+            verify_site.episode_text_routes_are_valid(
+                ranges, [[(1, 10), (1, 10)]], file_count=1
+            )
+        )
+        ranges[0][2] = -1
+        self.assertFalse(
+            verify_site.episode_text_routes_are_valid(
+                ranges, [[(1, 10), (1, 20)]], file_count=1
+            )
+        )
+
+    def test_incidence_masks_require_each_unique_participant_once(
+        self,
+    ) -> None:
+        subject = sr.entity_key(sr.KIND_SUBJECT, 1)
+        person = sr.entity_key(sr.KIND_PERSON, 2)
+        participants = (person, subject)
+        seen = np.zeros(1, dtype=np.uint8)
+
+        self.assertTrue(
+            verify_site.record_fact_participant(seen, 0, person, participants)
+        )
+        self.assertFalse(
+            verify_site.record_fact_participant(seen, 0, person, participants)
+        )
+        np.testing.assert_array_equal(seen, [1])
+        self.assertTrue(
+            verify_site.record_fact_participant(seen, 0, subject, participants)
+        )
+        np.testing.assert_array_equal(seen, [3])
+
+    def test_voice_incidence_requires_exact_shape_and_presence_bit(
+        self,
+    ) -> None:
+        valid = [0, 1, 1, [2, 3], 4, 1]
+        self.assertTrue(
+            verify_site.incidence_tuple_is_valid("VOICE_CREDIT", valid)
+        )
+        self.assertFalse(
+            verify_site.incidence_tuple_is_valid(
+                "VOICE_CREDIT", [*valid, "ignored"]
+            )
+        )
+        invalid_presence = [*valid]
+        invalid_presence[-1] = 2
+        self.assertFalse(
+            verify_site.incidence_tuple_is_valid(
+                "VOICE_CREDIT", invalid_presence
+            )
+        )
+
+    def test_layout_projection_is_rank_aligned_and_value_exact(self) -> None:
+        projection = verify_site.expected_layout_projection(
+            {
+                "key": np.array([10, 20, 30], dtype=np.uint32),
+                "collect": np.array([0, 7, 3], dtype=np.int64),
+                "year": np.array([2000, 2001, 2002], dtype=np.uint16),
+                "isolated": np.array([False, True, False]),
+            }
+        )
+
+        np.testing.assert_array_equal(projection["key"], [20, 30, 10])
+        np.testing.assert_array_equal(projection["year"], [2001, 2002, 2000])
+        np.testing.assert_array_equal(
+            projection["size"],
+            np.round(18 * np.log2(1 + np.array([7, 3, 0]))).astype(np.uint8),
+        )
+        np.testing.assert_array_equal(projection["isolated"], [1, 0, 0])
+        self.assertEqual(
+            verify_site.expected_year_range(
+                np.array([0, 701, 1900, 2035, 9000], dtype=np.uint16)
+            ),
+            [1900, 2035],
+        )
+
+    def test_edges_require_declared_count_and_valid_endpoints(self) -> None:
+        edges = np.array([0, 2, 1, 2], dtype=np.uint32)
+        self.assertTrue(
+            verify_site.edge_array_is_valid(edges, n_nodes=3, n_edges=2)
+        )
+        self.assertFalse(
+            verify_site.edge_array_is_valid(edges, n_nodes=3, n_edges=1)
+        )
+        edges[-1] = 3
+        self.assertFalse(
+            verify_site.edge_array_is_valid(edges, n_nodes=3, n_edges=2)
         )
 
 
