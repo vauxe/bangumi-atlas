@@ -5,9 +5,9 @@
 产物:site/data/ 下 manifest.json、几何 SoA bins、rank-by-key.bin、
 names pack(2,048 rank/成员)、entities/facts/episodes pack(词表、
 FactRef incidence、存在位)、四类长文本侧车 + text.idx、自适应前缀
-搜索、vocab、mappings.json、pages.pack、骨架边、标签表。
+搜索与二元字符子串候选、vocab、mappings.json、pages.pack、骨架边、标签表。
 纪律:失败与截断显式报出、行级对账,对不上非零退出;
-成员超 256,000 字节在稳定身份边界自动细分,门禁失败即终止。
+成员超过压缩或解压硬上限时在稳定身份边界自动细分,门禁失败即终止。
 """
 
 import argparse
@@ -18,6 +18,7 @@ import shutil
 import sys
 import tempfile
 import time
+from array import array
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from functools import partial
@@ -31,7 +32,6 @@ import pyarrow.parquet as pq
 import site_release as sr
 from community_labels import build_community_labels
 from layout import shape_digest
-from opencc import OpenCC
 from site_contracts import (
     read_dump_version,
     require_parquet_matches_dump,
@@ -72,11 +72,7 @@ failures: list[str] = []
 type FactRow = tuple[tuple[int, ...], tuple[Any, ...]]
 type RankLookup = dict[int, np.ndarray]
 type IncidenceEntry = tuple[int, str, list[Any]]
-
-# 归一链:日文新字体 → 繁体(jp2t) → 简体(t2s),再小写。
-# 契约:索引键与客户端查询从同一张单字映射表逐字折叠。
-_jp2t = OpenCC("jp2t")
-_t2s = OpenCC("t2s")
+type SearchEntry = tuple[str, str, int, str, int]
 
 
 def log(msg: str) -> None:
@@ -94,7 +90,13 @@ def reconcile(label: str, expected: int, actual: int) -> None:
 
 
 def jdump(obj: Any) -> bytes:
-    return orjson.dumps(obj, option=orjson.OPT_NON_STR_KEYS)
+    return sr.canonical_json(obj)
+
+
+def write_gzip_json(name: str, obj: Any, level: int) -> None:
+    member = sr.gzip_member(obj, level)
+    sr.require_member_size(member, name)
+    (SITE / name).write_bytes(member)
 
 
 def sha256_of(path: Path) -> str:
@@ -216,7 +218,7 @@ def emit_ranged(
 
     def emit(chunk: list[tuple[int, Any]]) -> None:
         gz = sr.gzip_member(encode(chunk), level)
-        if len(gz) > sr.MEMBER_CAP:
+        if not sr.member_fits(gz):
             if len(chunk) == 1:
                 raise ValueError(
                     f"single identity {chunk[0][0]} exceeds member cap; "
@@ -720,52 +722,124 @@ class IncidenceSpool:
         return int(self._present.sum()) + len(self._external)
 
 
-def fold_factory(
-    charmap: dict[str, str],
-) -> Callable[[str], str]:
-    def fold(text: str) -> str:
-        t = text.strip().lower()
-        return "".join(charmap.get(ch, ch) for ch in t)
+def write_search_alias_pack(alias_rows: Sequence[list[Any]]) -> int:
+    """Write uniform rank blocks, halving globally until every member fits."""
 
-    return fold
+    block_size = sr.SEARCH_ALIAS_BLOCK_RANKS_MAX
+    while True:
+        pack = PackFile("search.alias.pack")
+        offsets = [0]
+        oversized = False
+        for start in range(0, len(alias_rows), block_size):
+            member = sr.gzip_member(
+                alias_rows[start : start + block_size],
+                sr.GZIP_LEVELS["search"],
+            )
+            if not sr.member_fits(member):
+                oversized = True
+                break
+            pack.add(member)
+            offsets.append(pack.size)
+        if not oversized:
+            pack.write()
+            (SITE / "search.alias.idx").write_bytes(
+                np.asarray(offsets, dtype="<u4").tobytes()
+            )
+            return block_size
+        pack.discard()
+        if block_size == 1:
+            raise ValueError(
+                "single search alias row exceeds member cap; upgrade profile"
+            )
+        block_size //= 2
+        log(f"  搜索别名成员超硬上限,块宽折半为 {block_size}")
 
 
-def build_charmap(chars: set[str]) -> tuple[dict[str, str], int]:
-    """返回 (单字映射表, 被丢弃的多字映射数)。丢弃必须显式报出。"""
-    charmap = {}
-    dropped = 0
-    for c in sorted(chars):
-        m = _t2s.convert(_jp2t.convert(c))
-        if m == c:
-            continue
-        if len(m) == 1:
-            charmap[c] = m
-        else:
-            dropped += 1
-    return charmap, dropped
-
-
-def build_search_index(names: Sequence[str], cn_names: Sequence[str]) -> None:
-    """Build the adaptive prefix search index in an isolated memory scope."""
-    chars: set[str] = set()
-    for name, cn_name in zip(names, cn_names, strict=True):
-        for value in (name, cn_name):
-            if value:
-                chars.update(str(value).lower())
-    charmap, charmap_dropped = build_charmap(chars)
-    if charmap_dropped:
-        log(
-            f"  截断:charmap 丢弃多字映射 {charmap_dropped:,} 个"
-            f"(逐字契约下无法表达,原字直存)"
+def build_search_index(
+    names: Sequence[str],
+    cn_names: Sequence[str],
+    entity_kinds: Sequence[int] | np.ndarray,
+) -> int:
+    """Build prefix autocomplete and an exact substring candidate index."""
+    if len(names) != len(cn_names) or len(names) != len(entity_kinds):
+        raise ValueError("search names and entity kinds must align")
+    charmap = sr.search_charmap()
+    entries: list[SearchEntry] = []
+    alias_rows: list[list[Any]] = []
+    postings = [array("I") for _ in range(sr.SEARCH_NGRAM_BUCKETS)]
+    aligned = zip(names, cn_names, entity_kinds, strict=True)
+    for rank, (name, cn_name, entity_kind) in enumerate(aligned):
+        if not sr.is_entity_kind(entity_kind):
+            raise ValueError(f"unknown search entity kind {entity_kind}")
+        kind = int(entity_kind)
+        display = str(cn_name or name)
+        aliases = sr.search_aliases(str(name), str(cn_name or ""))
+        alias_rows.append([[list(alias) for alias in aliases], display, kind])
+        entries.extend(
+            (normalized, matched, rank, display, kind)
+            for normalized, matched in aliases
         )
-    fold = fold_factory(charmap)
-    entries: list[tuple[str, str, int]] = []
-    for rank, (name, cn_name) in enumerate(zip(names, cn_names, strict=True)):
-        for text in dict.fromkeys(str(t) for t in (name, cn_name) if t):
-            normalized = fold(text)
-            if normalized:
-                entries.append((normalized, text, rank))
-    entries.sort(key=lambda entry: entry[2])  # 全局热度序
+        rank_buckets = {
+            sr.search_gram_bucket(
+                normalized[start : start + sr.SEARCH_NGRAM_WIDTH]
+            )
+            for normalized, _matched in aliases
+            for start in range(len(normalized) - sr.SEARCH_NGRAM_WIDTH + 1)
+        }
+        for bucket in rank_buckets:
+            postings[bucket].append(rank)
+
+    alias_block_size = write_search_alias_pack(alias_rows)
+
+    # 每个规范化名称的连续二元字符进入固定散列桶；桶内只保存按
+    # VisualRank 升序的 u24 候选。散列碰撞由客户端读取完整名称后过滤，
+    # 因而只增加少量候选，不会漏掉或伪造最终命中。
+    ngram_pack = PackFile("search.ngram.pack")
+    bucket_members = np.empty(sr.SEARCH_NGRAM_BUCKETS + 1, dtype="<u4")
+    ngram_counts = np.empty(sr.SEARCH_NGRAM_BUCKETS, dtype="<u4")
+    member_first: list[int] = []
+    member_last: list[int] = []
+    for bucket, ranks in enumerate(postings):
+        bucket_members[bucket] = len(ngram_pack.sizes)
+        ngram_counts[bucket] = len(ranks)
+        for start in range(0, len(ranks), sr.SEARCH_NGRAM_MEMBER_RANKS):
+            values = np.asarray(
+                ranks[start : start + sr.SEARCH_NGRAM_MEMBER_RANKS],
+                dtype="<u4",
+            )
+            encoded = values.view(np.uint8).reshape(-1, 4)[:, :3].tobytes()
+            ngram_pack.add(
+                gzip.compress(
+                    encoded,
+                    compresslevel=sr.GZIP_LEVELS["search"],
+                    mtime=0,
+                )
+            )
+            member_first.append(int(values[0]))
+            member_last.append(int(values[-1]))
+    bucket_members[-1] = len(ngram_pack.sizes)
+    ngram_pack.write()
+    member_offsets = np.empty(len(ngram_pack.sizes) + 1, dtype="<u4")
+    member_offsets[0] = 0
+    np.cumsum(ngram_pack.sizes, dtype=np.uint32, out=member_offsets[1:])
+    (SITE / "search.ngram.idx").write_bytes(
+        bucket_members.tobytes()
+        + member_offsets.tobytes()
+        + np.asarray(member_first, dtype="<u4").tobytes()
+        + np.asarray(member_last, dtype="<u4").tobytes()
+        + ngram_counts.tobytes()
+    )
+    ngram_size = ngram_pack.size
+    ngram_postings = sum(len(ranks) for ranks in postings)
+    del (
+        postings,
+        bucket_members,
+        member_offsets,
+        member_first,
+        member_last,
+        ngram_counts,
+    )
+
     search_pack = PackFile("search.pack")
     search_level = sr.GZIP_LEVELS["search"]
     search_dir: dict[str, Any] = {}
@@ -776,33 +850,49 @@ def build_search_index(names: Sequence[str], cn_names: Sequence[str]) -> None:
         # Python 字符串按码点索引;客户端以 codePointAt 对齐同一规则
         return normalized[prefix_len]
 
-    def emit_search(prefix: str, items: list[tuple[str, str, int]]) -> None:
+    def emit_search(
+        prefix: str,
+        items: list[SearchEntry],
+    ) -> list[tuple[str, list[SearchEntry]]]:
         nonlocal n_leaves, n_internal
-        rows = [[entry[0], entry[1], entry[2]] for entry in items]
+        rows = [list(entry) for entry in items]
         gz = sr.gzip_member(rows, search_level)
-        if len(gz) <= sr.SEARCH_LEAF_CAP:
+        if sr.member_fits(gz, cap=sr.SEARCH_LEAF_CAP):
             search_dir[prefix] = {"l": search_pack.add(gz)}
             n_leaves += 1
-            return
+            return []
         n_internal += 1
-        top = [
-            [entry[0], entry[1], entry[2]] for entry in items[: sr.SEARCH_TOP]
-        ]
+        exact: list[SearchEntry] = []
+        suggestions: list[SearchEntry] = []
+        seen_ranks: set[int] = set()
+        for entry in items:
+            if entry[0] == prefix and entry[2] not in seen_ranks:
+                exact.append(entry)
+                seen_ranks.add(entry[2])
+        for entry in items:
+            if entry[0] != prefix and entry[2] not in seen_ranks:
+                suggestions.append(entry)
+                seen_ranks.add(entry[2])
+                if len(suggestions) == sr.SEARCH_TOP:
+                    break
+        top = [list(entry) for entry in exact + suggestions]
         search_dir[prefix] = {
             "t": search_pack.add(sr.gzip_member(top, search_level))
         }
-        children: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
+        children: dict[str, list[SearchEntry]] = defaultdict(list)
         for entry in items:
             if entry[0] != prefix:
                 children[next_char(entry[0], len(prefix))].append(entry)
-        for char in sorted(children):
-            emit_search(prefix + char, children[char])
+        return [(prefix + char, children[char]) for char in sorted(children)]
 
-    roots: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
+    roots: dict[str, list[SearchEntry]] = defaultdict(list)
     for entry in entries:
         roots[next_char(entry[0], 0)].append(entry)
-    for char in sorted(roots):
-        emit_search(char, roots[char])
+    pending = [(char, roots[char]) for char in reversed(sorted(roots))]
+    while pending:
+        prefix, items = pending.pop()
+        children = emit_search(prefix, items)
+        pending.extend(reversed(children))
     search_pack.write()
     (SITE / "search.idx.json").write_bytes(jdump(search_dir))
     (SITE / "charmap.json").write_bytes(jdump(charmap))
@@ -817,6 +907,8 @@ def build_search_index(names: Sequence[str], cn_names: Sequence[str]) -> None:
         f"{search_pack.size / 1e6:,.1f}MB,最大成员 "
         f"{search_q['max']:,}B"
     )
+    log(f"子串候选:{ngram_postings:,} 条 u24,{ngram_size / 1e6:,.1f}MB")
+    return alias_block_size
 
 
 def vocab_sorted(strings: set[str]) -> list[str]:
@@ -907,6 +999,7 @@ def main() -> None:  # noqa: PLR0915
     assert n < sr.RANK_SENTINEL, "VisualRank 必须小于 u24 哨兵,升级格式"
     order = np.argsort(-lay["collect"], kind="stable")
     key_r = lay["key"][order].astype(np.uint32)  # rank -> key
+    kind_r = (key_r >> np.uint32(24)).astype(np.uint8)
     year_r = lay["year"][order].astype(np.uint16)
     comm_r = lay["community"][order].astype(np.uint16)
     iso_r = lay["isolated"][order]
@@ -1128,11 +1221,15 @@ def main() -> None:  # noqa: PLR0915
         for start in range(0, n, name_block_size):
             end = min(n, start + name_block_size)
             rows = [
-                [names_r[rank], cn_names_r[rank] or None]
+                [
+                    names_r[rank],
+                    cn_names_r[rank] or None,
+                    int(kind_r[rank]),
+                ]
                 for rank in range(start, end)
             ]
             gz = sr.gzip_member(rows, sr.GZIP_LEVELS["names"])
-            if len(gz) > sr.MEMBER_CAP:
+            if not sr.member_fits(gz):
                 oversize = True
                 break
             off, length = name_pack.add(gz)
@@ -1268,8 +1365,10 @@ def main() -> None:  # noqa: PLR0915
     del cha_text_bits, character_row, character_ranges
 
     entities_pack.write()
-    (SITE / "entities.idx").write_bytes(
-        sr.gzip_member({"width": sr.ENTITY_BLOCK_IDS, "k": ent_ranges}, 6)
+    write_gzip_json(
+        "entities.idx",
+        {"width": sr.ENTITY_BLOCK_IDS, "k": ent_ranges},
+        6,
     )
     reconcile("实体结构行数", n, sum(entity_counts.values()))
     ent_q = quantiles(entities_pack.sizes)
@@ -1290,13 +1389,11 @@ def main() -> None:  # noqa: PLR0915
     for start in range(0, len(tag_vocab), 8192):
         chunk = tag_vocab[start : start + 8192]
         gz = sr.gzip_member(chunk, vocab_level)
-        if len(gz) > sr.MEMBER_CAP:
+        if not sr.member_fits(gz):
             sys.exit("FAILED: tags 词表成员超上限,缩小分块")
         vocab_dir["tags"].append(vocab_pack.add(gz))
     vocab_pack.write()
-    (SITE / "vocab.idx").write_bytes(
-        sr.gzip_member({"chunk": 8192, "members": vocab_dir}, 6)
-    )
+    write_gzip_json("vocab.idx", {"chunk": 8192, "members": vocab_dir}, 6)
     vocab_digests = {
         "career": sr.sha256_hex(sr.canonical_json(career_vocab)),
         "meta_tags": sr.sha256_hex(sr.canonical_json(meta_vocab)),
@@ -1501,12 +1598,12 @@ def main() -> None:  # noqa: PLR0915
 
             def emit(keys: list[str]) -> None:
                 gz = sr.gzip_member({k: bucket[k] for k in keys}, facts_level)
-                if len(gz) > sr.MEMBER_CAP and len(keys) > 1:
+                if not sr.member_fits(gz) and len(keys) > 1:
                     mid = len(keys) // 2
                     emit(keys[:mid])
                     emit(keys[mid:])
                     return
-                if len(gz) > sr.MEMBER_CAP:
+                if not sr.member_fits(gz):
                     raise ValueError("single-entity fact bucket exceeds cap")
                 off, length = facts_pack.add(gz)
                 members.append([off, length, int(keys[-1])])
@@ -1557,8 +1654,10 @@ def main() -> None:  # noqa: PLR0915
             inline_written + paged_written,
         )
         facts_pack.write()
-        (SITE / "facts.idx").write_bytes(
-            sr.gzip_member({"buckets": sr.FACT_BUCKETS, "b": fact_dir}, 6)
+        write_gzip_json(
+            "facts.idx",
+            {"buckets": sr.FACT_BUCKETS, "b": fact_dir},
+            6,
         )
         fact_q = quantiles(facts_pack.sizes)
         log(
@@ -1734,10 +1833,10 @@ def main() -> None:  # noqa: PLR0915
         encode_eps,
     )
     episodes_pack.write()
-    (SITE / "episodes.idx").write_bytes(
-        sr.gzip_member(
-            {"width": sr.EPISODE_BLOCK_SUBJECTS, "ranges": eps_ranges}, 6
-        )
+    write_gzip_json(
+        "episodes.idx",
+        {"width": sr.EPISODE_BLOCK_SUBJECTS, "ranges": eps_ranges},
+        6,
     )
     reconcile("分集行数", n_eps, eps_inline_rows + eps_paged_rows)
     pages_pack.write()
@@ -1853,7 +1952,7 @@ def main() -> None:  # noqa: PLR0915
             {"i": [c[0] for c in chunk], "t": [c[1] for c in chunk]},
             level,
         )
-        if len(gz) <= sr.MEMBER_CAP:
+        if sr.member_fits(gz):
             loc = desc_pack.add(gz)
             desc_ranges.append([chunk[0][0], chunk[-1][0], *loc])
             return
@@ -1871,7 +1970,7 @@ def main() -> None:  # noqa: PLR0915
         mid = len(pairs) // 2
         for part in (pairs[:mid], pairs[mid:]):
             part_gz = sr.gzip_member({"i": [sid], "t": [part]}, level)
-            if len(part_gz) > sr.MEMBER_CAP:
+            if not sr.member_fits(part_gz):
                 emit_desc([(sid, part)])
                 continue
             loc = desc_pack.add(part_gz)
@@ -1920,7 +2019,7 @@ def main() -> None:  # noqa: PLR0915
     text_dir[family] = fact_summary_dir
     text_stats[family] = fact_summary_stats
     text_quantile_gate(family, fact_summary_sizes)
-    (SITE / "text.idx").write_bytes(sr.gzip_member({"families": text_dir}, 6))
+    write_gzip_json("text.idx", {"families": text_dir}, 6)
     del fs_items
 
     # ---- 显示映射 ----
@@ -1930,7 +2029,8 @@ def main() -> None:  # noqa: PLR0915
     del mappings
 
     # ---- 搜索:规范化前缀自适应树 ----
-    build_search_index(names_r, cn_names_r)
+    search_alias_block_ranks = build_search_index(names_r, cn_names_r, kind_r)
+    del kind_r
 
     # ---- 标签表(社区标签名取社区 top 节点,位置取几何中心)----
     labels: list[list[Any]] = []
@@ -2033,25 +2133,9 @@ def main() -> None:  # noqa: PLR0915
             }
             for fam, st in text_stats.items()
         },
-        "limits": {
-            "member_cap": sr.MEMBER_CAP,
-            "pack_cap": sr.PACK_CAP,
-            "fact_buckets": sr.FACT_BUCKETS,
-            "fact_inline": sr.FACT_INLINE,
-            "episode_inline": sr.EPISODE_INLINE,
-            "page_size": sr.PAGE_SIZE,
-            "entity_block_ids": sr.ENTITY_BLOCK_IDS,
-            "episode_block_subjects": sr.EPISODE_BLOCK_SUBJECTS,
-            "search_leaf_cap": sr.SEARCH_LEAF_CAP,
-            "search_top": sr.SEARCH_TOP,
-            "cache_budget": {
-                "total": 64_000_000,
-                "names": 12_000_000,
-                "structure": 24_000_000,
-                "search": 8_000_000,
-                "text": 20_000_000,
-            },
-        },
+        "limits": sr.release_limits(
+            search_alias_block_ranks=search_alias_block_ranks
+        ),
         "rank_index": {
             "encoding": sr.RANK_ENCODING,
             "sentinel": sr.RANK_SENTINEL,

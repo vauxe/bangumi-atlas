@@ -6,9 +6,13 @@ import assert from "node:assert/strict";
 import { Data } from "../src/data";
 import {
   ensureRankIndex,
+  fold,
+  loadCharmap,
   loadManifest,
   openNames,
+  openSearchAliases,
 } from "../src/loader";
+import { findSubstringEntries } from "../src/search";
 
 const BASE = process.env["SMOKE_BASE"] ?? "http://127.0.0.1:8391";
 const realFetch = globalThis.fetch;
@@ -27,8 +31,58 @@ console.log(
   `${(manifest.total_bytes / 1e6).toFixed(0)}MB data`,
 );
 const names = openNames(manifest);
+const searchAliases = openSearchAliases(manifest);
 const data = new Data(manifest, names);
 await ensureRankIndex();
+
+await loadCharmap();
+const substringQuery = fold("之境");
+const substringPage = await findSubstringEntries(substringQuery, searchAliases);
+const substringHits = substringPage.entries;
+assert.ok(substringHits.length > 0);
+assert.ok(
+  substringHits.every(([normalized]) => normalized.includes(substringQuery)),
+);
+console.log(
+  `substring search ok: ${substringHits[0]?.[1]} (${substringHits.length} hits)`,
+);
+
+const commonQuery = fold("动画");
+const firstCommonPage = await findSubstringEntries(commonQuery, searchAliases);
+assert.ok(firstCommonPage.entries.length > 0);
+assert.notEqual(firstCommonPage.next, null);
+const secondCommonPage = await findSubstringEntries(commonQuery, searchAliases, {
+  cursor: firstCommonPage.next ?? 0,
+});
+assert.ok(secondCommonPage.entries.length > 0);
+assert.ok(
+  secondCommonPage.entries.every(([normalized]) =>
+    normalized.includes(commonQuery),
+  ),
+);
+assert.equal(
+  new Set(
+    [...firstCommonPage.entries, ...secondCommonPage.entries].map(
+      (entry) => entry[2],
+    ),
+  ).size,
+  firstCommonPage.entries.length + secondCommonPage.entries.length,
+);
+console.log(
+  `substring pagination ok: ${firstCommonPage.entries.length} + ` +
+    `${secondCommonPage.entries.length} hits`,
+);
+
+const beforeCollision = requests;
+const collisionPage = await findSubstringEntries(fold("ererer"), searchAliases);
+const collisionRequests = requests - beforeCollision;
+assert.deepEqual(collisionPage.entries, []);
+assert.notEqual(collisionPage.next, null);
+assert.ok(
+  collisionRequests <= 65,
+  `one collision page used ${collisionRequests} requests`,
+);
+console.log(`collision scan bounded: ${collisionRequests} requests`);
 
 // 取一个高热度作品(rank 0 未必是 subject,扫描前几名)
 const keyObject = manifest.files["key.bin"]?.[2];

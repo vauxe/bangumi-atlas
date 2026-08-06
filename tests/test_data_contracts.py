@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from functools import partial
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import site_release as sr
 from scripts.content_fingerprint import RowFingerprint
@@ -28,6 +29,10 @@ class SiteReleaseContractTests(unittest.TestCase):
             sr.entity_key(1, 1 << 24)
         with self.assertRaisesRegex(ValueError, "unknown entity kind"):
             sr.entity_key(4, 1)
+        with self.assertRaisesRegex(ValueError, "unknown entity kind"):
+            sr.entity_key(True, 1)
+        with self.assertRaisesRegex(ValueError, "source id"):
+            sr.entity_key(1, True)
 
     def test_gzip_member_is_reproducible(self) -> None:
         first = sr.gzip_member({"b": 2, "a": 1}, 6)
@@ -102,6 +107,17 @@ class SiteReleaseContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not contain itself"):
             sr.manifest_version({"version": "x"})
 
+    def test_schema_digest_matches_the_cross_runtime_contract(self) -> None:
+        self.assertEqual(sr.schema_digest(), sr.SITE_CONTRACT["schema_digest"])
+
+    def test_release_limits_publish_the_actual_alias_block_size(self) -> None:
+        self.assertEqual(
+            sr.release_limits(search_alias_block_ranks=512)[
+                "search_alias_block_ranks"
+            ],
+            512,
+        )
+
     def test_published_object_name_contains_the_complete_file_digest(
         self,
     ) -> None:
@@ -117,13 +133,23 @@ class SiteReleaseContractTests(unittest.TestCase):
             sr.published_object_name("nested/facts.pack", digest)
 
     def test_member_gate_rejects_every_oversized_gzip_member(self) -> None:
-        sr.require_member_size(b"x" * sr.MEMBER_CAP, "boundary")
+        member = sr.gzip_member(["member boundary"], 6)
+        sr.require_member_size(member, "boundary", cap=len(member))
 
         with self.assertRaisesRegex(ValueError, "member cap"):
             sr.require_member_size(
-                b"x" * (sr.MEMBER_CAP + 1),
+                member,
                 "oversized page",
+                cap=len(member) - 1,
             )
+
+    def test_member_gate_rejects_small_gzip_with_excessive_decoded_size(
+        self,
+    ) -> None:
+        member = sr.gzip_member("x" * 1_000, 9)
+
+        with self.assertRaisesRegex(ValueError, "decoded member cap"):
+            sr.require_member_size(member, "compression bomb", raw_cap=100)
 
     def test_gzip_pages_split_deterministically_at_the_member_cap(
         self,
@@ -151,6 +177,73 @@ class SiteReleaseContractTests(unittest.TestCase):
                 "internal": ["top_offset", "top_length"],
             },
         )
+
+    def test_name_and_search_rows_carry_entity_kind_for_disambiguation(
+        self,
+    ) -> None:
+        self.assertEqual(
+            sr.TUPLE_SCHEMAS["name"],
+            ["name", "name_cn|null", "entity_kind"],
+        )
+        self.assertEqual(
+            sr.TUPLE_SCHEMAS["search_entry"],
+            ["norm", "matched", "rank", "display", "entity_kind"],
+        )
+
+    def test_search_bigram_hash_is_stable_across_unicode_codepoints(
+        self,
+    ) -> None:
+        self.assertEqual(sr.SEARCH_NGRAM_WIDTH, 2)
+        self.assertEqual(sr.SEARCH_NGRAM_BUCKETS, 1 << 16)
+        self.assertEqual(sr.search_gram_bucket("ab"), 36752)
+        self.assertEqual(sr.search_gram_bucket("之境"), 53925)
+        self.assertEqual(sr.search_gram_bucket("😀界"), 6955)
+
+        with self.assertRaisesRegex(ValueError, "2 code points"):
+            sr.search_gram_bucket("境")
+
+    def test_search_fold_is_complete_for_queries_and_idempotent(self) -> None:
+        self.assertEqual(sr.search_fold("Straße"), "strasse")
+        self.assertEqual(sr.search_fold("STRAẞE"), "strasse")
+        self.assertEqual(sr.search_fold("ΤΈΛΟΣ"), sr.search_fold("Τέλος"))
+        self.assertEqual(sr.search_fold("\ufeff Straße \ufeff"), "strasse")
+        self.assertEqual(sr.search_fold("\u0085A\u0085"), "\u0085a\u0085")
+
+        for text in ("Straße", "STRAẞE", "沪", "滬", "濾", "虎倀"):
+            folded = sr.search_fold(text)
+            self.assertEqual(sr.search_fold(folded), folded)
+
+    def test_search_fold_uses_the_versioned_table_not_the_host_unicode(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            table = Path(directory) / "casefold.json"
+            table.write_bytes(b'{"A":"z"}')
+            with patch.object(sr, "SEARCH_CASEFOLD_PATH", table):
+                sr.search_charmap.cache_clear()
+                self.assertEqual(sr.search_charmap(), {"A": "z"})
+            sr.search_charmap.cache_clear()
+
+    def test_search_fold_rejects_unbounded_expansion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            table = Path(directory) / "casefold.json"
+            table.write_bytes(b'{"A":"xxxx"}')
+            with patch.object(sr, "SEARCH_CASEFOLD_PATH", table):
+                sr.search_charmap.cache_clear()
+                with self.assertRaisesRegex(ValueError, "expansion"):
+                    sr.search_charmap()
+            sr.search_charmap.cache_clear()
+
+    def test_search_aliases_do_not_chain_chinese_and_japanese_rules(
+        self,
+    ) -> None:
+        shanghai = {key for key, _matched in sr.search_aliases("沪", "")}
+        tiger = {key for key, _matched in sr.search_aliases("虎伥", "")}
+
+        self.assertEqual(shanghai, {"沪", "滬"})
+        self.assertNotIn("滤", shanghai)
+        self.assertNotIn("濾", shanghai)
+        self.assertIn("虎倀", tiger)
 
     def test_field_policy_declares_every_source_field(self) -> None:
         for table, fields in sr.FIELD_POLICY.items():
@@ -211,8 +304,8 @@ class SiteContractTests(unittest.TestCase):
     def test_name_pack_validation_reads_every_published_block(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            first = sr.gzip_member([["A", None], ["B", "乙"]], 6)
-            second = bytearray(sr.gzip_member([["C", "丙"]], 6))
+            first = sr.gzip_member([["A", None, 1], ["B", "乙", 2]], 6)
+            second = bytearray(sr.gzip_member([["C", "丙", 3]], 6))
             second[-1] ^= 0xFF
             pack = first + second
             (root / "names.pack").write_bytes(pack)
@@ -231,7 +324,7 @@ class SiteContractTests(unittest.TestCase):
     def test_name_pack_validation_reconciles_pack_with_index(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            block = sr.gzip_member([["A", None]], 6)
+            block = sr.gzip_member([["A", None, 1]], 6)
             (root / "names.pack").write_bytes(block + b"trailing")
             (root / "names.idx").write_bytes(struct.pack("<II", 0, len(block)))
 
@@ -246,7 +339,7 @@ class SiteContractTests(unittest.TestCase):
     def test_name_pack_validation_reconciles_published_row_count(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            block = sr.gzip_member([["A", None]], 6)
+            block = sr.gzip_member([["A", None, 1]], 6)
             (root / "names.pack").write_bytes(block)
             (root / "names.idx").write_bytes(struct.pack("<II", 0, len(block)))
 
@@ -263,7 +356,22 @@ class SiteContractTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            block = sr.gzip_member([["A", None, "unexpected"]], 6)
+            block = sr.gzip_member([["A", None, 1, "unexpected"]], 6)
+            (root / "names.pack").write_bytes(block)
+            (root / "names.idx").write_bytes(struct.pack("<II", 0, len(block)))
+
+            with self.assertRaisesRegex(ValueError, "invalid row"):
+                validate_name_pack(
+                    root / "names.pack",
+                    root / "names.idx",
+                    n_rows=1,
+                    block_size=2,
+                )
+
+    def test_name_pack_validation_rejects_boolean_entity_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            block = sr.gzip_member([["A", None, True]], 6)
             (root / "names.pack").write_bytes(block)
             (root / "names.idx").write_bytes(struct.pack("<II", 0, len(block)))
 
@@ -301,6 +409,20 @@ class RowFingerprintTests(unittest.TestCase):
 
         self.assertNotEqual(original.snapshot(), mutated.snapshot())
         self.assertNotEqual(original.snapshot(), duplicated.snapshot())
+
+
+class ExplorerMarkupTests(unittest.TestCase):
+    def test_search_more_is_next_in_tab_order_after_the_input(self) -> None:
+        html = (Path(__file__).parents[1] / "site" / "index.html").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertLess(
+            html.index('id="search"'), html.index('id="search-more"')
+        )
+        self.assertLess(
+            html.index('id="search-more"'), html.index('id="dice"')
+        )
 
 
 if __name__ == "__main__":
