@@ -49,6 +49,19 @@ export interface PerspectiveViewport {
   viewProjectionMatrix: readonly number[];
 }
 
+const clipW = (
+  pos: readonly [number, number, number],
+  viewport: PerspectiveViewport,
+): number => {
+  const m = viewport.viewProjectionMatrix;
+  return (
+    (m[3] ?? 0) * pos[0] +
+    (m[7] ?? 0) * pos[1] +
+    (m[11] ?? 0) * pos[2] +
+    (m[15] ?? 0)
+  );
+};
+
 /** TextLayer 的像素偏移最终会除以 clip.w；按同一投影矩阵反向补偿，
  * 使标签移到枢轴平面前后时仍保持目标 CSS 像素字号。 */
 export function perspectiveTextSize(
@@ -56,16 +69,11 @@ export function perspectiveTextSize(
   screenPixels: number,
   viewport: PerspectiveViewport,
 ): number {
-  const m = viewport.viewProjectionMatrix;
-  const clipW =
-    (m[3] ?? 0) * pos[0] +
-    (m[7] ?? 0) * pos[1] +
-    (m[11] ?? 0) * pos[2] +
-    (m[15] ?? 0);
+  const w = clipW(pos, viewport);
   const focal = viewport.focalDistance;
-  if (!Number.isFinite(clipW) || clipW <= 0 || !Number.isFinite(focal) || focal <= 0)
+  if (!Number.isFinite(w) || w <= 0 || !Number.isFinite(focal) || focal <= 0)
     return screenPixels;
-  return (screenPixels * clipW) / focal;
+  return (screenPixels * w) / focal;
 }
 
 interface LabelItem {
@@ -197,6 +205,8 @@ export function workingLabelLayers(
     const dx = pt[0] - pf[0];
     const dy = pt[1] - pf[1];
     if (Math.hypot(dx, dy) < 36) continue; // 屏显太短,箭头徒增噪声
+    // 透视线跨过相机平面时，端点投影弦与局部方向恰好相反。
+    const direction = clipW(from, viewport) * clipW(to, viewport) < 0 ? -1 : 1;
     const k = 0.72;
     arrows.push({
       position: [
@@ -204,7 +214,7 @@ export function workingLabelLayers(
         from[1] + (to[1] - from[1]) * k,
         from[2] + (to[2] - from[2]) * k,
       ],
-      angle: (Math.atan2(-dy, dx) * 180) / Math.PI,
+      angle: (Math.atan2(-dy * direction, dx * direction) * 180) / Math.PI,
     });
   }
   const layers: unknown[] = [];
