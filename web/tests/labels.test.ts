@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { OrbitViewport } from "@deck.gl/core";
+
 import {
   buildWorkingLabels,
   declutter,
   perspectiveTextSize,
+  workingLabelLayers,
 } from "../src/labels";
 import type { WorkingEdge, WorkingMember } from "../src/labels";
 
@@ -76,4 +79,46 @@ test("keeps label screen size when another zoom anchor pushes it deeper", () => 
 
   assert.equal(apparentPixels(0), 14);
   assert.equal(apparentPixels(3), 14);
+});
+
+test("keeps the arrow direction when its source crosses the camera plane", () => {
+  const selected: [number, number, number] = [
+    -152.39727783203125, -22.80242347717285, -34.800899505615234,
+  ];
+  const source: [number, number, number] = [
+    78.30078887939453, 20.102764129638672, 87.0003433227539,
+  ];
+  const angleAt = (
+    target: [number, number, number],
+    zoom: number,
+  ): number => {
+    const viewport = new OrbitViewport({
+      width: 1200,
+      height: 713,
+      orbitAxis: "Y",
+      fovy: 50,
+      target,
+      zoom,
+      rotationX: 30.95,
+      rotationOrbit: -99.53,
+    });
+    const { layers } = workingLabelLayers(
+      [],
+      [{ a: selected, b: source, label: "← 片尾曲" }],
+      () => null,
+      (position) => viewport.project(position) as [number, number],
+      viewport,
+      zoom,
+    );
+    const arrow = layers.find(
+      (layer) => (layer as { id?: string }).id === "ws-edge-arrows",
+    ) as { props: { data: { angle: number }[] } } | undefined;
+    assert.ok(arrow);
+    return arrow.props.data[0]?.angle ?? NaN;
+  };
+  const far = angleAt([-44.93, -5.44, 14.63], 2.66);
+  const near = angleAt([26.02, 34.87, 5.28], 5.27);
+  const difference = Math.abs((((near - far + 180) % 360) + 360) % 360 - 180);
+
+  assert.ok(difference < 2, `${far}° → ${near}°`);
 });
