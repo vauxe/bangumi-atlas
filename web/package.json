@@ -17,6 +17,7 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
+    "@bgm38/wiki": "0.3.3",
     "@deck.gl/core": "^9.3.7",
     "@deck.gl/extensions": "^9.3.7",
     "@deck.gl/layers": "^9.3.7",
