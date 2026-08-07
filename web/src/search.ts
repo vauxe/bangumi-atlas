@@ -194,7 +194,7 @@ export async function findSubstringEntries(
       (page.next <= requestCursor || page.next !== endpoint)
     )
       throw new Error("substring search cursor did not advance");
-    await aliases.load(page.ranks, signal);
+    const loadedRows = await aliases.read(page.ranks, signal);
     signal.throwIfAborted();
     for (const rank of page.ranks) {
       if (
@@ -203,7 +203,7 @@ export async function findSubstringEntries(
         (scannedThroughRank !== null && rank <= scannedThroughRank)
       )
         throw new Error("substring candidates must be increasing ranks");
-      const row = aliases.row(rank);
+      const row = loadedRows.get(rank);
       if (!row)
         throw new Error(`search alias row ${rank} missing after load`);
       candidateCursor++;

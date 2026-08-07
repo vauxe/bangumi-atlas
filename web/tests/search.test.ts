@@ -70,20 +70,28 @@ const originalDocument = globalThis.document;
 const emptyNames: SearchAliases = {
   row: () => null,
   load: async () => undefined,
+  read: async () => new Map(),
 };
 
 function aliasesFromNames(rows: Map<number, NameRow>): SearchAliases {
+  const row = (rank: number): SearchAliasRow | null => {
+    const source = rows.get(rank);
+    if (!source) return null;
+    const [name, nameCn, kind] = source;
+    const aliases = [...new Set([nameCn, name].filter(Boolean))].map(
+      (text) => [text, text] as [string, string],
+    );
+    return [aliases, nameCn || name, kind];
+  };
   return {
-    row(rank): SearchAliasRow | null {
-      const source = rows.get(rank);
-      if (!source) return null;
-      const [name, nameCn, kind] = source;
-      const aliases = [...new Set([nameCn, name].filter(Boolean))].map(
-        (text) => [text, text] as [string, string],
-      );
-      return [aliases, nameCn || name, kind];
-    },
+    row,
     load: async () => undefined,
+    read: async (requested) => new Map(
+      [...requested].flatMap((rank) => {
+        const value = row(rank);
+        return value ? [[rank, value] as const] : [];
+      }),
+    ),
   };
 }
 
@@ -218,6 +226,15 @@ test("bounds collision scanning and returns the next candidate cursor", async ()
       "unrelated",
     ]], "unrelated", 1],
     load: async () => undefined,
+    read: async (ranks) => new Map(
+      [...ranks].map((rank) => [
+        rank,
+        [[[
+          "unrelated",
+          "unrelated",
+        ]], "unrelated", 1],
+      ]),
+    ),
   };
   const requests: Array<[number, number]> = [];
 
@@ -249,6 +266,28 @@ test("treats a missing alias row after load as a contract failure", async () => 
     }),
     /search alias row 0.*missing after load/,
   );
+});
+
+test("validates substring candidates from one stable alias snapshot", async () => {
+  const ranks = Array.from({ length: 64 }, (_, rank) => rank);
+  const aliases: SearchAliases = {
+    row: () => null,
+    load: async () => {
+      throw new Error("legacy cache lookup should not be used");
+    },
+    read: async (requested) => new Map(
+      [...requested].map((rank) => [
+        rank,
+        [[[`ab ${rank}`, `ab ${rank}`]], `ab ${rank}`, 1],
+      ]),
+    ),
+  };
+
+  const page = await findSubstringEntries("ab", aliases, {
+    loadPage: async () => ({ ranks, next: null }),
+  });
+
+  assert.deepEqual(page.entries.map((entry) => entry[2]), ranks);
 });
 
 test("returns every match from one bounded candidate batch", async () => {
@@ -339,6 +378,9 @@ test("forwards substring cancellation to candidate name loading", async () => {
   const names: SearchAliases = {
     row: () => null,
     load: async (_ranks, signal?: AbortSignal) => {
+      signal?.throwIfAborted();
+    },
+    read: async (_ranks, signal?: AbortSignal) => {
       loadStarted = true;
       receivedSignal = signal;
       if (!signal) throw new Error("missing AbortSignal");
@@ -624,6 +666,11 @@ test("lets a hotter substring compete after prefix results fill the cap", async 
       ? [[["x-ab-y", "x-ab-y"]], "x-ab-y", 1]
       : null,
     load: async () => undefined,
+    read: async (ranks) => new Map(
+      [...ranks].flatMap((rank) => rank === substringRank
+        ? [[rank, [[["x-ab-y", "x-ab-y"]], "x-ab-y", 1]] as const]
+        : []),
+    ),
   };
   const prefixEntries: SearchEntry[] = Array.from(
     { length: 60 },
@@ -1038,6 +1085,12 @@ test("retries a failed substring search without prefix results", async () => {
   const names: SearchAliases = {
     row: () => [[["x-ab-y", "x-ab-y"]], "x-ab-y", 1],
     load: async () => undefined,
+    read: async (ranks) => new Map(
+      [...ranks].map((rank) => [
+        rank,
+        [[["x-ab-y", "x-ab-y"]], "x-ab-y", 1],
+      ]),
+    ),
   };
   let attempts = 0;
   new Search(
