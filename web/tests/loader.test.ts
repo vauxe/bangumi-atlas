@@ -875,8 +875,13 @@ test("loads search aliases independently from entity names", async () => {
   const aliases = openSearchAliases(manifest);
   assert.equal(aliases.row(0), null);
   assert.equal(indexRequests, 0);
-  await aliases.load([0]);
+  const snapshot = await aliases.read([0]);
   assert.equal(indexRequests, 1);
+  assert.deepEqual(snapshot.get(0), [
+    [["虎伥", "虎伥"], ["虎倀", "虎倀"]],
+    "虎伥",
+    3,
+  ]);
   assert.deepEqual(aliases.row(0), [
     [["虎伥", "虎伥"], ["虎倀", "虎倀"]],
     "虎伥",

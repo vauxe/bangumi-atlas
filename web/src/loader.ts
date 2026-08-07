@@ -917,6 +917,10 @@ export async function pointByRank(
 interface RankRows<T> {
   row(rank: number): T | null;
   load(ranks: Iterable<number>, signal?: AbortSignal): Promise<void>;
+  read(
+    ranks: Iterable<number>,
+    signal?: AbortSignal,
+  ): Promise<Map<number, T>>;
 }
 
 /** 连续 rank 分块的公共读取器:索引、成员边界、行数与 LRU 只实现一次。 */
@@ -1009,6 +1013,34 @@ function openRankRows<T>(
         if (Number.isInteger(rank) && rank >= 0 && rank < manifest.n_nodes)
           needed.add(Math.floor(rank / blockSize));
       await Promise.all([...needed].map((block) => loadBlock(block, signal)));
+    },
+    async read(ranks, signal): Promise<Map<number, T>> {
+      const requested = [...new Set(ranks)].filter(
+        (rank) =>
+          Number.isInteger(rank) && rank >= 0 && rank < manifest.n_nodes,
+      );
+      const needed = new Set(
+        requested.map((rank) => Math.floor(rank / blockSize)),
+      );
+      const blocks = new Map(
+        await Promise.all(
+          [...needed].map(async (block) => [
+            block,
+            await loadBlock(block, signal),
+          ] as const),
+        ),
+      );
+      const result = new Map<number, T>();
+      for (const rank of requested) {
+        const block = Math.floor(rank / blockSize);
+        const row = blocks.get(block)?.[rank % blockSize];
+        if (row === undefined)
+          throw new SiteDataContractError(
+            `${stem} rank ${rank} missing from loaded block ${block}`,
+          );
+        result.set(rank, row);
+      }
+      return result;
     },
   };
 }
