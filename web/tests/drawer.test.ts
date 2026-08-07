@@ -39,11 +39,24 @@ class FakeDrawerElement {
   }
 
   clickClose(): void {
+    this.clickTarget({ id: "drawer-close" });
+  }
+
+  clickTarget({
+    id = "",
+    tab = null,
+  }: {
+    id?: string;
+    tab?: string | null;
+  }): void {
     this.clickListener?.({
       target: {
-        id: "drawer-close",
+        id,
         classList: { contains: () => false },
-        closest: () => null,
+        closest: (selector: string) =>
+          selector === "[data-tab]" && tab !== null
+            ? { getAttribute: () => tab }
+            : null,
       },
     });
   }
@@ -225,6 +238,8 @@ test("keeps an expanded summary out of the DOM until each segment is requested",
     facts: [],
     factsTotal: 0,
     factsNext: null,
+    tab: "overview",
+    relationsLoading: false,
     expanded: false,
     loading: false,
     eps: null,
@@ -246,6 +261,253 @@ test("keeps an expanded summary out of the DOM until each segment is requested",
 
   assert.doesNotMatch(element.innerHTML, /TAIL/);
   assert.match(element.innerHTML, /继续显示/);
+});
+
+test("makes the complete subject overview the default dossier view", () => {
+  const element = new FakeDrawerElement();
+  const drawer = makeDrawer(element);
+  Reflect.set(drawer, "cur", {
+    rank: 0,
+    key: (1 << 24) | 1,
+    entity: {
+      kind: "subject",
+      key: (1 << 24) | 1,
+      name: "Example",
+      nameCn: "完整示例",
+      type: 4,
+      platformCode: null,
+      date: "2026-01-02",
+      score: 8.8,
+      bgmRank: 12,
+      nsfw: true,
+      favorite: [11, 22, 33, 44, 55],
+      series: true,
+      scoreDetails: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      metaTags: ["科幻", "游戏"],
+      tags: [["时间旅行", 1200], ["世界线", 300]],
+      hasSummary: true,
+      hasInfobox: true,
+    },
+    mappings: {
+      fact_labels: {},
+      subject_type: { "4": "游戏" },
+      platform: {},
+      person_type: {},
+      character_role: {},
+    },
+    facts: [],
+    factsTotal: 0,
+    factsNext: null,
+    tab: "overview",
+    relationsLoading: false,
+    expanded: false,
+    loading: false,
+    eps: null,
+    epsTotal: 0,
+    epsNext: null,
+    epsExpanded: false,
+    summary: { s: "ready", text: "这是简介", shown: 10_000 },
+    summaryOpen: false,
+    infobox: { s: "idle" },
+    descs: new Map(),
+  });
+
+  const rerender = Reflect.get(drawer, "rerender") as () => void;
+  rerender.call(drawer);
+
+  assert.match(element.innerHTML, /role="tablist"/);
+  assert.match(
+    element.innerHTML,
+    /data-tab="overview"[^>]*aria-selected="true"/,
+  );
+  assert.doesNotMatch(element.innerHTML, /tabindex="-1"/);
+  assert.match(
+    element.innerHTML,
+    /role="tabpanel"[^>]*aria-labelledby="dossier-tab-overview"/,
+  );
+  assert.match(element.innerHTML, /想玩/);
+  assert.match(element.innerHTML, /玩过/);
+  assert.match(element.innerHTML, /10 分/);
+  assert.match(element.innerHTML, /时间旅行/);
+  assert.match(element.innerHTML, /世界线/);
+  assert.match(element.innerHTML, /系列作品/);
+  assert.match(element.innerHTML, /成人内容/);
+  assert.match(element.innerHTML, /这是简介/);
+});
+
+test("renders named infobox list items without flattening their meaning", () => {
+  const element = new FakeDrawerElement();
+  const drawer = makeDrawer(element);
+  Reflect.set(drawer, "cur", {
+    rank: 0,
+    key: (2 << 24) | 1,
+    entity: null,
+    mappings: {
+      fact_labels: {}, subject_type: {}, platform: {},
+      person_type: {}, character_role: {},
+    },
+    facts: [],
+    factsTotal: 0,
+    factsNext: null,
+    tab: "reference",
+    relationsLoading: false,
+    expanded: false,
+    loading: false,
+    eps: null,
+    epsTotal: 0,
+    epsNext: null,
+    epsExpanded: false,
+    summary: { s: "idle" },
+    summaryOpen: false,
+    infobox: {
+      s: "ready",
+      text: `{{Infobox Crt
+|别名={
+[日文名|テスト]
+[Test]
+}
+|危险输入={
+[<img src=x>|<script>alert(1)</script>]
+}
+}}`,
+      shown: 10_000,
+    },
+    descs: new Map(),
+  });
+
+  const rerender = Reflect.get(drawer, "rerender") as () => void;
+  rerender.call(drawer);
+
+  assert.match(element.innerHTML, /class="reference-values"/);
+  assert.match(
+    element.innerHTML,
+    /class="reference-item-label">日文名<\/span><span>テスト<\/span>/,
+  );
+  assert.match(element.innerHTML, /<li>\s*<span>Test<\/span>\s*<\/li>/);
+  assert.doesNotMatch(element.innerHTML, /<img src=x>/);
+  assert.doesNotMatch(element.innerHTML, /<script>alert\(1\)<\/script>/);
+  assert.match(element.innerHTML, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(element.innerHTML, /查看原始 Wiki 源码/);
+});
+
+test("separates typed connections from the overview scroll", () => {
+  const element = new FakeDrawerElement();
+  const otherRank = 7;
+  const otherKey = (1 << 24) | 2;
+  const drawer = makeDrawer(element, {
+    data: {
+      rankOf: (key: number) => key === otherKey ? otherRank : null,
+    },
+  } as Partial<DrawerDeps>);
+  Reflect.set(drawer, "cur", {
+    rank: 0,
+    key: (1 << 24) | 1,
+    entity: null,
+    mappings: {
+      fact_labels: { RELATES_TO: { "1": "续集" } },
+      subject_type: {},
+      platform: {},
+      person_type: {},
+      character_role: {},
+    },
+    facts: [{
+      kind: "RELATES_TO",
+      ref: 1,
+      multiplicity: 1,
+      source: (1 << 24) | 1,
+      target: otherKey,
+      relationType: 1,
+      sortOrder: 0,
+    }],
+    factsTotal: 1,
+    factsNext: null,
+    tab: "overview",
+    relationsLoading: false,
+    expanded: false,
+    loading: false,
+    eps: null,
+    epsTotal: 0,
+    epsNext: null,
+    epsExpanded: false,
+    summary: { s: "idle" },
+    summaryOpen: false,
+    infobox: { s: "idle" },
+    descs: new Map(),
+  });
+  const rerender = Reflect.get(drawer, "rerender") as () => void;
+
+  rerender.call(drawer);
+  assert.doesNotMatch(element.innerHTML, /作品谱系/);
+  assert.doesNotMatch(element.innerHTML, /节点 7/);
+
+  Reflect.get(drawer, "cur").tab = "relations";
+  rerender.call(drawer);
+  assert.match(element.innerHTML, /作品谱系/);
+  assert.match(element.innerHTML, /续集/);
+  assert.match(element.innerHTML, /节点 7/);
+});
+
+test("loads summary eagerly but defers episodes and reference by tab", async () => {
+  const originalSelection = state.selection;
+  const element = new FakeDrawerElement();
+  const reads: string[] = [];
+  const key = (1 << 24) | 1;
+  const drawer = makeDrawer(element, {
+    data: {
+      entity: async () => ({
+        kind: "subject",
+        key,
+        name: "Example",
+        nameCn: "示例",
+        type: 2,
+        platformCode: null,
+        date: "",
+        score: null,
+        bgmRank: null,
+        nsfw: false,
+        favorite: [0, 0, 0, 0, 0],
+        series: false,
+        scoreDetails: [],
+        metaTags: [],
+        tags: [],
+        hasSummary: true,
+        hasInfobox: true,
+      }),
+      factsFor: async () => ({ items: [], total: 0, next: null }),
+      mappings: async () => ({
+        fact_labels: {}, subject_type: {}, platform: {},
+        person_type: {}, character_role: {},
+      }),
+      longText: async (ref: { kind: string }) => {
+        reads.push(ref.kind);
+        return { kind: "present", text: "loaded" };
+      },
+      episodesFor: async () => {
+        reads.push("episodes");
+        return { items: [], total: 0, next: null };
+      },
+      rankOf: () => null,
+    },
+  } as unknown as Partial<DrawerDeps>);
+
+  try {
+    state.selection = 0;
+    await drawer.show(0, key);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    assert.deepEqual(reads, ["entity-summary"]);
+
+    element.clickTarget({ tab: "episodes" });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    assert.deepEqual(reads, ["entity-summary", "episodes"]);
+
+    element.clickTarget({ tab: "reference" });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    assert.deepEqual(reads, [
+      "entity-summary", "episodes", "entity-infobox",
+    ]);
+  } finally {
+    state.selection = originalSelection;
+  }
 });
 
 test("renders every published common neighbor instead of dropping the tail", async () => {

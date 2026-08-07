@@ -5,10 +5,21 @@
 import type { CommonItem, PathResult } from "./graph";
 import type { Data } from "./data";
 import { chipCover, drawerCover } from "./covers";
+import {
+  collectionBreakdown,
+  parseInfobox,
+  relationshipSection,
+  scoreBreakdown,
+  tagGroups,
+} from "./entity-presentation";
+import type {
+  ParsedInfoboxField,
+  RelationshipSection,
+} from "./entity-presentation";
 import { esc, html, raw } from "./html";
 import { factLabel, factPrimaryOther } from "./neighbors";
 import { state } from "./store";
-import { bgmUrl, TYPE_NAMES, etype } from "./types";
+import { bgmUrl, TYPE_NAMES, eid, etype } from "./types";
 import type {
   EpisodeRecord,
   Fact,
@@ -30,9 +41,12 @@ export interface DrawerDeps {
   reportError: (context: string, error: unknown) => void;
 }
 
-const GROUP_CHIPS = 12; // 每组初始 chips 数,展开后放开
+const GROUP_CHIPS = 8; // 每组初始 chips 数,展开后放开
 const EPS_SHOWN = 25; // 分集列表初始行数
 const TEXT_SEGMENT = 10_000; // 超长文本分段渲染的每段字符数
+const SUMMARY_PREVIEW = 640;
+
+type DrawerTab = "overview" | "relations" | "episodes" | "reference";
 
 type TextState =
   | { s: "idle" }
@@ -48,6 +62,9 @@ interface Current {
   facts: Fact[];
   factsTotal: number;
   factsNext: string | null;
+  tab: DrawerTab;
+  relationsLoading: boolean;
+  relationsLoaded: boolean;
   expanded: boolean;
   loading: boolean; // 分页在途锁,防双击重复加载
   eps: EpisodeRecord[] | null; // null = 分集尚未打开
@@ -58,6 +75,12 @@ interface Current {
   summaryOpen: boolean;
   infobox: TextState;
   descs: Map<number, TextState>;
+}
+
+interface FactGroup {
+  section: RelationshipSection;
+  label: string;
+  members: number[];
 }
 
 export function drawerTopActions(key?: number): string {
@@ -112,6 +135,20 @@ export function segmented(
   )}`;
 }
 
+function infoboxFieldMarkup(field: ParsedInfoboxField): string {
+  if (field.kind === "text") return html`${field.value || "—"}`;
+  if (field.items.length === 0) return html`—`;
+
+  const items = field.items.map((item) => html`<li>
+    ${raw(
+      item.label
+        ? html`<span class="reference-item-label">${item.label}</span>`
+        : "",
+    )}<span>${item.value || "—"}</span>
+  </li>`).join("");
+  return html`<ul class="reference-values">${raw(items)}</ul>`;
+}
+
 export class Drawer {
   private el: HTMLElement;
   private deps: DrawerDeps;
@@ -125,6 +162,16 @@ export class Drawer {
     this.el.setAttribute("aria-hidden", "true");
     el.addEventListener("click", (ev) => {
       const t = ev.target as HTMLElement;
+      const tab = t.closest("[data-tab]")?.getAttribute("data-tab");
+      if (
+        tab === "overview" ||
+        tab === "relations" ||
+        tab === "episodes" ||
+        tab === "reference"
+      ) {
+        this.activateTab(tab);
+        return;
+      }
       const rankAttr = t.closest("[data-rank]")?.getAttribute("data-rank");
       if (rankAttr) {
         this.deps.walk(Number(rankAttr));
@@ -223,6 +270,9 @@ export class Drawer {
       facts: factsPage.items,
       factsTotal: factsPage.total,
       factsNext: factsPage.next,
+      tab: "overview",
+      relationsLoading: false,
+      relationsLoaded: false,
       expanded: false,
       loading: false,
       eps: null,
@@ -235,37 +285,71 @@ export class Drawer {
       descs: new Map(),
     };
     this.cur = cur;
-    await this.loadChipNames(cur);
-    if (this.viewEpoch !== viewEpoch || this.cur !== cur) return;
+    this.rerender();
+    if (cur.entity?.hasSummary)
+      this.run(this.loadSummary(), "简介加载");
+  }
+
+  private activateTab(tab: DrawerTab): void {
+    const cur = this.cur;
+    if (!cur) return;
+    if (tab === "episodes" && cur.entity?.kind !== "subject") return;
+    if (tab === "reference" && !cur.entity?.hasInfobox) return;
+    cur.tab = tab;
+    this.rerender();
+    if (tab === "relations" && !cur.relationsLoaded)
+      this.run(this.prepareRelations(cur), "关系名称加载");
+    if (tab === "episodes" && cur.eps === null)
+      this.run(this.loadEpisodes(), "分集加载");
+    if (tab === "reference" && cur.infobox.s === "idle")
+      this.run(this.loadInfobox(), "infobox 加载");
+  }
+
+  private async prepareRelations(cur: Current): Promise<void> {
+    if (cur.relationsLoading || cur.relationsLoaded) return;
+    cur.relationsLoading = true;
+    this.rerender();
+    try {
+      await this.loadChipNames(cur);
+      if (this.cur !== cur) return;
+      cur.relationsLoaded = true;
+    } finally {
+      cur.relationsLoading = false;
+    }
     this.rerender();
   }
 
   private async loadChipNames(cur: Current): Promise<void> {
     const ranks = [cur.rank];
-    for (const [, members] of this.groupFacts(cur))
-      for (const rank of members.slice(0, GROUP_CHIPS)) ranks.push(rank);
+    for (const group of this.groupFacts(cur))
+      for (const rank of group.members.slice(0, GROUP_CHIPS))
+        ranks.push(rank);
     await this.deps.names.load(ranks);
   }
 
-  /** 事实按显示标签分组;组内成员 = 主要对端 rank(热度序,去重)。 */
-  private groupFacts(cur: Current): [string, number[]][] {
-    const groups = new Map<string, number[]>();
+  /** 事实先按稳定语义分区,再按显示标签分组;组内成员是主要对端
+   * rank(热度序,去重)。未知枚举仍由 factLabel 以数值显示。 */
+  private groupFacts(cur: Current): FactGroup[] {
+    const groups = new Map<string, FactGroup>();
     const seen = new Map<string, Set<number>>();
     for (const fact of cur.facts) {
+      const section = relationshipSection(fact);
       const label = factLabel(fact, cur.key, cur.mappings);
+      const groupKey = `${section.id}\0${label}`;
       const other = factPrimaryOther(fact, cur.key);
       const rank = this.deps.data.rankOf(other);
       if (rank === null) continue; // 未解析引用不产生可行走 chip
-      const inGroup = seen.get(label) ?? new Set<number>();
+      const inGroup = seen.get(groupKey) ?? new Set<number>();
       if (inGroup.has(rank)) continue;
       inGroup.add(rank);
-      seen.set(label, inGroup);
-      const lst = groups.get(label) ?? [];
-      lst.push(rank);
-      groups.set(label, lst);
+      seen.set(groupKey, inGroup);
+      const group = groups.get(groupKey) ?? { section, label, members: [] };
+      group.members.push(rank);
+      groups.set(groupKey, group);
     }
-    for (const lst of groups.values()) lst.sort((a, b) => a - b);
-    return [...groups];
+    for (const group of groups.values())
+      group.members.sort((a, b) => a - b);
+    return [...groups.values()];
   }
 
   private async loadSummary(): Promise<void> {
@@ -278,6 +362,7 @@ export class Drawer {
       return;
     }
     cur.summary = { s: "loading" };
+    this.rerender();
     const res = await this.deps.data.longText({
       kind: "entity-summary",
       entity: cur.key,
@@ -288,7 +373,7 @@ export class Drawer {
       res.kind === "present"
         ? { s: "ready", text: res.text, shown: TEXT_SEGMENT }
         : { s: "empty" };
-    cur.summaryOpen = true;
+    cur.summaryOpen = false;
     this.rerender();
   }
 
@@ -363,7 +448,7 @@ export class Drawer {
       }
     }
     const ranks: number[] = [];
-    for (const [, members] of this.groupFacts(cur)) ranks.push(...members);
+    for (const group of this.groupFacts(cur)) ranks.push(...group.members);
     await this.deps.names.load(ranks);
     if (this.cur !== cur) return;
     this.rerender();
@@ -553,6 +638,296 @@ export class Drawer {
     return bits;
   }
 
+  private renderTabs(cur: Current): string {
+    const tabs: [DrawerTab, string][] = [
+      ["overview", "概览"],
+      ["relations", `关联 ${cur.factsTotal.toLocaleString()}`],
+    ];
+    if (cur.entity?.kind === "subject")
+      tabs.push([
+        "episodes",
+        cur.eps === null ? "分集" : `分集 ${cur.epsTotal.toLocaleString()}`,
+      ]);
+    if (cur.entity?.hasInfobox) tabs.push(["reference", "资料"]);
+    return html`<div class="dossier-tabs" role="tablist" aria-label="详情视图">
+      ${raw(
+        tabs
+          .map(([id, label]) => {
+            const selected = id === cur.tab;
+            return html`<button
+              id="dossier-tab-${id}"
+              class="dossier-tab"
+              data-tab="${id}"
+              role="tab"
+              aria-selected="${selected}"
+              aria-controls="dossier-panel"
+            >${label}</button>`;
+          })
+          .join(""),
+      )}
+    </div>`;
+  }
+
+  private renderSummary(cur: Current): string {
+    if (!cur.entity?.hasSummary) return "";
+    if (cur.summary.s === "loading" || cur.summary.s === "idle")
+      return html`<section class="dossier-section" aria-busy="true">
+        <h3>简介</h3><div class="note">正在加载简介…</div>
+      </section>`;
+    if (cur.summary.s === "empty")
+      return html`<section class="dossier-section"><h3>简介</h3>
+        <div class="note">暂无简介</div></section>`;
+
+    const hasMore = cur.summary.text.length > SUMMARY_PREVIEW;
+    const body = cur.summaryOpen
+      ? segmented(cur.summary.text, cur.summary.shown, "summary-more")
+      : html`${cur.summary.text.slice(0, SUMMARY_PREVIEW)}`;
+    const toggle = hasMore
+      ? html`<button id="sum-toggle" class="text-action">
+          ${cur.summaryOpen ? "收起简介" : "继续阅读"}
+        </button>`
+      : "";
+    return html`<section class="dossier-section">
+      <h3>简介</h3>
+      <div class="sum expanded">${raw(body)}${raw(toggle)}</div>
+    </section>`;
+  }
+
+  private distribution(
+    title: string,
+    items: { label: string; count: number }[],
+  ): string {
+    const max = Math.max(1, ...items.map((item) => item.count));
+    const rows = items
+      .map(
+        (item) => html`<div class="distribution-row">
+          <span>${item.label}</span>
+          <meter min="0" max="${max}" value="${item.count}"
+            aria-label="${item.label} ${item.count.toLocaleString()} 人"></meter>
+          <span>${item.count.toLocaleString()}</span>
+        </div>`,
+      )
+      .join("");
+    return html`<section class="dossier-section distribution">
+      <h3>${title}</h3>${raw(rows)}
+    </section>`;
+  }
+
+  private renderSubjectOverview(cur: Current): string {
+    const entity = cur.entity;
+    if (!entity || entity.kind !== "subject") return "";
+    const platform =
+      entity.platformCode === null
+        ? "未记录"
+        : cur.mappings.platform[`${entity.type}:${entity.platformCode}`] ??
+          `平台 ${entity.platformCode}`;
+    const tags = tagGroups(entity);
+    const meta = tags.meta
+      .map((tag) => html`<span class="tag-pill">${tag}</span>`)
+      .join("");
+    const tagPreview = tags.community.slice(0, 12)
+      .map((tag) => html`<span class="tag-pill counted">${tag.label}
+        <small>${tag.count.toLocaleString()}</small></span>`)
+      .join("");
+    const tagRest = tags.community.slice(12)
+      .map((tag) => html`<span class="tag-pill counted">${tag.label}
+        <small>${tag.count.toLocaleString()}</small></span>`)
+      .join("");
+    const details = html`<dl class="dossier-facts">
+      <div><dt>条目</dt><dd>#${eid(entity.key)}</dd></div>
+      <div><dt>首发</dt><dd>${entity.date || "未记录"}</dd></div>
+      <div><dt>平台</dt><dd>${platform}</dd></div>
+      <div><dt>系列</dt><dd>${entity.series ? "系列作品" : "单独条目"}</dd></div>
+      <div><dt>内容分级</dt><dd>${entity.nsfw ? "成人内容" : "常规"}</dd></div>
+    </dl>`;
+    const scores = scoreBreakdown(entity.scoreDetails).map((item) => ({
+      label: `${item.score} 分`,
+      count: item.count,
+    }));
+    const ratingCount = scores.reduce((sum, item) => sum + item.count, 0);
+    return html`
+      ${raw(this.renderSummary(cur))}
+      <section class="dossier-section"><h3>基本资料</h3>${raw(details)}</section>
+      ${raw(this.distribution("收藏状态", collectionBreakdown(entity)))}
+      ${raw(
+        ratingCount
+          ? this.distribution("评分分布", scores)
+          : html`<section class="dossier-section"><h3>评分分布</h3>
+              <div class="note">暂无评分记录</div></section>`,
+      )}
+      ${raw(
+        meta
+          ? html`<section class="dossier-section"><h3>内容标签</h3>
+              <div class="tag-cloud">${raw(meta)}</div></section>`
+          : "",
+      )}
+      ${raw(
+        tagPreview
+          ? html`<section class="dossier-section"><h3>用户标签</h3>
+              <div class="tag-cloud">${raw(tagPreview)}</div>
+              ${raw(
+                tagRest
+                  ? html`<details class="more-data"><summary>
+                      查看其余 ${tags.community.length - 12} 个标签
+                    </summary><div class="tag-cloud">${raw(tagRest)}</div></details>`
+                  : "",
+              )}</section>`
+          : "",
+      )}
+    `;
+  }
+
+  private renderOverview(cur: Current): string {
+    const entity = cur.entity;
+    const subject = this.renderSubjectOverview(cur);
+    const generic = entity?.kind === "subject"
+      ? ""
+      : html`${raw(this.renderSummary(cur))}
+          <section class="dossier-section"><h3>基本资料</h3>
+            <dl class="dossier-facts">
+              <div><dt>条目</dt><dd>#${eid(cur.key)}</dd></div>
+              <div><dt>类型</dt><dd>${this.badge(cur)}</dd></div>
+              <div><dt>收藏</dt><dd>${entity?.collects.toLocaleString() ?? "未记录"}</dd></div>
+              <div><dt>评论</dt><dd>${entity?.comments.toLocaleString() ?? "未记录"}</dd></div>
+              ${raw(
+                entity?.kind === "person" && entity.career.length
+                  ? html`<div class="fact-wide"><dt>职业</dt>
+                      <dd>${entity.career.join(" / ")}</dd></div>`
+                  : "",
+              )}
+            </dl>
+          </section>`;
+    return html`
+      <div class="overview-actions">
+        <button class="primary-action" data-tab="relations">
+          探索 ${cur.factsTotal.toLocaleString()} 条关联
+        </button>
+        <button class="secondary-action" data-arm="common">共同关联</button>
+        <button class="secondary-action" data-arm="path">查找路径</button>
+      </div>
+      ${raw(subject || generic)}
+    `;
+  }
+
+  private renderRelations(cur: Current): string {
+    if (cur.relationsLoading)
+      return html`<div class="loading" aria-busy="true">正在准备关系名称…</div>`;
+    const groups = this.groupFacts(cur);
+    const sections = new Map<string, { section: RelationshipSection; groups: FactGroup[] }>();
+    for (const group of groups) {
+      const bucket = sections.get(group.section.id) ?? {
+        section: group.section,
+        groups: [],
+      };
+      bucket.groups.push(group);
+      sections.set(group.section.id, bucket);
+    }
+    let shownCount = 0;
+    const sectionHtml = [...sections.values()]
+      .map(({ section, groups: sectionGroups }, index) => {
+        const total = sectionGroups.reduce(
+          (sum, group) => sum + group.members.length,
+          0,
+        );
+        const groupHtml = sectionGroups
+          .map((group) => {
+            const shown = cur.expanded
+              ? group.members
+              : group.members.slice(0, GROUP_CHIPS);
+            shownCount += shown.length;
+            const chips = shown.map((rank) => this.chipOf(rank)).join("");
+            const more = group.members.length > shown.length
+              ? html`<button class="more">
+                  …还有 ${group.members.length - shown.length} 个
+                </button>`
+              : "";
+            return html`<div class="group">
+              <div class="group-label">${group.label} · ${group.members.length}</div>
+              <div class="chips">${raw(chips)}${raw(more)}</div>
+            </div>`;
+          })
+          .join("");
+        return html`<details class="relation-section" ${index === 0 ? "open" : ""}>
+          <summary><span>${section.label}</span><small>${total}</small></summary>
+          ${raw(groupHtml)}
+        </details>`;
+      })
+      .join("");
+    const expand =
+      cur.factsNext !== null || (!cur.expanded && cur.factsTotal > shownCount)
+        ? html`<button id="expand-rel" class="primary-action full-width">
+            ${cur.expanded
+              ? `继续加载 · ${cur.facts.length} / ${cur.factsTotal}`
+              : `展开全部 ${cur.factsTotal} 条关联`}
+          </button>`
+        : "";
+    if (!sectionHtml)
+      return html`<div class="empty-state"><strong>暂无可浏览关联</strong>
+        <span>未解析引用不会生成错误跳转。</span></div>`;
+    return html`<div class="relations-intro">按关系语义分区；选择任一条目即可沿图谱继续探索。</div>
+      ${raw(sectionHtml)}${raw(expand)}`;
+  }
+
+  private renderEpisodes(cur: Current): string {
+    if (cur.loading && cur.eps === null)
+      return html`<div class="loading" aria-busy="true">正在加载分集…</div>`;
+    if (cur.eps === null) return html`<div class="note">准备分集数据…</div>`;
+    if (cur.eps.length === 0)
+      return html`<div class="empty-state"><strong>没有分集记录</strong></div>`;
+    const shown = cur.epsExpanded ? cur.eps : cur.eps.slice(0, EPS_SHOWN);
+    const rows = shown.map((episode) => this.episodeRow(cur, episode)).join("");
+    const more = cur.epsTotal > shown.length || cur.epsNext !== null
+      ? html`<button id="expand-eps" class="primary-action full-width">
+          ${cur.epsExpanded
+            ? `继续加载 · ${shown.length} / ${cur.epsTotal}`
+            : `查看全部 ${cur.epsTotal} 集`}
+        </button>`
+      : "";
+    return html`<div class="episode-list">${raw(rows)}</div>${raw(more)}`;
+  }
+
+  private renderReference(cur: Current): string {
+    if (cur.infobox.s === "idle" || cur.infobox.s === "loading")
+      return html`<div class="loading" aria-busy="true">正在整理资料…</div>`;
+    if (cur.infobox.s === "empty")
+      return html`<div class="empty-state"><strong>暂无扩展资料</strong></div>`;
+    const parsed = parseInfobox(cur.infobox.text);
+    const rows = parsed.fields
+      .map((field) => html`<div><dt>${field.label}</dt>
+        <dd>${raw(infoboxFieldMarkup(field))}</dd></div>`)
+      .join("");
+    const issue = parsed.issue
+      ? html`<div class="note" role="status">
+          无法按 Bangumi Wiki 语法整理第 ${parsed.issue.line} 行，原始资料仍完整保留。
+        </div>`
+      : "";
+    return html`
+      ${raw(
+        rows
+          ? html`<div class="reference-heading">${parsed.template}</div>
+              <dl class="reference-grid">${raw(rows)}</dl>`
+          : issue || html`<div class="note">未识别结构化字段，原始资料仍完整保留。</div>`,
+      )}
+      <details class="source-disclosure"><summary>查看原始 Wiki 源码</summary>
+        <pre class="infobox">${raw(
+          segmented(cur.infobox.text, cur.infobox.shown, "infobox-more"),
+        )}</pre>
+      </details>`;
+  }
+
+  private renderPanel(cur: Current): string {
+    switch (cur.tab) {
+      case "relations":
+        return this.renderRelations(cur);
+      case "episodes":
+        return this.renderEpisodes(cur);
+      case "reference":
+        return this.renderReference(cur);
+      default:
+        return this.renderOverview(cur);
+    }
+  }
+
   private render(cur: Current): string {
     const { rank, key, entity } = cur;
     const nameRow = this.deps.names.row(rank);
@@ -560,135 +935,26 @@ export class Drawer {
       entity?.nameCn || entity?.name || nameRow?.[1] || nameRow?.[0] ||
       this.nameOf(rank);
     const sub = entity?.nameCn ? entity.name : "";
-    const statsBits = this.statsOf(cur);
-    const groups = this.groupFacts(cur);
-    let shownCount = 0;
-    const groupHtml = groups
-      .map(([label, members]) => {
-        const shown = cur.expanded
-          ? members
-          : members.slice(0, GROUP_CHIPS);
-        shownCount += shown.length;
-        const more =
-          members.length > shown.length
-            ? html`<button class="more">
-                …还有 ${members.length - shown.length} 个
-              </button>`
-            : "";
-        const chips = shown.map((r) => this.chipOf(r)).join("");
-        return html`<div class="group">
-          <div class="group-label">${label}(${members.length})</div>
-          <div class="chips">${raw(chips)}${raw(more)}</div>
-        </div>`;
-      })
-      .join("");
-    const expandBtn =
-      cur.factsNext !== null || (!cur.expanded && cur.factsTotal > shownCount)
-        ? html`<button id="expand-rel" class="chip expand">
-            ${cur.expanded
-              ? `继续加载(已载 ${cur.facts.length} / 共 ${cur.factsTotal} 条关系)`
-              : `展开全部 ${cur.factsTotal} 条关系`}
-          </button>`
-        : "";
-
-    const tags =
-      entity?.kind === "subject"
-        ? entity.metaTags
-            .slice(0, 8)
-            .map((t) => html`<span class="tag">${t}</span>`)
-            .join("")
-        : "";
-
-    // 简介:存在位为真才有区块;预取完成前显示占位
-    let summary = "";
-    if (entity?.hasSummary) {
-      if (cur.summary.s === "ready") {
-        const summaryBody = cur.summaryOpen
-          ? segmented(
-              cur.summary.text,
-              cur.summary.shown,
-              "summary-more",
-            )
-          : html`${cur.summary.text.slice(0, TEXT_SEGMENT)}`;
-        summary = html`<div class="sum ${cur.summaryOpen ? "expanded" : ""}">
-          ${raw(summaryBody)}
-          <button id="sum-toggle" class="sum-toggle">展开/收起</button>
-        </div>`;
-      } else if (cur.summary.s === "loading") {
-        summary = html`<div class="sum">简介加载中…</div>`;
-      } else if (cur.summary.s === "idle") {
-        summary = html`<button id="sum-load" class="chip expand">
-          显示简介
-        </button>`;
-      }
-    }
-
-    // infobox:未解析的 Wiki 源码,只按纯文本分段显示
-    let infobox = "";
-    if (entity?.hasInfobox) {
-      if (cur.infobox.s === "idle") {
-        infobox = html`<button id="load-infobox" class="chip expand">
-          查看 infobox 源码
-        </button>`;
-      } else if (cur.infobox.s === "loading") {
-        infobox = html`<div class="note">infobox 加载中…</div>`;
-      } else if (cur.infobox.s === "ready") {
-        infobox = html`<div class="group">
-          <div class="group-label">infobox(Wiki 源码,纯文本)</div>
-          <pre class="infobox">${raw(
-            segmented(cur.infobox.text, cur.infobox.shown, "infobox-more"),
-          )}</pre>
-        </div>`;
-      }
-    }
-
-    // 分集:结构从属集合,只在打开时读取
-    let eps = "";
-    if ((key >>> 24) === 1) {
-      if (cur.eps === null) {
-        eps = html`<button id="load-eps" class="chip expand">
-          查看分集列表
-        </button>`;
-      } else if (cur.eps.length === 0) {
-        eps = html`<div class="note">没有分集记录</div>`;
-      } else {
-        const shown = cur.epsExpanded
-          ? cur.eps
-          : cur.eps.slice(0, EPS_SHOWN);
-        const rows = shown
-          .map((e) => this.episodeRow(cur, e))
-          .join("");
-        const moreBtn =
-          cur.epsTotal > shown.length || cur.epsNext !== null
-            ? html`<button id="expand-eps" class="chip expand">
-                ${cur.epsExpanded
-                  ? `继续加载(已示 ${shown.length} / 共 ${cur.epsTotal})`
-                  : `展开全部 ${cur.epsTotal} 集`}
-              </button>`
-            : "";
-        eps = html`<div class="group">
-          <div class="group-label">分集(${cur.epsTotal})</div>
-          <div class="eps">${raw(rows)}${raw(moreBtn)}</div>
-        </div>`;
-      }
-    }
-
+    const stats = this.statsOf(cur);
+    const panel = this.renderPanel(cur);
     return html`
-      ${raw(drawerTopActions(key))}
-      ${raw(drawerCover(key))}
-      <h2>${title}</h2>
-      ${raw(sub ? html`<div class="subtitle">${sub}</div>` : "")}
-      <div class="badges">
-        <span class="badge">${this.badge(cur)}</span>
-        ${raw(tags)}
+      <header class="dossier-header">
+        ${raw(drawerTopActions(key))}
+        ${raw(drawerCover(key))}
+        <div class="eyebrow">${this.badge(cur)} · Bangumi #${eid(key)}</div>
+        <h2>${title}</h2>
+        ${raw(sub ? html`<div class="subtitle">${sub}</div>` : "")}
+        ${raw(stats.length ? html`<div class="stats">${stats.join(" · ")}</div>` : "")}
+      </header>
+      ${raw(this.renderTabs(cur))}
+      <div
+        id="dossier-panel"
+        class="dossier-panel"
+        role="tabpanel"
+        aria-labelledby="dossier-tab-${cur.tab}"
+      >
+        ${raw(panel)}
       </div>
-      <div class="stats">${statsBits.join(" · ")}</div>
-      <div class="linkops">
-        <button class="chip" data-arm="common">⚭ 共同关联</button>
-        <button class="chip" data-arm="path">🧭 查找路径</button>
-      </div>
-      ${raw(summary)} ${raw(groupHtml)} ${raw(expandBtn)} ${raw(infobox)}
-      ${raw(eps)}
     `;
   }
 
