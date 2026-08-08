@@ -438,7 +438,7 @@ async function boot(): Promise<void> {
   };
   queryWorkbench = new QueryWorkbench({
     execute: (section, options) =>
-      client().execute(section.query, {}, options),
+      client().execute(section.query, section.parameterValues ?? {}, options),
     selectedEntity: async () => {
       const key = state.selectionKey;
       const rank = state.selection;
