@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Drawer, drawerTopActions, pathArrow } from "../src/drawer";
-import type { CommonItem } from "../src/graph";
+import { Drawer, drawerTopActions } from "../src/drawer";
 import type { DrawerDeps } from "../src/drawer";
 import { state } from "../src/store";
 
@@ -98,6 +97,7 @@ function makeDrawer(
         platform: {},
         person_type: {},
         character_role: {},
+        episode_type: {},
       }),
     },
     walk: () => undefined,
@@ -121,11 +121,6 @@ test("renders the Bangumi link as an accessible top action", () => {
 
 test("omits the external action outside node details", () => {
   assert.doesNotMatch(drawerTopActions(), /bgm\.tv/);
-});
-
-test("points each path arrow in the published relationship direction", () => {
-  assert.equal(pathArrow("配音角色", 1), "↓ 配音角色");
-  assert.equal(pathArrow("声优", -1), "↑ 声优");
 });
 
 test("keeps a closed drawer out of focus navigation", () => {
@@ -220,7 +215,6 @@ test("keeps an expanded summary out of the DOM until each segment is requested",
       kind: "person",
       key: (2 << 24) | 1,
       name: "测试人物",
-      nameCn: "",
       type: 1,
       career: [],
       comments: 0,
@@ -234,6 +228,7 @@ test("keeps an expanded summary out of the DOM until each segment is requested",
       platform: {},
       person_type: { "1": "个人" },
       character_role: {},
+      episode_type: {},
     },
     facts: [],
     factsTotal: 0,
@@ -294,6 +289,7 @@ test("makes the complete subject overview the default dossier view", () => {
       platform: {},
       person_type: {},
       character_role: {},
+      episode_type: {},
     },
     facts: [],
     factsTotal: 0,
@@ -344,7 +340,7 @@ test("renders named infobox list items without flattening their meaning", () => 
     entity: null,
     mappings: {
       fact_labels: {}, subject_type: {}, platform: {},
-      person_type: {}, character_role: {},
+      person_type: {}, character_role: {}, episode_type: {},
     },
     facts: [],
     factsTotal: 0,
@@ -409,6 +405,7 @@ test("separates typed connections from the overview scroll", () => {
       platform: {},
       person_type: {},
       character_role: {},
+      episode_type: {},
     },
     facts: [{
       kind: "RELATES_TO",
@@ -476,7 +473,7 @@ test("loads summary eagerly but defers episodes and reference by tab", async () 
       factsFor: async () => ({ items: [], total: 0, next: null }),
       mappings: async () => ({
         fact_labels: {}, subject_type: {}, platform: {},
-        person_type: {}, character_role: {},
+        person_type: {}, character_role: {}, episode_type: {},
       }),
       longText: async (ref: { kind: string }) => {
         reads.push(ref.kind);
@@ -508,30 +505,4 @@ test("loads summary eagerly but defers episodes and reference by tab", async () 
   } finally {
     state.selection = originalSelection;
   }
-});
-
-test("renders every published common neighbor instead of dropping the tail", async () => {
-  const element = new FakeDrawerElement();
-  const loaded: number[] = [];
-  const items: CommonItem[] = Array.from({ length: 101 }, (_, index) => ({
-    rank: index + 2,
-    la: "关联",
-    lb: "关联",
-  }));
-  const drawer = makeDrawer(element, {
-    names: {
-      get: (rank) => `节点 ${rank}`,
-      row: (rank) => [`节点 ${rank}`, null, 1],
-      load: async (ranks) => {
-        loaded.push(...ranks);
-      },
-    },
-  });
-
-  await drawer.showCompare(0, 1, items, null);
-
-  assert.equal(loaded.length, 103);
-  assert.match(element.innerHTML, /data-rank="102"/);
-  assert.equal(element.inert, false);
-  assert.equal(element.getAttribute("aria-hidden"), "false");
 });

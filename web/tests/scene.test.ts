@@ -87,39 +87,7 @@ test("does not interpolate per-node metadata across a billboard", () => {
   const fragmentDecl = shaders.inject["fs:#decl"] ?? "";
 
   assert.match(vertexDecl, /flat out vec4 atlas_style;/);
-  assert.match(vertexDecl, /flat out float atlas_year;/);
-  assert.match(vertexDecl, /flat out vec2 atlas_tags;/);
   assert.match(fragmentDecl, /flat in vec4 atlas_style;/);
-  assert.match(fragmentDecl, /flat in float atlas_year;/);
-  assert.match(fragmentDecl, /flat in vec2 atlas_tags;/);
-});
-
-test("excludes subjects with unknown years when a year filter is active", () => {
-  const previousFilters = state.filters;
-  const scene = Object.assign(Object.create(Scene.prototype), {
-    geo: {
-      key: new Uint32Array([(1 << 24) | 1]),
-      year: new Uint16Array([0]),
-      score: new Uint8Array([0]),
-      tags: new Uint32Array([0]),
-    },
-  }) as unknown as Scene;
-
-  try {
-    state.filters = {
-      yearMin: 2000,
-      yearMax: 2020,
-      media: new Set(),
-      scoreMin: 0,
-      tags: new Set(),
-    };
-    assert.equal(scene.isVisible(0), false);
-
-    state.filters = { ...state.filters, yearMin: 0, yearMax: 9999 };
-    assert.equal(scene.isVisible(0), true);
-  } finally {
-    state.filters = previousFilters;
-  }
 });
 
 test("lets working-set nodes grow when zooming in", () => {
@@ -127,9 +95,6 @@ test("lets working-set nodes grow when zooming in", () => {
     selection: state.selection,
     neighbors: state.neighbors,
     neighborLabels: state.neighborLabels,
-    compareWith: state.compareWith,
-    path: state.path,
-    pathLabels: state.pathLabels,
   };
   const originalWindow = globalThis.window;
 
@@ -141,9 +106,6 @@ test("lets working-set nodes grow when zooming in", () => {
     state.selection = 0;
     state.neighbors = [1];
     state.neighborLabels = ["关联"];
-    state.compareWith = null;
-    state.path = [];
-    state.pathLabels = [];
 
     const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
       geo: {

@@ -233,9 +233,6 @@ export class Data {
   private vocabPromise: Promise<EntityVocab> | null = null;
   private mappingsPromise: Promise<Mappings> | null = null;
 
-  /** Keep the pre-query constructor call compatible while data is release-scoped. */
-  constructor(..._legacyArguments: unknown[]) {}
-
   /** rank-by-key 反向索引;未载入或不在当前发布时为 null。 */
   rankOf(key: number): number | null {
     return rankOfKey(key);

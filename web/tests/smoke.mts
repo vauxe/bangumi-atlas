@@ -13,6 +13,10 @@ import {
   openSearchAliases,
 } from "../src/loader";
 import { findSubstringEntries } from "../src/search";
+import { executeQuery } from "../src/query/engine";
+import { compileExplorerQuery } from "../src/query/explorer";
+import { SiteQueryDataSource } from "../src/query/site-source";
+import { SiteQuerySearchIndex } from "../src/query/site-search";
 
 const BASE = process.env["SMOKE_BASE"] ?? "http://127.0.0.1:8391";
 const realFetch = globalThis.fetch;
@@ -32,7 +36,7 @@ console.log(
 );
 const names = openNames(manifest);
 const searchAliases = openSearchAliases(manifest);
-const data = new Data(manifest, names);
+const data = new Data();
 await ensureRankIndex();
 
 await loadCharmap();
@@ -119,6 +123,13 @@ if (facts.next) {
   console.log(`facts page-2 ok: ${page2.items.length} items`);
 }
 
+// 同一访问局部性中的成员复用不得产生请求；有界 LRU 后续可以淘汰它们。
+const beforeCacheHit = requests;
+await data.entity(subjectKey);
+await data.factsFor(subjectKey);
+assert.equal(requests, beforeCacheHit, "即时缓存命中零请求");
+console.log("immediate cache hit ok");
+
 const episodes = await data.episodesFor(subjectKey);
 console.log(`episodes ok: ${episodes.items.length} / ${episodes.total}`);
 for (const ep of episodes.items.slice(0, 200)) {
@@ -136,6 +147,7 @@ if (withDesc) {
   console.log(`episode description ok (${withDesc.id})`);
 }
 
+let summaryText = "";
 if (entity.hasSummary) {
   const summary = await data.longText({
       kind: "entity-summary",
@@ -143,9 +155,51 @@ if (entity.hasSummary) {
       present: entity.hasSummary,
   });
   assert.equal(summary.kind, "present");
+  summaryText = summary.kind === "present" ? summary.text : "";
   console.log(
     `summary ok: ${(summary as { text: string }).text.slice(0, 40)}…`,
   );
+}
+
+const subjectRef = `subject:${subjectKey & 0xffffff}` as const;
+const querySource = new SiteQueryDataSource(
+  data,
+  new SiteQuerySearchIndex(data, manifest),
+  manifest.version,
+);
+const details = compileExplorerQuery({
+  owner: "subject",
+  text: { value: entity.name, capability: "lookup" },
+  columns: ["ref", "name", "nameCn", "score"],
+  limit: 200,
+}).sections.results;
+assert.ok(details, "ordinary explorer query has a result section");
+const detailResult = await executeQuery(details.query, {}, querySource, {
+  pageSize: 200,
+});
+assert.ok(detailResult.rows.some((row) => row.ref === subjectRef));
+assert.equal(detailResult.releaseId, manifest.version);
+assert.equal(detailResult.stability, "exact");
+assert.equal(detailResult.terminalEvidence[0]?.kind, "completed-domain");
+console.log("unified query ok (typed values → project → evidence)");
+
+const phrase = summaryText.match(/[\p{L}\p{N}]{6,}/u)?.[0]?.slice(0, 12);
+if (phrase) {
+  let textHit = null;
+  for await (const hit of new SiteQuerySearchIndex(data, manifest).fullText(
+    phrase,
+    "subject",
+    "summary",
+  )) {
+    textHit = hit;
+    break;
+  }
+  assert.ok(textHit);
+  assert.ok("key" in textHit.entity);
+  assert.equal(textHit.entity.key, subjectKey);
+  assert.equal(textHit.field, "summary");
+  assert.ok(textHit.utf8Range[1] > textHit.utf8Range[0]);
+  console.log(`full-text query ok: ${phrase} @ ${textHit.utf8Range.join("-")}`);
 }
 if (entity.hasInfobox) {
   const infobox = await data.longText({
@@ -184,10 +238,5 @@ const mappings = await data.mappings();
 assert.ok(Object.keys(mappings.fact_labels["RELATES_TO"] ?? {}).length > 0);
 console.log("mappings ok");
 
-// 成员缓存命中不得产生网络请求
-const before = requests;
-await data.entity(subjectKey);
-await data.factsFor(subjectKey);
-assert.equal(requests, before, "缓存命中零请求");
-console.log(`cache ok (total ${requests} requests)`);
+console.log(`bounded caches ok (total ${requests} requests)`);
 console.log("SMOKE PASS");

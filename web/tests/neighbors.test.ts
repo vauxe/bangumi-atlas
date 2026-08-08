@@ -26,6 +26,7 @@ const mappings: Mappings = {
   platform: {},
   person_type: { "1": "个人" },
   character_role: { "1": "角色" },
+  episode_type: { "0": "本篇" },
 };
 
 const relates = (

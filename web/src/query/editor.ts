@@ -4,6 +4,7 @@ import { Node as ProseMirrorNode, Schema, type NodeSpec } from "prosemirror-mode
 import { EditorState } from "prosemirror-state";
 
 import type { ExplorerCondition, ExplorerQuery } from "./explorer";
+import type { QueryBundle } from "./bundle";
 import type { Owner, QueryFactKind } from "./contract";
 import {
   FIELD_LABEL,
@@ -29,7 +30,7 @@ const clause = (name: string, attrs: NodeSpec["attrs"]): NodeSpec => ({
 /** The editor schema stores query meaning, never source text or form state. */
 export const queryEditorSchema = new Schema({
   nodes: {
-    doc: { content: "find query_clause*" },
+    doc: { content: "(find query_clause*) | recipe | bundle" },
     find: {
       atom: true,
       selectable: true,
@@ -61,6 +62,26 @@ export const queryEditorSchema = new Schema({
     limit: clause("limit", {
       raw: { default: "200" },
     }),
+    recipe: {
+      atom: true,
+      selectable: true,
+      attrs: {
+        kind: { default: "fullText" },
+        text: { default: "" },
+        from: { default: "" },
+        to: { default: "" },
+      },
+      toDOM: () => ["div", { "data-query-clause": "recipe" }],
+    },
+    bundle: {
+      atom: true,
+      selectable: true,
+      attrs: {
+        value: { default: null },
+        titles: { default: [] },
+      },
+      toDOM: () => ["div", { "data-query-clause": "bundle" }],
+    },
     text: {},
   },
 });
@@ -73,8 +94,14 @@ export interface QueryEditorDiagnostic {
 
 export interface LoweredQueryEditorDocument {
   draft: ExplorerQuery | null;
+  recipe?: QueryEditorRecipe;
+  bundle?: QueryBundle;
   diagnostics: QueryEditorDiagnostic[];
 }
+
+export type QueryEditorRecipe =
+  | { kind: "fullText"; text: string }
+  | { kind: "common" | "path"; from: string; to: string };
 
 function editableCondition(
   condition: ExplorerCondition,
@@ -140,12 +167,34 @@ export function createQueryEditorDocument(draft: ExplorerQuery): ProseMirrorNode
       direction: order.direction,
     }));
   }
-  if (draft.limit !== null) {
+  if (draft.limit !== undefined && draft.limit !== null) {
     children.push(queryEditorSchema.node("limit", {
       raw: String(draft.limit ?? 200),
     }));
   }
   return queryEditorSchema.node("doc", null, children);
+}
+
+export function createQueryRecipeDocument(
+  recipe: QueryEditorRecipe,
+): ProseMirrorNode {
+  return queryEditorSchema.node("doc", null, [
+    queryEditorSchema.node("recipe", {
+      kind: recipe.kind,
+      text: recipe.kind === "fullText" ? recipe.text : "",
+      from: recipe.kind === "fullText" ? "" : recipe.from,
+      to: recipe.kind === "fullText" ? "" : recipe.to,
+    }),
+  ]);
+}
+
+export function createQueryBundleDocument(bundle: QueryBundle): ProseMirrorNode {
+  return queryEditorSchema.node("doc", null, [
+    queryEditorSchema.node("bundle", {
+      value: bundle,
+      titles: Object.values(bundle.sections).map((section) => section.answer.title),
+    }),
+  ]);
 }
 
 export function createQueryEditorState(doc: ProseMirrorNode): EditorState {
@@ -215,6 +264,35 @@ export function lowerQueryEditorDocument(
   doc: ProseMirrorNode,
 ): LoweredQueryEditorDocument {
   const diagnostics: QueryEditorDiagnostic[] = [];
+  if (doc.firstChild?.type.name === "bundle") {
+    const bundle = doc.firstChild.attrs.value as QueryBundle | null;
+    return bundle
+      ? { draft: null, bundle, diagnostics }
+      : {
+          draft: null,
+          diagnostics: [{ clause: 0, message: "查询内容不完整" }],
+        };
+  }
+  if (doc.firstChild?.type.name === "recipe") {
+    const kind = String(doc.firstChild.attrs.kind);
+    if (kind === "fullText") {
+      const text = String(doc.firstChild.attrs.text).trim();
+      return text
+        ? { draft: null, recipe: { kind, text }, diagnostics }
+        : {
+            draft: null,
+            diagnostics: [{ clause: 0, message: "请输入要搜索的正文" }],
+          };
+    }
+    const from = String(doc.firstChild.attrs.from);
+    const to = String(doc.firstChild.attrs.to);
+    if ((kind === "common" || kind === "path") && from && to)
+      return { draft: null, recipe: { kind, from, to }, diagnostics };
+    return {
+      draft: null,
+      diagnostics: [{ clause: 0, message: "请选择两个实体" }],
+    };
+  }
   const owner = String(doc.firstChild?.attrs.owner ?? "") as Owner;
   if (!(owner in OWNER_LABEL)) {
     return {
@@ -315,6 +393,20 @@ export function readableQueryEditorDocument(
   doc: ProseMirrorNode,
   entityLabel: (ref: string) => string = (ref) => ref,
 ): string {
+  if (doc.firstChild?.type.name === "bundle") {
+    const titles = doc.firstChild.attrs.titles as string[];
+    return `已保存查询：${titles.join("、") || "查询结果"}`;
+  }
+  if (doc.firstChild?.type.name === "recipe") {
+    const kind = String(doc.firstChild.attrs.kind);
+    if (kind === "fullText")
+      return `搜索所有正文 包含 ${String(doc.firstChild.attrs.text)}`;
+    const from = entityLabel(String(doc.firstChild.attrs.from));
+    const to = entityLabel(String(doc.firstChild.attrs.to));
+    return kind === "common"
+      ? `查找 ${from} 与 ${to} 的共同关联`
+      : `查找 ${from} 到 ${to} 的关系路径`;
+  }
   const owner = String(doc.firstChild?.attrs.owner ?? "subject") as Owner;
   const lines = [`查找${OWNER_LABEL[owner] ?? "条目"}`];
   for (let index = 1; index < doc.childCount; index++) {

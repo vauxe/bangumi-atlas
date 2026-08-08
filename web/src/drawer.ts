@@ -2,7 +2,6 @@
  * 组内 chips 点击即行走)、分页;简介、infobox 源码、分集介绍等
  * 长文本只在用户展开时读取,并按纯文本分段渲染。 */
 
-import type { CommonItem, PathResult } from "./graph";
 import type { Data } from "./data";
 import { chipCover, drawerCover } from "./covers";
 import {
@@ -112,10 +111,6 @@ export function drawerTopActions(key?: number): string {
       ×
     </button>
   </div>`;
-}
-
-export function pathArrow(label: string, direction: 1 | -1): string {
-  return `${direction === 1 ? "↓" : "↑"} ${label}`;
 }
 
 /** 超长文本分段:先渲染前 shown 字,避免一次生成巨型 DOM。 */
@@ -526,76 +521,6 @@ export class Drawer {
     </button>`;
   }
 
-  async showCompare(
-    aRank: number,
-    bRank: number,
-    items: CommonItem[],
-    direct: string | null,
-  ): Promise<void> {
-    const viewEpoch = ++this.viewEpoch;
-    this.cur = null; // 非详情视图,分页态失效
-    this.open();
-    this.el.innerHTML = html`<div class="loading">加载名字…</div>`;
-    await this.deps.names.load([
-      aRank,
-      bRank,
-      ...items.map((item) => item.rank),
-    ]);
-    if (this.viewEpoch !== viewEpoch) return;
-    const rows = items
-      .map(
-        (it) => html`<div class="prow">
-          ${raw(this.chipOf(it.rank))}
-          <span class="rmeta">${it.la} ↔ ${it.lb}</span>
-        </div>`,
-      )
-      .join("");
-    this.el.innerHTML = html`
-      ${raw(drawerTopActions())}
-      <h2>⚭ 共同关联</h2>
-      <div class="chips">
-        ${raw(this.chipOf(aRank))} × ${raw(this.chipOf(bRank))}
-      </div>
-      ${raw(
-        direct !== null
-          ? html`<div class="stats">两者直接相关:${direct}</div>`
-          : "",
-      )}
-      <div class="group-label">
-        共同关联 ${items.length} 个(基于各自热度内联关系)
-      </div>
-      ${raw(rows)}
-    `;
-  }
-
-  async showPath(res: PathResult): Promise<void> {
-    const viewEpoch = ++this.viewEpoch;
-    this.cur = null;
-    this.open();
-    this.el.innerHTML = html`<div class="loading">加载名字…</div>`;
-    await this.deps.names.load(res.ranks);
-    if (this.viewEpoch !== viewEpoch) return;
-    const rows = res.ranks
-      .map((rank, i) => {
-        const arrow =
-          i < res.labels.length
-            ? html`<div class="parrow">
-                ${pathArrow(res.labels[i] ?? "", res.directions[i] ?? 1)}
-              </div>`
-            : "";
-        return html`<div class="prow">${raw(this.chipOf(rank))}</div>${raw(arrow)}`;
-      })
-      .join("");
-    this.el.innerHTML = html`
-      ${raw(drawerTopActions())}
-      <h2>🧭 最短路径(${res.ranks.length - 1} 跳)</h2>
-      ${raw(rows)}
-      <div class="note">
-        搜索范围:每层热度 top-48 邻居 × 6 跳内(有界双向 BFS)
-      </div>
-    `;
-  }
-
   private rerender(): void {
     const cur = this.cur;
     if (!cur) return;
@@ -931,10 +856,11 @@ export class Drawer {
   private render(cur: Current): string {
     const { rank, key, entity } = cur;
     const nameRow = this.deps.names.row(rank);
+    const nameCn = entity?.kind === "subject" ? entity.nameCn : "";
     const title =
-      entity?.nameCn || entity?.name || nameRow?.[1] || nameRow?.[0] ||
+      nameCn || entity?.name || nameRow?.[1] || nameRow?.[0] ||
       this.nameOf(rank);
-    const sub = entity?.nameCn ? entity.name : "";
+    const sub = nameCn ? entity?.name ?? "" : "";
     const stats = this.statsOf(cur);
     const panel = this.renderPanel(cur);
     return html`
