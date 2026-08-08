@@ -103,13 +103,10 @@ export interface Manifest {
 /** 几何 SoA(rank 有序)。 */
 export interface Geometry {
   positions: Float32Array;
-  year: Uint16Array;
   key: Uint32Array;
   size: Uint8Array;
   /** bit0 nsfw、bit1 孤立外环、bit2-4 媒介,余位 0。 */
   flags: Uint8Array;
-  score: Uint8Array;
-  tags: Uint32Array;
   loaded: number;
   sparse: Map<number, [number, number, number]>;
 }
@@ -247,8 +244,6 @@ export interface PersonEntity {
   kind: "person";
   key: number;
   name: string;
-  /** Older views may read this field; Archive does not publish it. */
-  nameCn?: string;
   type: number;
   career: string[];
   comments: number;
@@ -261,8 +256,6 @@ export interface CharacterEntity {
   kind: "character";
   key: number;
   name: string;
-  /** Older views may read this field; Archive does not publish it. */
-  nameCn?: string;
   role: number;
   comments: number;
   collects: number;
@@ -316,7 +309,7 @@ export interface Mappings {
   platform: Record<string, string>;
   person_type: Record<string, string>;
   character_role: Record<string, string>;
-  episode_type?: Record<string, string>;
+  episode_type: Record<string, string>;
 }
 
 /** 搜索投影内嵌主名称和种类，避免常规前缀联想扇出读取名字块。 */

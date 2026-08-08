@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 
+import { compileExplorerQuery } from "../src/query/explorer";
+import type { QueryBundle } from "../src/query/bundle";
+import { encodeCypherState } from "../src/query/cypher-url";
+import { encodeQuestion } from "../src/query/question-url";
 import { state } from "../src/store";
 import { decode, encode } from "../src/url";
 
@@ -12,21 +16,13 @@ const view = {
 };
 
 beforeEach(() => {
-  state.filters.yearMin = 0;
-  state.filters.yearMax = 9999;
-  state.filters.media = new Set();
-  state.filters.scoreMin = 0;
-  state.filters.tags = new Set();
+  state.queryBundle = null;
 });
 
-test("round-trips stable selection and link-query identity", () => {
-  const hash = encode(view, 0x0100_002a, 123, false, {
-    kind: "path",
-    fromKey: 0x0200_0007,
-    fromRank: 9,
-  });
-
-  const decoded = decode(hash);
+test("reads legacy link-query identity without writing it again", () => {
+  const decoded = decode(
+    "#n=16777258&r=123&q=path&f=33554439&fr=9",
+  );
   assert.equal(decoded.key, 0x0100_002a);
   assert.equal(decoded.rank, 123);
   assert.deepEqual(decoded.link, {
@@ -34,6 +30,7 @@ test("round-trips stable selection and link-query identity", () => {
     fromKey: 0x0200_0007,
     fromRank: 9,
   });
+  assert.doesNotMatch(encode(view, decoded.key, decoded.rank), /(?:^|&)(?:q|f|fr)=/);
 });
 
 test("keeps old selection URLs compatible and ignores partial link state", () => {
@@ -41,22 +38,54 @@ test("keeps old selection URLs compatible and ignores partial link state", () =>
   assert.equal(decode("#n=16777258&r=123&q=common&f=33554439").link, null);
 });
 
-test("encodes filters canonically regardless of Set insertion order", () => {
-  state.filters.media = new Set([6, 1, 4]);
-  state.filters.tags = new Set([9, 2, 5]);
+test("encodes one canonical QueryBundle and no parallel filter state", () => {
+  state.queryBundle = compileExplorerQuery({
+    owner: "subject",
+    condition: { kind: "compare", field: "score", operator: "gte", value: 8 },
+    columns: ["ref", "name", "score"],
+  });
 
   const hash = encode(view, null, null);
+  assert.match(hash, /(?:^|&)qb=/);
+  assert.doesNotMatch(hash, /(?:^|&)(?:aq|ac|m|t|s|y)=/);
 
-  assert.match(hash, /(?:^|&)m=1,4,6(?:&|$)/);
-  assert.match(hash, /(?:^|&)t=2,5,9(?:&|$)/);
+  state.queryBundle = null;
+  decode(hash);
+  const decodedBundle = state.queryBundle as QueryBundle | null;
+  assert.equal(decodedBundle?.schema, "atlas-query-bundle-v2");
+  assert.equal(decodedBundle?.sections.results?.query.limit, 200);
 });
 
-test("rejects malformed, reversed, and fractional filter parameters", () => {
-  decode("#y=2030-2000&m=1,5,6.5&t=2,3.5,99&s=101");
+test("does not revive obsolete canvas filter state", () => {
+  decode("#y=2000-2030&m=1&t=2&s=85");
+  assert.equal(state.queryBundle, null);
+  assert.doesNotMatch(encode(view, null, null), /(?:^|&)(?:m|t|s|y)=/);
+});
 
-  assert.equal(state.filters.yearMin, 0);
-  assert.equal(state.filters.yearMax, 9999);
-  assert.deepEqual([...state.filters.media], [1]);
-  assert.deepEqual([...state.filters.tags], [2]);
-  assert.equal(state.filters.scoreMin, 0);
+test("migrates a legacy ordinary-user question into QueryBundle v2", () => {
+  const encoded = encodeQuestion({
+    schema: "atlas-question-v1",
+    mode: "find",
+    owner: "subject",
+    condition: { kind: "compare", field: "score", operator: "gte", value: 8 },
+    columns: ["ref", "name", "score"],
+  });
+
+  decode(`#aq=${encoded}`);
+
+  assert.equal(state.queryBundle?.schema, "atlas-query-bundle-v2");
+  assert.ok(state.queryBundle?.sections.results);
+});
+
+test("migrates legacy Atlas Cypher into the same QueryBundle state", () => {
+  const encoded = encodeCypherState({
+    schema: "atlas-cypher-source-v1",
+    source: "MATCH (s:Subject) WHERE s.score >= $min RETURN s AS subject",
+    parameters: { min: 8 },
+  });
+
+  decode(`#ac=${encoded}`);
+
+  assert.equal(state.queryBundle?.schema, "atlas-query-bundle-v2");
+  assert.ok(state.queryBundle?.sections.results);
 });

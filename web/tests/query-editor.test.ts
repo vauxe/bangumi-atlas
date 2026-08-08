@@ -6,6 +6,8 @@ import { EditorState } from "prosemirror-state";
 
 import {
   createQueryEditorDocument,
+  createQueryBundleDocument,
+  createQueryRecipeDocument,
   createQueryEditorState,
   lowerQueryEditorDocument,
   queryEditorSchema,
@@ -68,6 +70,12 @@ test("round-trips the ordinary query through one structural document", () => {
     },
     diagnostics: [],
   });
+});
+
+test("starts with only the find clause and keeps defaults semantic", () => {
+  const doc = createQueryEditorDocument({ owner: "subject" });
+  assert.equal(doc.childCount, 1);
+  assert.equal(doc.firstChild?.type.name, "find");
 });
 
 test("preserves an incomplete clause without replacing the last valid query", () => {
@@ -151,4 +159,51 @@ test("restores the editor document exactly from its structured JSON", () => {
     lowerQueryEditorDocument(restored),
     lowerQueryEditorDocument(original),
   );
+});
+
+test("represents context recipes in the same editor document", () => {
+  const doc = createQueryRecipeDocument({
+    kind: "path",
+    from: "subject:1",
+    to: "person:2",
+  });
+
+  assert.deepEqual(lowerQueryEditorDocument(doc), {
+    draft: null,
+    recipe: { kind: "path", from: "subject:1", to: "person:2" },
+    diagnostics: [],
+  });
+  assert.equal(readableQueryEditorDocument(doc, (ref) => ({
+    "subject:1": "千与千寻",
+    "person:2": "宫崎骏",
+  })[ref] ?? ref), "查找 千与千寻 到 宫崎骏 的关系路径");
+});
+
+test("keeps a non-editable restored bundle inside the structural document", () => {
+  const bundle = {
+    schema: "atlas-query-bundle-v2" as const,
+    release: { policy: "latest" as const },
+    sections: {
+      results: {
+        query: {
+          schema: "atlas-query-document-v2" as const,
+          root: "source",
+          parameters: {},
+          operators: {
+            source: { kind: "scan" as const, owner: "subject" as const, binding: "item" },
+          },
+          limit: 10,
+        },
+        answer: { shape: "table" as const, title: "收藏分析" },
+      },
+    },
+  };
+  const doc = createQueryBundleDocument(bundle);
+
+  assert.deepEqual(lowerQueryEditorDocument(doc), {
+    draft: null,
+    bundle,
+    diagnostics: [],
+  });
+  assert.equal(readableQueryEditorDocument(doc), "已保存查询：收藏分析");
 });

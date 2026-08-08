@@ -2,11 +2,8 @@
  * 默认不显示任何边与名字;选中节点后由工作集显示相连关系边、
  * 节点名与关系名(方向 = 文案箭头 + 边亮度梯度,亮端为目标端)。
  *
- * 性能架构:节点的颜色/亮度/可见性全部在 shader 里由静态实例属性
- * (style、year)+ 少量 uniform 推导——年份滑块、媒介 chips、
- * 聚光都只改 uniform,零 CPU 循环、零属性重传
- * (实测 CPU 路径 985k 节点 recolor 循环 61ms/次 + ~21MB 重传,已移除)。
- * 可见性用 fs discard 表达，被滤除节点连拾取和高亮一起消失。
+ * 性能架构:节点颜色与聚光在 shader 里由静态 style 和一个 uniform
+ * 推导，零 CPU 全图循环、零属性重传。
  * 几何流式期间属性写入 GPU Buffer 增量区间,不整块重传。 */
 
 import { Deck, LayerExtension, OrbitView } from "@deck.gl/core";
@@ -35,10 +32,7 @@ import type { Bounds3D, Geometry } from "./types";
 
 export type { OrbitState } from "./camera";
 
-const EDGE_WIDTHS = {
-  relation: 1,
-  path: 1.5,
-} as const;
+const EDGE_WIDTH = 1;
 const CASCADE_STEP_MS = 30;
 const CASCADE_FADE_MS = 200;
 const PULSE_MS = 500;
@@ -65,19 +59,13 @@ class CircleCropExtension extends LayerExtension {
   }
 }
 
-// ---- 节点样式扩展:着色/过滤/雾一体,全在 GPU ----
+// ---- 节点样式扩展:着色与聚光都在 GPU ----
 // 实例属性:instanceStyle = [flags, etype, sizeLog, 0](u8×4)、
-// instanceYear = year(u16);其余全是 uniform。
+// 其余全是 uniform。
 // 注意:luma 的 uniform block 解析按行取首个声明,必须一行一字段;
 // 全用 float——int 成员的默认精度 vs(highp)/fs(mediump)不一致,
 // 会在链接期报 precision mismatch,掩码值 ≤126 用 float 无损
 const ATLAS_UNIFORM_BLOCK = `uniform atlasUniforms {
-  float yearMin;
-  float yearMax;
-  float mediaMask;
-  float scoreMin;
-  float tagLo;
-  float tagHi;
   float spotlight;
 } atlas;`;
 
@@ -86,23 +74,11 @@ const atlasShaderModule = {
   vs: ATLAS_UNIFORM_BLOCK,
   fs: ATLAS_UNIFORM_BLOCK,
   uniformTypes: {
-    yearMin: "f32",
-    yearMax: "f32",
-    mediaMask: "f32",
-    scoreMin: "f32",
-    tagLo: "f32",
-    tagHi: "f32",
     spotlight: "f32",
   },
 } as const;
 
 export interface AtlasUniforms {
-  yearMin: number;
-  yearMax: number;
-  mediaMask: number;
-  scoreMin: number;
-  tagLo: number;
-  tagHi: number;
   spotlight: number;
 }
 
@@ -115,16 +91,10 @@ export class NodeStyleExtension extends LayerExtension {
       inject: {
         "vs:#decl": `
 in vec4 instanceStyle;
-in float instanceYear;
-in vec2 instanceTags;
 // 节点元数据是离散值；flat 防止 billboard 内插值篡改 flags 等字段。
-flat out vec4 atlas_style;
-flat out float atlas_year;
-flat out vec2 atlas_tags;`,
+flat out vec4 atlas_style;`,
         "vs:#main-end": `
-atlas_style = instanceStyle;
-atlas_year = instanceYear;
-atlas_tags = instanceTags;`,
+atlas_style = instanceStyle;`,
         // deck 先钳制再做透视；这里在最终屏幕空间补上同一上下限。
         "vs:DECKGL_FILTER_SIZE": `
 if (gl_Position.w > 0.0) {
@@ -135,48 +105,20 @@ if (gl_Position.w > 0.0) {
     scatterplot.radiusMaxPixels) / screenRadius;
 }`,
         "fs:#decl": `
-flat in vec4 atlas_style;
-flat in float atlas_year;
-flat in vec2 atlas_tags;`,
-        // 颜色、亮度和可见性统一在 shader 中推导；
-        // discard 使被滤除节点同时移出拾取与 autoHighlight。
+flat in vec4 atlas_style;`,
+        // 颜色与亮度统一在 shader 中推导。
         "fs:DECKGL_FILTER_COLOR": `
 {
   float f_flags = atlas_style.x;
   float f_etype = atlas_style.y;
-  float f_year = atlas_year;
   bool a_iso = mod(floor(f_flags / 2.0), 2.0) >= 1.0;
-  int a_media = int(floor(f_flags / 4.0));
   bool isSubject = f_etype < 1.5; // 档位比较,规避浮点等值
-  bool yearOn = atlas.yearMin > 0.5 || atlas.yearMax < 9998.5;
-  bool scoreOn = atlas.scoreMin > 0.5;
-  bool tagsOn = atlas.tagLo > 0.5 || atlas.tagHi > 0.5;
-  if (isSubject) {
-    if (yearOn && (f_year < 0.5 ||
-        f_year < atlas.yearMin || f_year > atlas.yearMax)) discard;
-    // 评分过滤:无评分(0)在过滤激活时一并隐藏
-    if (scoreOn && atlas_style.w < atlas.scoreMin) discard;
-    if (tagsOn) { // AND 语义:须含全部所选标签(u32 拆两半 u16)
-      int tlo = int(atlas_tags.x + 0.5);
-      int thi = int(atlas_tags.y + 0.5);
-      int slo = int(atlas.tagLo + 0.5);
-      int shi = int(atlas.tagHi + 0.5);
-      if ((tlo & slo) != slo || (thi & shi) != shi) discard;
-    }
-  }
   vec3 rgb = isSubject ? vec3(61.0, 142.0, 222.0)
            : f_etype < 2.5 ? vec3(229.0, 106.0, 64.0)
            : vec3(39.0, 171.0, 124.0);
   // 节点重要度已由半径表达，普通节点保持完整实体色，避免重复编码把
   // 中低热度节点系统性压暗。Alpha 只保留 SDF 圆边，不参与亮度。
   float visibility = a_iso ? 150.0 / 255.0 : 1.0;
-  // 作品属性过滤激活时,人物/角色降暗但不隐藏。
-  bool subjFilterOn = yearOn || scoreOn || tagsOn;
-  if (subjFilterOn && !isSubject)
-    visibility = min(visibility, 90.0 / 255.0);
-  int mediaMask = int(atlas.mediaMask + 0.5);
-  if (mediaMask != 0 && a_media > 0 &&
-      (mediaMask & (1 << a_media)) == 0) visibility = 40.0 / 255.0;
   if (atlas.spotlight > 0.5)
     visibility = min(visibility, 80.0 / 255.0);
   vec3 stableRgb = mix(vec3(15.0, 26.0, 28.0), rgb, visibility);
@@ -195,9 +137,6 @@ flat in vec2 atlas_tags;`,
     };
     layer.getAttributeManager()?.addInstanced({
       instanceStyle: { size: 4, type: "uint8", accessor: "getStyle" },
-      instanceYear: { size: 1, type: "uint16", accessor: "getYear" },
-      // u32 标签位图按两半 u16 直灌(f32 顶点属性 >2^24 会丢位)
-      instanceTags: { size: 2, type: "uint16", accessor: "getTags" },
     });
   }
 
@@ -270,7 +209,6 @@ export class Scene {
   private geo: Geometry;
   // 静态实例属性(随几何流一次性填充,之后永不重算)
   private styleBuf: Uint8Array; // [flags, etype, sizeLog, 0] × n
-  private yearBuf: Uint16Array; // year × n
   private styled = 0; // 已填充的节点数
 
   // GPU 常驻缓冲(设备就绪后接管;之前 render 退回 CPU 数组直灌)
@@ -278,8 +216,6 @@ export class Scene {
     positions: GrowingBuffer;
     radius: GrowingBuffer;
     style: GrowingBuffer;
-    year: GrowingBuffer;
-    tags: GrowingBuffer;
   } | null = null;
 
   private contextData: ContextData | null = null;
@@ -308,7 +244,6 @@ export class Scene {
     this.camera = new Camera(bounds);
     const n = geo.key.length;
     this.styleBuf = new Uint8Array(n * 4);
-    this.yearBuf = new Uint16Array(n);
     this.deck = new Deck({
       parent,
       views: this.camera.view(),
@@ -346,14 +281,6 @@ export class Scene {
           ),
           radius: new GrowingBuffer(device, this.geo.size),
           style: new GrowingBuffer(device, this.styleBuf),
-          year: new GrowingBuffer(
-            device,
-            new Uint8Array(this.yearBuf.buffer),
-          ),
-          tags: new GrowingBuffer(
-            device,
-            new Uint8Array(this.geo.tags.buffer),
-          ),
         };
         this.contextLength = -1; // 重建 contextData,切换到 GPU 缓冲
         this.syncGpu();
@@ -470,7 +397,6 @@ export class Scene {
       ray.origin,
       ray.dir,
       60 / Math.max(focalPx, 1),
-      (r) => this.isVisible(r),
     );
     this.anchorCache = { x: px, y: py, rank, at: now };
     return rank >= 0 ? this.posOf(rank) : null;
@@ -488,25 +414,6 @@ export class Scene {
     return this.geo.sparse.get(rank) ?? null;
   }
 
-  /** 可见性(与 shader 判定逐条对齐):纯函数,无缓存数组。 */
-  isVisible(rank: number): boolean {
-    const f = state.filters;
-    if (etype(this.geo.key[rank] ?? 0) !== 1) return true;
-    const yearOn = f.yearMin > 0 || f.yearMax < 9999;
-    if (yearOn) {
-      const y = this.geo.year[rank] ?? 0;
-      if (y === 0 || y < f.yearMin || y > f.yearMax) return false;
-    }
-    if (f.scoreMin > 0 && (this.geo.score[rank] ?? 0) < f.scoreMin)
-      return false;
-    if (f.tags.size) {
-      let sel = 0;
-      for (const b of f.tags) sel = (sel | (1 << b)) >>> 0;
-      if (((this.geo.tags[rank] ?? 0) & sel) >>> 0 !== sel) return false;
-    }
-    return true;
-  }
-
   /** 过滤/聚光/图层变化:现在只是 uniform 更新。 */
   recolor(): void {
     if (state.selection !== this.lastSelection) {
@@ -518,13 +425,11 @@ export class Scene {
 
   geometryGrew(): void {
     // 增量填充静态样式属性(每节点一生只算一次)
-    const { geo, styleBuf, yearBuf } = this;
+    const { geo, styleBuf } = this;
     for (let i = this.styled; i < geo.loaded; i++) {
       styleBuf[i * 4] = geo.flags[i] ?? 0;
       styleBuf[i * 4 + 1] = etype(geo.key[i] ?? 0);
       styleBuf[i * 4 + 2] = geo.size[i] ?? 0;
-      styleBuf[i * 4 + 3] = geo.score[i] ?? 0; // 评分×10,属性过滤用
-      yearBuf[i] = geo.year[i] ?? 0;
     }
     this.styled = geo.loaded;
     this.syncGpu();
@@ -537,8 +442,6 @@ export class Scene {
     this.gpu.positions.sync(m * 12);
     this.gpu.radius.sync(m);
     this.gpu.style.sync(m * 4);
-    this.gpu.year.sync(m * 2);
-    this.gpu.tags.sync(m * 4);
   }
 
   flyTo(rank: number, zoom?: number): void {
@@ -660,50 +563,26 @@ export class Scene {
           );
       col.set([r, g, b, Math.round(255 * k)], (i + 1) * 4);
     });
-    // 三种连线形态:路径链(抑制扇形)/ 默认扇形 / 对比第二扇形
-    const chain = state.path.length >= 2 ? state.path : null;
     const edgeSegs: {
       a: [number, number, number];
       b: [number, number, number];
       label: string;
       alpha: number;
     }[] = [];
-    if (chain) {
-      for (let i = 0; i + 1 < chain.length; i++) {
-        const pa = this.posOf(chain[i] ?? 0);
-        const pb = this.posOf(chain[i + 1] ?? 0);
-        if (pa && pb)
-          edgeSegs.push({
-            a: pa,
-            b: pb,
-            label: state.pathLabels[i] ?? "",
-            alpha: 200,
-          });
-      }
-    } else {
-      shown.forEach((s, i) => {
-        const k = reduced
-          ? 1
-          : Math.max(
-              0,
-              Math.min(1, (t - i * CASCADE_STEP_MS) / CASCADE_FADE_MS),
-            );
-        edgeSegs.push({
-          a: selPos,
-          b: s.pos,
-          label: s.label,
-          alpha: Math.round(160 * k),
-        });
+    shown.forEach((s, i) => {
+      const k = reduced
+        ? 1
+        : Math.max(
+            0,
+            Math.min(1, (t - i * CASCADE_STEP_MS) / CASCADE_FADE_MS),
+          );
+      edgeSegs.push({
+        a: selPos,
+        b: s.pos,
+        label: s.label,
+        alpha: Math.round(160 * k),
       });
-      // 共同关联:从对比端再画一扇(标签属 A 侧,tooltip 不重复报)
-      const cw = state.compareWith;
-      const cwPos = cw !== null ? this.posOf(cw) : null;
-      if (cwPos) {
-        for (const s of shown)
-          if (s.rank !== cw)
-            edgeSegs.push({ a: cwPos, b: s.pos, label: "", alpha: 70 });
-      }
-    }
+    });
     // 方向梯度:每条边拆成两个半段,亮端 = 关系的目标端。
     // "← " 前缀表示选中侧是目标(指向选中节点);无标签的
     // 对比扇没有方向语义,两端等亮。
@@ -744,7 +623,7 @@ export class Scene {
             getColor: { value: lineAlpha, size: 4, normalized: true },
           },
         },
-        getWidth: chain ? EDGE_WIDTHS.path : EDGE_WIDTHS.relation,
+        getWidth: EDGE_WIDTH,
         widthUnits: "pixels",
         pickable: true, // 悬停工作集边时显示解码后的关系名
         onHover: (info: { index: number; x: number; y: number }) => {
@@ -920,8 +799,7 @@ export class Scene {
       this.contextData = {
         length: this.styled,
         attributes:
-          g?.positions.handle && g.radius.handle && g.style.handle &&
-          g.year.handle
+          g?.positions.handle && g.radius.handle && g.style.handle
             ? {
                 // 外部 buffer 必须显式 stride:deck 只在 {value}
                 // 分支按数组重算布局,{buffer} 分支沿用属性默认类型
@@ -944,18 +822,6 @@ export class Scene {
                   type: "uint8",
                   stride: 4,
                 },
-                getYear: {
-                  buffer: g.year.handle,
-                  size: 1,
-                  type: "uint16",
-                  stride: 2,
-                },
-                getTags: {
-                  buffer: g.tags.handle,
-                  size: 2,
-                  type: "uint16",
-                  stride: 4,
-                },
               }
             : {
                 getPosition: { value: this.geo.positions, size: 3 },
@@ -969,16 +835,6 @@ export class Scene {
                   size: 4,
                   type: "uint8",
                 },
-                getYear: {
-                  value: this.yearBuf,
-                  size: 1,
-                  type: "uint16",
-                },
-                getTags: {
-                  value: new Uint16Array(this.geo.tags.buffer),
-                  size: 2,
-                  type: "uint16",
-                },
               },
       };
       this.contextLength = this.styled;
@@ -987,18 +843,7 @@ export class Scene {
   }
 
   private atlasUniforms(): AtlasUniforms {
-    const f = state.filters;
-    let mask = 0;
-    for (const m of f.media) mask |= 1 << m;
-    let sel = 0;
-    for (const b of f.tags) sel |= 1 << b;
     return {
-      yearMin: f.yearMin,
-      yearMax: f.yearMax,
-      mediaMask: mask,
-      scoreMin: f.scoreMin,
-      tagLo: sel & 0xffff,
-      tagHi: sel >>> 16,
       spotlight: state.selection !== null ? 1 : 0,
     };
   }

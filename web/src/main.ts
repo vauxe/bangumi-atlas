@@ -5,9 +5,7 @@
 
 import { Drawer } from "./drawer";
 import { Data } from "./data";
-import { findCommon, findPath } from "./graph";
 import { esc } from "./html";
-import { Results } from "./results";
 import {
   ensureRankIndex,
   loadGzJson,
@@ -21,12 +19,14 @@ import {
   SiteDataContractError,
 } from "./loader";
 import { relationNeighbors } from "./neighbors";
+import { parseEntityRef } from "./query/contract";
+import { QueryWorkbench } from "./query/workbench";
+import { QueryWorkerClient } from "./query/worker-client";
 import { Scene } from "./scene";
 import { Search } from "./search";
 import { notify, state, subscribe } from "./store";
-import type { LinkState } from "./store";
-import { MEDIA_NAMES, TYPE_NAMES, etype } from "./types";
-import { decode, encode } from "./url";
+import { TYPE_NAMES, etype } from "./types";
+import { decode, encode, type LinkState } from "./url";
 import { locateStableTarget, resolveUrlSelection } from "./url-restore";
 
 const HOVER_PREFETCH_MS = 150;
@@ -65,7 +65,7 @@ async function boot(): Promise<void> {
   const geo = gstream.geo;
   const names = openNames(manifest);
   const searchAliases = openSearchAliases(manifest);
-  const data = new Data(manifest, names);
+  const data = new Data();
 
   const drawer = new Drawer($("#drawer"), {
     geo,
@@ -98,28 +98,37 @@ async function boot(): Promise<void> {
     tooltip.innerHTML = `${esc(text)} <span class="tt">${esc(sub)}</span>`;
   };
 
-  // ---- URL 历史:离散导航入栈,相机/过滤原地替换 ----
+  // ---- URL 历史:离散导航入栈,相机/查询表单原地替换 ----
   let historyApplications = 0;
   let replaceTimer = 0;
-  const currentUrl = (): string => {
-    return encode(
-      scene.getViewState(),
-      state.selectionKey,
-      state.selection,
-      scene.camera.ortho,
-      state.link,
-    );
+  const currentUrl = (): string | null => {
+    try {
+      return encode(
+        scene.getViewState(),
+        state.selectionKey,
+        state.selection,
+        scene.camera.ortho,
+      );
+    } catch (error) {
+      console.error("分享链接生成失败", error);
+      hud.textContent = error instanceof Error
+        ? error.message
+        : "当前查询无法写入分享链接";
+      return null;
+    }
   };
   const replaceUrl = (): void => {
     if (historyApplications > 0) return;
     if (replaceTimer) return;
     replaceTimer = window.setTimeout(() => {
       replaceTimer = 0;
-      history.replaceState(null, "", currentUrl());
+      const next = currentUrl();
+      if (next !== null) history.replaceState(null, "", next);
     }, 200);
   };
   const pushUrl = (): void => {
-    history.pushState(null, "", currentUrl());
+    const next = currentUrl();
+    if (next !== null) history.pushState(null, "", next);
   };
 
   // ---- 场景先建,确保首块几何到达即可渲染 ----
@@ -219,6 +228,11 @@ async function boot(): Promise<void> {
   );
 
   const sparseRankByKey = new Map<number, number>();
+  const queryRefFromKey = (key: number): `${"subject" | "person" | "character"}:${number}` => {
+    const owner = (["", "subject", "person", "character"] as const)[key >>> 24];
+    if (!owner) throw new TypeError(`无效实体键 ${key}`);
+    return `${owner}:${key & 0xffffff}`;
+  };
   const rankOfKeyLocal = (key: number): number | null => {
     const sparse = sparseRankByKey.get(key);
     if (sparse !== undefined) return sparse;
@@ -262,61 +276,16 @@ async function boot(): Promise<void> {
     push = true,
     cam: "fly" | "none" = "fly",
   ): Promise<void> {
-    const epoch = ++navigationEpoch;
     const bKey = geo.key[bRank] ?? 0;
     if (!bKey || geo.key[link.fromRank] !== link.fromKey) {
       hud.textContent = "节点身份解析失败,请刷新重试";
       return;
     }
-    if (link.kind === "path" && !geometryComplete) {
-      hud.textContent = "正在完成路径所需的几何索引…";
-      await geoDone;
-      if (epoch !== navigationEpoch) return;
-    }
-    hud.textContent =
-      link.kind === "common" ? "计算共同关联…" : "搜索路径…";
-    if (link.kind === "common") {
-      const { items, direct } = await findCommon(
-        link.fromRank,
-        bRank,
-        geo,
-        data,
-      );
-      if (epoch !== navigationEpoch) return;
-      state.selection = bRank;
-      state.selectionKey = bKey;
-      state.link = link;
-      state.compareWith = link.fromRank;
-      state.path = [];
-      state.pathLabels = [];
-      const top = items.slice(0, 49);
-      state.neighbors = [link.fromRank, ...top.map((i) => i.rank)];
-      state.neighborLabels = ["", ...top.map((i) => i.lb)];
-      await drawer.showCompare(link.fromRank, bRank, items, direct);
-    } else {
-      const res = await findPath(link.fromRank, bRank, geo, data);
-      if (epoch !== navigationEpoch) return;
-      if (!res) {
-        hud.textContent = "6 跳内未找到路径(受热度宽度上限约束)";
-        await select(bRank, cam, push, bKey);
-        return;
-      }
-      state.selection = bRank;
-      state.selectionKey = bKey;
-      state.link = link;
-      state.compareWith = null;
-      state.path = res.ranks;
-      state.pathLabels = res.labels;
-      state.neighbors = res.ranks.filter((r) => r !== bRank);
-      state.neighborLabels = state.neighbors.map(() => "");
-      await drawer.showPath(res);
-      if (cam === "fly") scene.flyTo(bRank);
-    }
-    if (epoch !== navigationEpoch) return;
-    notify();
-    warmTextIndex();
-    if (push) pushUrl();
-    hud.textContent = "";
+    const from = queryRefFromKey(link.fromKey);
+    const to = queryRefFromKey(bKey);
+    pendingLink = null;
+    await select(bRank, cam, push, bKey);
+    queryWorkbench?.askRelationship(link.kind, from, to);
   }
 
   /** 相机语义:fly = 飞行聚焦;center = 远处才滑移枢轴并保持缩放;
@@ -330,10 +299,6 @@ async function boot(): Promise<void> {
     const epoch = ++navigationEpoch;
     const link = pendingLink;
     pendingLink = null;
-    state.compareWith = null;
-    state.path = [];
-    state.pathLabels = [];
-    state.link = null;
     state.selection = rank;
     state.selectionKey = keyHint;
     // 落点未流式覆盖时,一次 Range 点查同时解析坐标与 key。
@@ -385,10 +350,6 @@ async function boot(): Promise<void> {
     state.selectionKey = null;
     state.neighbors = [];
     state.neighborLabels = [];
-    state.compareWith = null;
-    state.path = [];
-    state.pathLabels = [];
-    state.link = null;
     pendingLink = null;
     drawer.hide();
     notify();
@@ -413,18 +374,7 @@ async function boot(): Promise<void> {
     hint.textContent = sel ? HINT_SELECTED : HINT_DEFAULT;
   });
 
-  // ---- 结果面板:过滤谓词 + 枚举 = 完整查询 ----
-  const results = new Results($("#results"), {
-    geo,
-    names,
-    visible: (r) => scene.isVisible(r),
-    pick: (rank) => void select(rank, "fly"),
-    reportError: (error) => reportError("结果名字加载", error),
-  });
-  subscribe(() => results.refresh());
-  void geoDone
-    .then(() => results.refresh(), () => undefined)
-    .catch((error: unknown) => reportError("结果索引刷新", error));
+  let queryWorkbench: QueryWorkbench | null = null;
 
   // ---- URL 恢复(深链)与 popstate(浏览器后退 = 回上一视图)----
   const applyUrl = async (initial: boolean): Promise<void> => {
@@ -469,13 +419,81 @@ async function boot(): Promise<void> {
         }
       }
       notify();
-      syncControls(); // 工具栏随 store 还原(操作可逆性)
     } finally {
       historyApplications--;
-      if (historyApplications === 0)
-        history.replaceState(null, "", currentUrl());
+      if (historyApplications === 0) {
+        const next = currentUrl();
+        if (next !== null) history.replaceState(null, "", next);
+      }
     }
   };
+
+  // ---- 统一问题构建器:普通用户问题与高级查询共享 Worker 执行链 ----
+  let queryClient: QueryWorkerClient | null = null;
+  const client = (): QueryWorkerClient => {
+    queryClient ??= new QueryWorkerClient(
+      new Worker(new URL("query-worker.js", document.baseURI)),
+    );
+    return queryClient;
+  };
+  queryWorkbench = new QueryWorkbench({
+    execute: (section, options) =>
+      client().execute(section.query, {}, options),
+    selectedEntity: async () => {
+      const key = state.selectionKey;
+      const rank = state.selection;
+      if (!key || rank === null) return null;
+      const owner = (["", "subject", "person", "character"] as const)[key >>> 24];
+      if (!owner) return null;
+      await names.load([rank]);
+      return {
+        ref: `${owner}:${key & 0xffffff}`,
+        label: names.get(rank) ?? `${owner} #${key & 0xffffff}`,
+      };
+    },
+    resolveEntityLabel: async (ref) => {
+      const parsed = parseEntityRef(ref);
+      if (parsed.owner === "episode") {
+        const episode = await data.episode(parsed.archiveId);
+        return episode?.name || `分集 #${parsed.archiveId}`;
+      }
+      const kind = parsed.owner === "subject"
+        ? 1
+        : parsed.owner === "person"
+          ? 2
+          : 3;
+      if (parsed.archiveId > 0xffffff)
+        throw new TypeError("实体不在当前数据版本中");
+      const entity = await data.entity((kind << 24) | parsed.archiveId);
+      if (!entity) throw new TypeError("实体不在当前数据版本中");
+      return entity.kind === "subject" ? entity.nameCn || entity.name : entity.name;
+    },
+    releaseId: () => manifest.version,
+    mappings: () => data.mappings(),
+    onEntity: (ref) => {
+      runTask((async () => {
+        const parsed = parseEntityRef(ref);
+        const kind = parsed.owner === "subject"
+          ? 1
+          : parsed.owner === "person"
+            ? 2
+            : parsed.owner === "character"
+              ? 3
+              : 0;
+        if (!kind || parsed.archiveId > 0xffffff)
+          throw new TypeError(`${ref} 不能在当前星图中定位`);
+        const key = (kind << 24) | parsed.archiveId;
+        await ensureRankIndex();
+        const rank = rankOfKeyLocal(key);
+        if (rank === null) throw new TypeError(`${ref} 不在当前 Release 中`);
+        await select(rank, "fly", true, key);
+      })(), "查询结果定位");
+    },
+    updateUrl: replaceUrl,
+  });
+  subscribe(() => {
+    queryWorkbench?.sync(state.queryBundle);
+  });
 
   // ---- 搜索(命中 → flyTo + 选中 + 亮邻居)----
   new Search(
@@ -485,30 +503,32 @@ async function boot(): Promise<void> {
       list: $("#hits"),
       status: $("#search-status"),
       more: $("#search-more"),
+      explore: $("#search-fulltext"),
     },
     searchAliases,
     manifest.limits.search_top,
     (rank) => runTask(select(rank, "fly"), "搜索结果加载"),
+    undefined,
+    (text) => queryWorkbench?.askFullText(text),
   );
 
-  // ---- 骰子:随机传送(跳过隐藏节点;冷启动屏同款)----
+  // ---- 骰子:在当前已加载的 Canvas 节点中随机传送 ----
   const rollDice = (): void => {
     const count = geo.loaded;
     if (!count) return;
-    for (let tries = 0; tries < Math.min(512, count); tries++) {
-      const rank = Math.floor(Math.random() * count);
-      if (scene.isVisible(rank)) {
-        runTask(select(rank, "fly"), "随机节点加载");
-        return;
-      }
-    }
-    hud.textContent = "当前筛选条件下未随机到可见节点,可从结果中选择";
+    runTask(select(Math.floor(Math.random() * count), "fly"), "随机节点加载");
   };
   $("#dice").addEventListener("click", rollDice);
 
   // ---- 键盘快捷键 ----
   document.addEventListener("keydown", (ev) => {
-    if (ev.target instanceof HTMLInputElement) return;
+    const target = ev.target;
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement ||
+      (target instanceof HTMLElement && target.isContentEditable)
+    ) return;
     const k = ev.key.toLowerCase();
     if (k === "t") {
       scene.topView();
@@ -518,127 +538,6 @@ async function boot(): Promise<void> {
     }
     if (ev.key === "Escape" && state.selection !== null) deselect(true);
   });
-
-  // ---- 标签过滤 chips(AND 语义)+ 评分下限滑块 ----
-  const tagBox = $("#tag-chips");
-  tagBox.innerHTML = manifest.tags
-    .map(
-      (name, bit) =>
-        `<button class="chip" data-tag="${bit}" aria-pressed="false">${esc(name)}</button>`,
-    )
-    .join("");
-  tagBox.addEventListener("click", (ev) => {
-    const b = (ev.target as HTMLElement).closest("[data-tag]");
-    if (!b) return;
-    const bit = Number(b.getAttribute("data-tag"));
-    if (state.filters.tags.has(bit)) state.filters.tags.delete(bit);
-    else state.filters.tags.add(bit);
-    b.classList.toggle("on");
-    b.setAttribute("aria-pressed", String(state.filters.tags.has(bit)));
-    notify();
-    replaceUrl();
-  });
-
-  const sMin = $("#score-min") as HTMLInputElement;
-  const scoreLabel = $("#score-label");
-  const applyScore = (): void => {
-    const v = Number(sMin.value);
-    state.filters.scoreMin = v;
-    scoreLabel.textContent = v > 0 ? `≥ ${(v / 10).toFixed(1)}` : "不限";
-    notify();
-    replaceUrl();
-  };
-  sMin.addEventListener("input", applyScore);
-
-  // 筛选面板折叠 + 激活计数徽标
-  const filtersPanel = $("#filters");
-  const filtersChev = $("#filters-head .rchev");
-  $("#filters-head").addEventListener("click", () => {
-    const closed = filtersPanel.classList.toggle("closed");
-    filtersChev.textContent = closed ? "▸" : "▾";
-    $("#filters-head").setAttribute("aria-expanded", String(!closed));
-  });
-  const filterBadge = $("#filters-count");
-  const updateFilterBadge = (): void => {
-    const f = state.filters;
-    const n =
-      f.tags.size +
-      f.media.size +
-      (f.scoreMin > 0 ? 1 : 0) +
-      (f.yearMin > 0 || f.yearMax < 9999 ? 1 : 0);
-    filterBadge.textContent = n > 0 ? String(n) : "";
-  };
-  subscribe(updateFilterBadge);
-
-  const mediaBox = $("#media-chips");
-  mediaBox.innerHTML = Object.entries(MEDIA_NAMES)
-    .map(
-      ([code, label]) =>
-        `<button class="chip" data-media="${code}" aria-pressed="false">${label}</button>`,
-    )
-    .join("");
-  mediaBox.addEventListener("click", (ev) => {
-    const b = (ev.target as HTMLElement).closest("[data-media]");
-    if (!b) return;
-    const code = Number(b.getAttribute("data-media"));
-    if (state.filters.media.has(code)) state.filters.media.delete(code);
-    else state.filters.media.add(code);
-    b.classList.toggle("on");
-    b.setAttribute("aria-pressed", String(state.filters.media.has(code)));
-    notify();
-    replaceUrl();
-  });
-
-  // ---- 时间机器:双拇指年代滑块(选中状态保留在 URL)----
-  const yMin = $("#year-min") as HTMLInputElement;
-  const yMax = $("#year-max") as HTMLInputElement;
-  const yearLabel = $("#year-label");
-  const [y0, y1] = manifest.year_range;
-  yMin.min = yMax.min = String(y0 || 1900);
-  yMin.max = yMax.max = String(y1 || 2030);
-  yMin.value = yMin.min;
-  yMax.value = yMax.max;
-  const applyYears = (): void => {
-    let a = Number(yMin.value);
-    let b = Number(yMax.value);
-    if (a > b) [a, b] = [b, a];
-    const full = a <= Number(yMin.min) && b >= Number(yMax.max);
-    state.filters.yearMin = full ? 0 : a;
-    state.filters.yearMax = full ? 9999 : b;
-    yearLabel.textContent = full ? "全部" : `${a} – ${b}`;
-    notify();
-    replaceUrl();
-  };
-  yMin.addEventListener("input", applyYears);
-  yMax.addEventListener("input", applyYears);
-
-  /** 工具栏 UI ← store:深链与 popstate 后控件不脱钩。 */
-  function syncControls(): void {
-    const f = state.filters;
-    for (const b of mediaBox.querySelectorAll("[data-media]")) {
-      const active = f.media.has(Number(b.getAttribute("data-media")));
-      b.classList.toggle("on", active);
-      b.setAttribute("aria-pressed", String(active));
-    }
-    for (const b of tagBox.querySelectorAll("[data-tag]")) {
-      const active = f.tags.has(Number(b.getAttribute("data-tag")));
-      b.classList.toggle("on", active);
-      b.setAttribute("aria-pressed", String(active));
-    }
-    sMin.value = String(f.scoreMin);
-    scoreLabel.textContent =
-      f.scoreMin > 0 ? `≥ ${(f.scoreMin / 10).toFixed(1)}` : "不限";
-    const full = f.yearMin <= 0 && f.yearMax >= 9999;
-    yMin.value = full
-      ? yMin.min
-      : String(Math.max(f.yearMin, Number(yMin.min)));
-    yMax.value = full
-      ? yMax.max
-      : String(Math.min(f.yearMax, Number(yMax.max)));
-    yearLabel.textContent = full
-      ? "全部"
-      : `${yMin.value} – ${yMax.value}`;
-  }
 
   // ---- URL 恢复(深链)与 popstate:控件已就绪后再接线 ----
   if (location.hash.length > 1) runTask(applyUrl(true), "链接恢复");

@@ -1,9 +1,22 @@
-/** URL 即状态:#c=…&n=…&r=…&y=…&m=…&l=…。
+/** URL 只写视图状态与一个规范 QueryBundle。
  * n = 全局键(稳定身份),r = rank(深链未流式覆盖时 Range 点查落点)。 */
 
 import { state } from "./store";
-import type { LinkState } from "./store";
 import type { OrbitState } from "./camera";
+import { decodeBundle, encodeBundle } from "./query/bundle-url";
+import { normalizeBundle, type QueryBundle } from "./query/bundle";
+import { normalizeQuery } from "./query/canonical";
+import { decodeQuestion } from "./query/question-url";
+import { decodeCypherState } from "./query/cypher-url";
+import { compileQuestion } from "./query/question";
+import { inferCypherParameters } from "./query/parameters";
+import { lowerAtlasCypher } from "./query/language";
+
+export interface LinkState {
+  kind: "common" | "path";
+  fromRank: number;
+  fromKey: number;
+}
 
 export interface UrlState {
   view: Partial<OrbitState> | null;
@@ -20,9 +33,7 @@ export function encode(
   key: number | null,
   rank: number | null,
   ortho = false,
-  link: LinkState | null = null,
 ): string {
-  const f = state.filters;
   const parts = [
     `c=${[...vs.target, vs.zoom, vs.rotationX, vs.rotationOrbit]
       .map((v) => Number(v).toFixed(2))
@@ -31,18 +42,7 @@ export function encode(
   if (ortho) parts.push("o=1");
   if (key !== null) parts.push(`n=${key}`);
   if (rank !== null) parts.push(`r=${rank}`);
-  if (key !== null && link !== null) {
-    parts.push(`q=${link.kind}`);
-    parts.push(`f=${link.fromKey}`);
-    parts.push(`fr=${link.fromRank}`);
-  }
-  if (f.yearMin > 0 || f.yearMax < 9999)
-    parts.push(`y=${f.yearMin}-${f.yearMax}`);
-  if (f.media.size)
-    parts.push(`m=${[...f.media].sort((a, b) => a - b).join(",")}`);
-  if (f.scoreMin > 0) parts.push(`s=${f.scoreMin}`);
-  if (f.tags.size)
-    parts.push(`t=${[...f.tags].sort((a, b) => a - b).join(",")}`);
+  if (state.queryBundle) parts.push(`qb=${encodeBundle(state.queryBundle)}`);
   return "#" + parts.join("&");
 }
 
@@ -63,7 +63,7 @@ function uintParam(
   return value;
 }
 
-/** 解码并把过滤器写回 store(缺省参数恢复默认值,保证后退可逆)。 */
+/** 解码当前状态；旧查询语法只在这一边界迁移。 */
 export function decode(hash: string): UrlState {
   const out: UrlState = {
     view: null,
@@ -73,6 +73,7 @@ export function decode(hash: string): UrlState {
     ortho: false,
   };
   const params = new URLSearchParams(hash.replace(/^#/, ""));
+  state.queryBundle = decodeBundle(params.get("qb") ?? "") ?? migrateLegacyQuery(params);
   out.ortho = params.get("o") === "1";
   const c = params.get("c");
   if (c) {
@@ -97,40 +98,26 @@ export function decode(hash: string): UrlState {
     fromRank !== null
   )
     out.link = { kind, fromKey, fromRank };
-  const y = params.get("y");
-  const years = y?.match(/^(\d{1,4})-(\d{1,4})$/);
-  const yearMin = Number(years?.[1]);
-  const yearMax = Number(years?.[2]);
-  if (
-    years &&
-    Number.isInteger(yearMin) &&
-    Number.isInteger(yearMax) &&
-    yearMin <= yearMax
-  ) {
-    state.filters.yearMin = yearMin;
-    state.filters.yearMax = yearMax;
-  } else {
-    state.filters.yearMin = 0;
-    state.filters.yearMax = 9999;
-  }
-  const m = params.get("m");
-  const media = new Set([1, 2, 3, 4, 6]);
-  state.filters.media = new Set(
-    (m ?? "")
-      .split(",")
-      .map(Number)
-      .filter((value) => media.has(value)),
-  );
-  const score = uintParam(params, "s", true);
-  state.filters.scoreMin = score !== null && score <= 100 ? score : 0;
-  const tg = params.get("t");
-  state.filters.tags = tg
-    ? new Set(
-        tg
-          .split(",")
-          .map(Number)
-          .filter((bit) => Number.isInteger(bit) && bit >= 0 && bit < 32),
-      )
-    : new Set();
   return out;
+}
+
+function migrateLegacyQuery(params: URLSearchParams): QueryBundle | null {
+  const question = decodeQuestion(params.get("aq") ?? "");
+  if (question) return normalizeBundle(compileQuestion(question));
+  const cypher = decodeCypherState(params.get("ac") ?? "");
+  if (!cypher) return null;
+  const inferred = inferCypherParameters(JSON.stringify(cypher.parameters));
+  return normalizeBundle({
+    schema: "atlas-query-bundle-v2",
+    release: { policy: "latest" },
+    sections: {
+      results: {
+        query: normalizeQuery(
+          lowerAtlasCypher(cypher.source, inferred.types),
+          inferred.values,
+        ),
+        answer: { shape: "table", title: "高级查询结果" },
+      },
+    },
+  });
 }

@@ -1,5 +1,4 @@
-import type { LinkState } from "./store";
-import type { UrlState } from "./url";
+import type { LinkState, UrlState } from "./url";
 
 export interface LocatedTarget {
   key: number;

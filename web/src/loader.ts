@@ -77,12 +77,9 @@ const GEOMETRY_STRIDES = {
 } as const;
 const CANVAS_STREAM_STRIDES = {
   positions: GEOMETRY_STRIDES["positions.bin"],
-  year: GEOMETRY_STRIDES["year.bin"],
   key: GEOMETRY_STRIDES["key.bin"],
   size: GEOMETRY_STRIDES["size.bin"],
   flags: GEOMETRY_STRIDES["flags.bin"],
-  score: GEOMETRY_STRIDES["score.bin"],
-  tags: GEOMETRY_STRIDES["tags.bin"],
 } as const;
 let manifestRef: Manifest | null = null;
 
@@ -563,22 +560,16 @@ export function openGeometry(manifest: Manifest): GeometryStream {
   const n = manifest.n_nodes;
   const raw = {
     positions: new Uint8Array(n * 12),
-    year: new Uint8Array(n * 2),
     key: new Uint8Array(n * 4),
     size: new Uint8Array(n),
     flags: new Uint8Array(n),
-    score: new Uint8Array(n),
-    tags: new Uint8Array(n * 4),
   };
   const progress: Record<string, number> = {};
   const geo: Geometry = {
     positions: new Float32Array(raw.positions.buffer),
-    year: new Uint16Array(raw.year.buffer),
     key: new Uint32Array(raw.key.buffer),
     size: raw.size,
     flags: raw.flags,
-    score: raw.score,
-    tags: new Uint32Array(raw.tags.buffer),
     loaded: 0,
     sparse: new Map(),
   };

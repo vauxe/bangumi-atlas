@@ -59,6 +59,11 @@ button:focus-visible, input:focus-visible, a:focus-visible {
 #search-more:hover { background: var(--line); }
 #search-more[aria-disabled="true"] { color: var(--ink-2); cursor: wait; }
 #search-more[hidden] { display: none; }
+#search-fulltext { width: 100%; padding: 9px 16px; border: 0;
+  border-top: 1px solid var(--line); background: rgba(57, 197, 187, .08);
+  color: var(--miku); text-align: left; cursor: pointer; }
+#search-fulltext:hover { background: var(--line); }
+#search-fulltext[hidden] { display: none; }
 #search-panel mark { background: rgba(242, 91, 166, .24); color: inherit;
   border-radius: 2px; }
 
@@ -68,27 +73,6 @@ button:focus-visible, input:focus-visible, a:focus-visible {
   height: 36px; border: 0; background: none; font-size: 18px;
   cursor: pointer; border-radius: 50%; }
 #dice:hover { background: var(--line); }
-#leftcol { position: fixed; top: 76px; left: 14px; width: 320px;
-  z-index: 5; display: flex; flex-direction: column; gap: 10px;
-  max-height: calc(100vh - 116px); } /* 底部让出图例一行 */
-#results { display: none; background: var(--panel); min-height: 0;
-  border: 1px solid var(--line); border-radius: 16px; padding: 10px 12px;
-  overflow-y: auto; }
-#results.open { display: block; }
-.rhead { width: 100%; border: 0; padding: 0; color: inherit;
-  background: none; font: inherit; font-size: 13px; margin-bottom: 6px;
-  cursor: pointer; display: flex; align-items: center; }
-.rchev { margin-left: auto; color: var(--ink-2); }
-.rrow { display: block; width: 100%; padding: 3px 4px; border: 0;
-  background: none; color: inherit; text-align: left; font: inherit;
-  cursor: pointer; border-radius: 8px; font-size: 13px; }
-.rrow:hover { background: var(--line); }
-.rn { color: var(--ink-2); font-size: 11px; }
-.rmeta { color: var(--ink-2); font-size: 11px; margin-left: 6px; }
-.linkops { margin: 8px 0 2px; }
-.prow { margin: 4px 0; }
-.parrow { color: var(--ink-2); font-size: 12px; margin: 0 0 4px 18px; }
-
 #drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 500px;
   max-width: 96vw; background: var(--panel); z-index: 7; padding: 20px;
   overflow-y: auto; transform: translateX(105%); transition: transform .25s;
@@ -265,41 +249,6 @@ pre.infobox { white-space: pre-wrap; word-break: break-all;
   .reference-grid > div { grid-template-columns: 1fr; gap: 2px; }
 }
 
-#filters .chip { margin: 0 6px 6px 0; min-height: 28px;
-  display: inline-flex; align-items: center; }
-#filters { flex: none; background: rgba(20,38,43,.88);
-  border: 1px solid var(--line); border-radius: 16px;
-  backdrop-filter: blur(4px); overflow: hidden; }
-#filters-head { width: 100%; display: flex; align-items: center; gap: 6px;
-  padding: 0 14px; min-height: 44px; border: 0; background: none;
-  color: inherit; font: inherit; cursor: pointer; font-size: 13px; }
-#filters.closed #filters-body { display: none; }
-#filters-body { padding: 0 14px 12px; display: flex;
-  flex-direction: column; gap: 12px; }
-.fbadge:not(:empty) { background: var(--pink); color: #3a0b22;
-  border-radius: 10px; padding: 0 7px; font-size: 11px; line-height: 18px; }
-.fsec-label { font-size: 11px; color: var(--ink-2); margin-bottom: 6px;
-  display: flex; }
-.fsec-label span { margin-left: auto; }
-#tag-chips { max-height: 96px; overflow-y: auto; display: flex;
-  flex-wrap: wrap; }
-#media-chips { display: flex; flex-wrap: wrap; }
-#score-min { width: 100%; accent-color: var(--pink); margin: 0; }
-#year-slider { position: relative; width: 100%; height: 24px; }
-#year-slider::before { content: ""; position: absolute; left: 0; right: 0;
-  top: 11px; height: 3px; background: var(--line); border-radius: 2px; }
-#year-slider input[type="range"] { position: absolute; inset: 0;
-  width: 100%; margin: 0; background: none; pointer-events: none;
-  -webkit-appearance: none; appearance: none; }
-#year-slider input[type="range"]::-webkit-slider-thumb {
-  pointer-events: auto; -webkit-appearance: none; appearance: none;
-  width: 14px; height: 14px; border-radius: 50%;
-  background: var(--pink); border: 0; cursor: pointer; }
-#year-slider input[type="range"]::-moz-range-thumb {
-  pointer-events: auto; width: 14px; height: 14px; border-radius: 50%;
-  background: var(--pink); border: 0; cursor: pointer; }
-#year-slider input[type="range"]::-moz-range-track { background: none; }
-.expand { display: block; margin-top: 8px; }
 #legend { position: fixed; left: 14px; bottom: 12px; z-index: 5;
   color: var(--ink-2); font-size: 12px; pointer-events: none; }
 #legend i { display: inline-block; width: 10px; height: 10px;
@@ -313,6 +262,7 @@ pre.infobox { white-space: pre-wrap; word-break: break-all;
   * { transition: none !important; }
 }
 </style>
+<link rel="stylesheet" href="query.css">
 </head>
 <body>
 <div id="map"></div>
@@ -326,45 +276,13 @@ pre.infobox { white-space: pre-wrap; word-break: break-all;
     <div id="search-panel" hidden>
       <div id="hits" role="listbox" aria-label="搜索建议"></div>
       <div id="search-status" role="status" aria-live="polite"></div>
+      <button id="search-fulltext" type="button" hidden></button>
       <button id="search-more" type="button" hidden>查看更多结果</button>
     </div>
     <button id="dice" type="button" title="随机传送"
             aria-label="随机传送">🎲</button>
   </div>
 </div>
-<div id="leftcol">
-  <div id="filters" class="closed">
-    <button id="filters-head" type="button" title="点击展开/收起"
-            aria-expanded="false" aria-controls="filters-body">
-      筛选<span id="filters-count" class="fbadge"></span>
-      <span class="rchev">▸</span>
-    </button>
-    <div id="filters-body">
-      <div class="fsec">
-        <div class="fsec-label">标签<span>可多选,须同时满足</span></div>
-        <div id="tag-chips"></div>
-      </div>
-      <div class="fsec">
-        <div class="fsec-label">评分<span id="score-label">不限</span></div>
-        <input id="score-min" type="range" min="0" max="95" step="5"
-               value="0" aria-label="最低评分">
-      </div>
-      <div class="fsec">
-        <div class="fsec-label">媒介<span>选中高亮,其余调暗</span></div>
-        <div id="media-chips"></div>
-      </div>
-      <div class="fsec">
-        <div class="fsec-label">年代<span id="year-label">全部</span></div>
-        <div id="year-slider">
-          <input id="year-min" type="range" step="1" aria-label="最早年份">
-          <input id="year-max" type="range" step="1" aria-label="最晚年份">
-        </div>
-      </div>
-    </div>
-  </div>
-  <div id="results" aria-live="polite"></div>
-</div>
-
 <aside id="drawer" aria-label="节点详情" aria-hidden="true" inert></aside>
 
 <div id="legend">

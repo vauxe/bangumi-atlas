@@ -1330,10 +1330,7 @@ test("streams complete xyz geometry without planar expansion", async () => {
     "flags.bin",
     "key.bin",
     "positions.bin",
-    "score.bin",
     "size.bin",
-    "tags.bin",
-    "year.bin",
   ]);
 });
 
