@@ -17,7 +17,7 @@ import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from scripts import build_db
+from scripts import build_db, site_release
 
 
 def write_mapping_snapshot(directory: Path) -> None:
@@ -64,6 +64,15 @@ class MappingSnapshotTests(unittest.TestCase):
 
 
 class SourceSchemaTests(unittest.TestCase):
+    def test_source_projection_uses_the_published_field_policy(self) -> None:
+        self.assertEqual(
+            build_db.EXPECTED_FIELDS,
+            {
+                name: set(fields)
+                for name, fields in site_release.FIELD_POLICY.items()
+            },
+        )
+
     def test_unknown_source_field_stops_ingest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             dump = Path(directory)

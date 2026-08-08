@@ -27,6 +27,11 @@ export interface Manifest {
   mapping_digests: Record<string, string>;
   vocab_digests: Record<string, string>;
   owned_collections: Record<string, { parent: string; via: string }>;
+  query?: {
+    schema: "atlas-release-query-v2";
+    capabilities: string[];
+    contractDigest: string;
+  };
   counts: {
     entities: { subject: number; person: number; character: number };
     facts: number;
@@ -69,6 +74,15 @@ export interface Manifest {
     encoding: string;
     sentinel: number;
     segments: Record<string, { offset: number; count: number }>;
+  };
+  episode_index: {
+    encoding: "u32le-subject-id";
+    sentinel: number;
+    count: number;
+  };
+  fact_index: {
+    encoding: "u32le-anchor-entity-key";
+    count: number;
   };
   n_nodes: number;
   n_edges_skeleton: number;
@@ -233,7 +247,8 @@ export interface PersonEntity {
   kind: "person";
   key: number;
   name: string;
-  nameCn: string;
+  /** Older views may read this field; Archive does not publish it. */
+  nameCn?: string;
   type: number;
   career: string[];
   comments: number;
@@ -246,7 +261,8 @@ export interface CharacterEntity {
   kind: "character";
   key: number;
   name: string;
-  nameCn: string;
+  /** Older views may read this field; Archive does not publish it. */
+  nameCn?: string;
   role: number;
   comments: number;
   collects: number;
@@ -300,6 +316,7 @@ export interface Mappings {
   platform: Record<string, string>;
   person_type: Record<string, string>;
   character_role: Record<string, string>;
+  episode_type?: Record<string, string>;
 }
 
 /** 搜索投影内嵌主名称和种类，避免常规前缀联想扇出读取名字块。 */

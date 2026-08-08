@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import argparse
 import gzip
 import hashlib
 import heapq
@@ -27,7 +28,13 @@ import orjson
 import pyarrow.parquet as pq
 import site_release as sr
 from content_fingerprint import RowFingerprint
+from enum_mappings import load_mappings
 from opencc import OpenCC
+from query_contracts import (
+    load_query_contract,
+    query_schema_digest,
+    validate_query_contract,
+)
 from scipy.spatial import cKDTree
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -35,12 +42,24 @@ PARQUET = ROOT / "data" / "parquet"
 LAYOUT = ROOT / "data" / "layout" / "coords.parquet"
 SITE = ROOT / "site" / "data"
 SITE_ROOT = ROOT / "site"
+MAPPING_SNAPSHOT = ROOT / "data" / "mappings"
 
 failures: list[str] = []
 artifact_files: dict[str, list[Any]] = {}
 member_spans: dict[str, set[tuple[int, int]]] = defaultdict(set)
 MIN_NODE_CENTER_DISTANCE = 0.28
 VERIFY_BATCH_ROWS = 32_768
+EPISODE_TYPE_NAMES = {
+    "0": "本篇",
+    "1": "特别篇",
+    "2": "OP",
+    "3": "ED",
+    "4": "预告/宣传/广告",
+    "5": "MAD",
+    "6": "其他",
+}
+PERSON_TYPE_NAMES = {"1": "个人", "2": "公司", "3": "组合"}
+CHARACTER_ROLE_NAMES = {"1": "角色", "2": "机体", "3": "舰船", "4": "组织"}
 FACT_INDEX_DTYPE = np.dtype(
     [
         ("offset", "<u8"),
@@ -369,6 +388,37 @@ def load_member(logical_name: str, off: int, length: int) -> Any:
 def load_binary_member(logical_name: str, off: int, length: int) -> bytes:
     raw = read_member_bytes(logical_name, off, length)
     return decompress_member(raw, logical_name)
+
+
+def decode_delta_posting(
+    raw: bytes, expected_count: int, upper_bound: int
+) -> list[int]:
+    """Independently decode the text-search posting representation."""
+    result: list[int] = []
+    offset = 0
+    previous = -1
+    while len(result) < expected_count:
+        delta = 0
+        shift = 0
+        while True:
+            if offset >= len(raw) or shift > 28:
+                raise ValueError("truncated or overflowing text-search varint")
+            byte = raw[offset]
+            offset += 1
+            delta += (byte & 0x7F) << shift
+            if not byte & 0x80:
+                if shift and not byte & 0x7F:
+                    raise ValueError("non-canonical text-search varint")
+                break
+            shift += 7
+        identity = delta if previous < 0 else previous + delta
+        if identity <= previous or identity >= upper_bound:
+            raise ValueError("invalid text-search member id")
+        result.append(identity)
+        previous = identity
+    if offset != len(raw):
+        raise ValueError("trailing text-search posting bytes")
+    return result
 
 
 def load_idx(name: str) -> Any:
@@ -853,8 +903,21 @@ def expected_charmap() -> dict[str, str]:
 
 
 def main() -> None:  # noqa: PLR0915
-    global artifact_files
+    global SITE, SITE_ROOT, artifact_files  # noqa: PLW0603
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--site",
+        type=Path,
+        default=SITE_ROOT,
+        help="staging site root (default: site)",
+    )
+    args = parser.parse_args()
+    SITE_ROOT = args.site.resolve()
+    SITE = SITE_ROOT / "data"
     t0 = time.time()
+    validate_query_contract(
+        load_query_contract(), sr.FACT_ROLES, sr.FACT_ATTRS
+    )
     manifest = orjson.loads((SITE / "manifest.json").read_bytes())
     artifact_files = manifest["files"]
 
@@ -870,6 +933,18 @@ def main() -> None:  # noqa: PLR0915
     reconcile("profile", sr.PROFILE, manifest["profile"])
     reconcile("schema_digest", sr.schema_digest(), manifest["schema_digest"])
     reconcile("field_policy", sr.FIELD_POLICY, manifest["field_policy"])
+    query_release = manifest.get("query", {})
+    check(
+        "查询能力合同完整",
+        query_release.get("schema") == "atlas-release-query-v2"
+        and query_release.get("capabilities")
+        == [
+            "atlas-query-v2",
+            "fact-ref-v1",
+            "full-text-v1",
+        ]
+        and query_release.get("contractDigest") == query_schema_digest(),
+    )
     alias_block_size = manifest["limits"].get("search_alias_block_ranks")
     if (
         not _natural(alias_block_size)
@@ -1151,6 +1226,8 @@ def main() -> None:  # noqa: PLR0915
         kind = int(kind_s)
         seen_ids = np.zeros(len(decoded[kind]), dtype=np.bool_)
         routed_ids: list[list[int]] = []
+        names_match = True
+        first_name_mismatch = ""
         for row in ranges:
             start, end, off, length = row
             ent_sizes.append(length)
@@ -1182,6 +1259,8 @@ def main() -> None:  # noqa: PLR0915
                 nm = names_by_rank[rank]
                 if kind == sr.KIND_SUBJECT:
                     (
+                        name,
+                        name_cn,
                         styp,
                         plat,
                         date,
@@ -1200,12 +1279,16 @@ def main() -> None:  # noqa: PLR0915
                         hs,
                         hi,
                     ) = tup
+                    if [name, name_cn] != nm[:2]:
+                        names_match = False
+                        if not first_name_mismatch:
+                            first_name_mismatch = str(sid)
                     site_ent_fp.add(
                         [
                             kind,
                             sid,
-                            nm[0],
-                            nm[1] or "",
+                            name,
+                            name_cn or "",
                             styp,
                             plat,
                             date,
@@ -1224,12 +1307,24 @@ def main() -> None:  # noqa: PLR0915
                         ]
                     )
                 elif kind == sr.KIND_PERSON:
-                    ptyp, careers, comments, collects, hs, hi = tup
+                    (
+                        name,
+                        ptyp,
+                        careers,
+                        comments,
+                        collects,
+                        hs,
+                        hi,
+                    ) = tup
+                    if [name, None] != nm[:2]:
+                        names_match = False
+                        if not first_name_mismatch:
+                            first_name_mismatch = str(sid)
                     site_ent_fp.add(
                         [
                             kind,
                             sid,
-                            nm[0],
+                            name,
                             ptyp,
                             [vocab["career"][c] for c in careers],
                             comments,
@@ -1237,15 +1332,24 @@ def main() -> None:  # noqa: PLR0915
                         ]
                     )
                 else:
-                    role, comments, collects, hs, hi = tup
+                    name, role, comments, collects, hs, hi = tup
+                    if [name, None] != nm[:2]:
+                        names_match = False
+                        if not first_name_mismatch:
+                            first_name_mismatch = str(sid)
                     site_ent_fp.add(
-                        [kind, sid, nm[0], role, comments, collects]
+                        [kind, sid, name, role, comments, collects]
                     )
                 presence[kind_s][sid] = int(hs) | (int(hi) << 1)
                 ent_counts[kind] += 1
         check(
             f"entities kind={kind} 二分目录可达",
             range_routes_are_valid(ranges, routed_ids),
+        )
+        check(
+            f"entities kind={kind} 名称与 rank 名称一致",
+            names_match,
+            first_name_mismatch,
         )
     for kind_name, kind in (("subject", 1), ("person", 2), ("character", 3)):
         reconcile(
@@ -1268,6 +1372,7 @@ def main() -> None:  # noqa: PLR0915
         "name_cn",
         "type",
         "platform_code",
+        "platform",
         "date",
         "score",
         "rank",
@@ -1312,10 +1417,10 @@ def main() -> None:  # noqa: PLR0915
                     sub["name"][i],
                     sub["name_cn"][i],
                     sub["type"][i],
-                    sub["platform_code"][i],
+                    sub["platform_code"][i] if sub["platform"][i] else None,
                     sub["date"][i],
-                    sub["score"][i],
-                    sub["rank"][i],
+                    sub["score"][i] or None,
+                    sub["rank"][i] or None,
                     int(sub["nsfw"][i]),
                     sub["wish"][i],
                     sub["done"][i],
@@ -1596,6 +1701,178 @@ def main() -> None:  # noqa: PLR0915
     )
     del vo
 
+    # 成员候选索引覆盖 Episode 名称和合同允许全文查询的原文；原始
+    # infobox 仍在侧车中，但不得扩大全文索引或进入候选集。
+    text_search_dir = load_idx("text.search.members")
+    expected_members: list[list[Any]] = []
+    expected_counts = np.zeros(sr.SEARCH_NGRAM_BUCKETS, dtype=np.uint32)
+    expected_hashes: list[Any | None] = [None] * sr.SEARCH_NGRAM_BUCKETS
+
+    def add_expected_search_member(
+        family: str,
+        entity_kind: int,
+        file_index: int,
+        off: int,
+        length: int,
+        texts: Iterable[str],
+    ) -> None:
+        member_id = len(expected_members)
+        expected_members.append([family, entity_kind, file_index, off, length])
+        buckets = {
+            expected_search_gram_bucket(
+                folded[start : start + sr.SEARCH_NGRAM_WIDTH]
+            )
+            for text in texts
+            for folded in [sr.search_fold(text)]
+            for start in range(len(folded) - sr.SEARCH_NGRAM_WIDTH + 1)
+        }
+        encoded = member_id.to_bytes(3, "little")
+        for bucket in buckets:
+            expected_counts[bucket] += 1
+            digest = expected_hashes[bucket]
+            if digest is None:
+                digest = hashlib.sha256()
+                expected_hashes[bucket] = digest
+            digest.update(encoded)
+
+    for _start, _end, off, length in load_idx("episodes.idx")["ranges"]:
+        decoded_member = load_member("episodes.pack", off, length)
+        episode_rows = []
+        for entry in decoded_member["g"]:
+            episode_rows.extend(entry["e"])
+            for page_off, page_length in entry.get("op", []):
+                episode_rows.extend(
+                    load_member("pages.pack", page_off, page_length)
+                )
+        add_expected_search_member(
+            "episode-identity",
+            0,
+            0,
+            off,
+            length,
+            (
+                str(name)
+                for episode in episode_rows
+                for name in episode[1:3]
+                if name
+            ),
+        )
+
+    for family in sr.TEXT_FAMILIES:
+        if family == "entity-infobox":
+            continue
+        definition = text_idx[family]
+        routed: list[tuple[int, list[int]]] = []
+        if family in ("entity-summary", "entity-infobox"):
+            for kind_s, ranges in definition["ranges"].items():
+                routed.extend((int(kind_s), row) for row in ranges)
+        else:
+            routed.extend((0, row) for row in definition["ranges"])
+        for entity_kind, row in routed:
+            fidx, off, length = row[2:5]
+            decoded_member = load_member(
+                definition["files"][fidx], off, length
+            )
+            texts = (
+                [
+                    text
+                    for pairs in decoded_member["t"]
+                    for _episode_id, text in pairs
+                ]
+                if family == "episode-description"
+                else decoded_member["t"]
+            )
+            add_expected_search_member(
+                family,
+                entity_kind,
+                fidx,
+                off,
+                length,
+                texts,
+            )
+    check(
+        "文本候选目录逐成员覆盖全部可搜索原文",
+        text_search_dir.get("schema") == "text-search-members-v1"
+        and text_search_dir.get("members") == expected_members,
+    )
+
+    raw = np.frombuffer(
+        site_file("text.search.ngram.idx").read_bytes(), dtype="<u4"
+    )
+    minimum = sr.SEARCH_NGRAM_BUCKETS + 1
+    text_ngram_ok = len(raw) >= minimum
+    if text_ngram_ok:
+        bucket_members = raw[:minimum]
+        member_count = int(bucket_members[-1])
+        text_ngram_ok = (
+            len(raw) == sr.SEARCH_NGRAM_BUCKETS * 2 + member_count * 3 + 2
+        )
+    if text_ngram_ok:
+        offsets_start = minimum
+        first_start = offsets_start + member_count + 1
+        last_start = first_start + member_count
+        counts_start = last_start + member_count
+        offsets = raw[offsets_start:first_start]
+        text_first = raw[first_start:last_start]
+        text_last = raw[last_start:counts_start]
+        text_counts = raw[counts_start:]
+        spans = np.diff(offsets.astype(np.int64))
+        text_ngram_ok = bool(
+            bucket_members[0] == 0
+            and np.all(bucket_members[1:] >= bucket_members[:-1])
+            and offsets[0] == 0
+            and offsets[-1]
+            == site_file("text.search.ngram.pack").stat().st_size
+            and np.all(spans > 0)
+            and np.all(spans <= sr.MEMBER_CAP)
+            and np.array_equal(text_counts, expected_counts)
+        )
+    if text_ngram_ok:
+        for bucket in range(sr.SEARCH_NGRAM_BUCKETS):
+            start = int(bucket_members[bucket])
+            end = int(bucket_members[bucket + 1])
+            expected_count = int(expected_counts[bucket])
+            if (
+                end - start
+                != (expected_count + sr.SEARCH_NGRAM_MEMBER_RANKS - 1)
+                // sr.SEARCH_NGRAM_MEMBER_RANKS
+            ):
+                text_ngram_ok = False
+                break
+            actual_digest = hashlib.sha256()
+            decoded_count = 0
+            for posting_member in range(start, end):
+                posting = load_binary_member(
+                    "text.search.ngram.pack",
+                    int(offsets[posting_member]),
+                    int(spans[posting_member]),
+                )
+                posting_count = min(
+                    sr.SEARCH_NGRAM_MEMBER_RANKS,
+                    expected_count - decoded_count,
+                )
+                ids = decode_delta_posting(
+                    posting, posting_count, len(expected_members)
+                )
+                for identity in ids:
+                    actual_digest.update(identity.to_bytes(3, "little"))
+                if (
+                    not len(ids)
+                    or ids[0] != text_first[posting_member]
+                    or ids[-1] != text_last[posting_member]
+                ):
+                    text_ngram_ok = False
+                decoded_count += len(ids)
+            expected_digest = expected_hashes[bucket]
+            if decoded_count != expected_count or actual_digest.digest() != (
+                expected_digest.digest()
+                if expected_digest is not None
+                else hashlib.sha256().digest()
+            ):
+                text_ngram_ok = False
+                break
+    check("文本散列候选与全部原文成员等价", text_ngram_ok)
+
     # ---- 分集结构 ----
     log("[6] 分集结构")
     eps_idx = load_idx("episodes.idx")
@@ -1648,6 +1925,15 @@ def main() -> None:  # noqa: PLR0915
         range_routes_are_valid(eps_idx["ranges"], episode_routes),
     )
     pq_ep_fp = RowFingerprint()
+    episode_subjects = load_array("episode-subject.bin", "<u4")
+    episode_index_meta = manifest.get("episode_index", {})
+    check(
+        "episode_index 版本与文件长度一致",
+        episode_index_meta.get("encoding") == "u32le-subject-id"
+        and episode_index_meta.get("sentinel") == sr.EPISODE_SUBJECT_SENTINEL
+        and episode_index_meta.get("count") == len(episode_subjects),
+    )
+    episode_index_matches = True
     episode_columns = [
         "id",
         "subject_id",
@@ -1663,6 +1949,13 @@ def main() -> None:  # noqa: PLR0915
         PARQUET / "episode.parquet", episode_columns
     ):
         for i in range(len(ep_full["id"])):
+            episode_id = int(ep_full["id"][i])
+            subject_id = int(ep_full["subject_id"][i])
+            if (
+                episode_id >= len(episode_subjects)
+                or int(episode_subjects[episode_id]) != subject_id
+            ):
+                episode_index_matches = False
             pq_ep_fp.add(
                 [
                     ep_full["subject_id"][i],
@@ -1677,6 +1970,14 @@ def main() -> None:  # noqa: PLR0915
                 ]
             )
     check(
+        "episode-subject.bin = parquet",
+        episode_index_matches
+        and int(
+            np.count_nonzero(episode_subjects != sr.EPISODE_SUBJECT_SENTINEL)
+        )
+        == ep_rows_seen,
+    )
+    check(
         "分集内容指纹 = parquet", site_ep_fp.snapshot() == pq_ep_fp.snapshot()
     )
     reconcile("分集行数", manifest["counts"]["episodes"], ep_rows_seen)
@@ -1686,7 +1987,16 @@ def main() -> None:  # noqa: PLR0915
         orphan_groups,
     )
     check("分集成员硬上限", max(eps_sizes) <= sr.MEMBER_CAP)
-    del decoded, desc_site, ep_full, eps_idx, eps_sizes, pq_ep_fp, site_ep_fp
+    del (
+        decoded,
+        desc_site,
+        ep_full,
+        episode_subjects,
+        eps_idx,
+        eps_sizes,
+        pq_ep_fp,
+        site_ep_fp,
+    )
 
     # ---- 事实:incidence 还原 FactRef、multiplicity 对账 ----
     log("[7] 事实与 incidence")
@@ -1786,6 +2096,25 @@ def main() -> None:  # noqa: PLR0915
             n_facts = expected.count
             fact_source_rows = expected.source_rows
             reconcile("事实计数", manifest["counts"]["facts"], n_facts)
+            fact_anchors = load_array("fact-anchor.bin", "<u4")
+            fact_index_meta = manifest.get("fact_index", {})
+            check(
+                "fact_index 版本与文件长度一致",
+                fact_index_meta.get("encoding") == "u32le-anchor-entity-key"
+                and fact_index_meta.get("count") == len(fact_anchors)
+                and len(fact_anchors) == n_facts,
+            )
+            anchors_match = len(fact_anchors) == n_facts
+            if anchors_match:
+                for ref in range(n_facts):
+                    encoded, _multiplicity, _incidence = expected.lookup(ref)
+                    participants = orjson.loads(encoded)[1]
+                    if not participants or int(fact_anchors[ref]) != int(
+                        participants[0]
+                    ):
+                        anchors_match = False
+                        break
+            check("fact-anchor.bin = 每条规范事实的首个参与者", anchors_match)
             reconcile(
                 "事实源行数",
                 manifest["counts"]["fact_source_rows"],
@@ -2132,10 +2461,10 @@ def main() -> None:  # noqa: PLR0915
                 start = int(bucket_members[bucket])
                 end = int(bucket_members[bucket + 1])
                 count = int(counts[bucket])
-                expected_members = (
+                expected_member_pages = (
                     count + sr.SEARCH_NGRAM_MEMBER_RANKS - 1
                 ) // sr.SEARCH_NGRAM_MEMBER_RANKS
-                if end - start != expected_members or (
+                if end - start != expected_member_pages or (
                     end - start > 1
                     and np.any(
                         member_last[start : end - 1]
@@ -2152,7 +2481,9 @@ def main() -> None:  # noqa: PLR0915
     )
     if index_shape_ok:
         expected_counts = np.zeros(sr.SEARCH_NGRAM_BUCKETS, dtype=np.uint32)
-        expected_hashes: list[Any | None] = [None] * sr.SEARCH_NGRAM_BUCKETS
+        expected_rank_hashes: list[Any | None] = [None] * (
+            sr.SEARCH_NGRAM_BUCKETS
+        )
         for rank, (aliases, _display, _entity_kind) in enumerate(
             expected_alias_rows
         ):
@@ -2166,10 +2497,10 @@ def main() -> None:  # noqa: PLR0915
             encoded = rank.to_bytes(3, "little")
             for bucket in rank_buckets:
                 expected_counts[bucket] += 1
-                digest = expected_hashes[bucket]
+                digest = expected_rank_hashes[bucket]
                 if digest is None:
                     digest = hashlib.sha256()
-                    expected_hashes[bucket] = digest
+                    expected_rank_hashes[bucket] = digest
                 digest.update(encoded)
 
         ngram_ok = True
@@ -2180,7 +2511,7 @@ def main() -> None:  # noqa: PLR0915
             count = int(counts[bucket])
             expected_count = int(expected_counts[bucket])
             actual_count += count
-            digest = expected_hashes[bucket]
+            digest = expected_rank_hashes[bucket]
             expected_digest = (
                 digest.digest()
                 if digest is not None
@@ -2271,19 +2602,112 @@ def main() -> None:  # noqa: PLR0915
     ):
         table_map = mappings["fact_labels"][kind_name]
         ok_map = True
-        for values in iter_parquet_dict_batches(
+        for mapping_batch in iter_parquet_dict_batches(
             PARQUET / f"{table}.parquet", [code_col, name_col]
         ):
             if not all(
                 (not name and str(code) not in table_map)
                 or table_map.get(str(code)) == name
                 for code, name in zip(
-                    values[code_col], values[name_col], strict=True
+                    mapping_batch[code_col],
+                    mapping_batch[name_col],
+                    strict=True,
                 )
             ):
                 ok_map = False
                 break
         check(f"mappings.{kind_name} 与 parquet 解码一致", ok_map)
+    *_, voice_roles = load_mappings(MAPPING_SNAPSHOT)
+    expected_voice_labels = {
+        str(code): str(definition["cn"])
+        for code, definition in sorted(voice_roles.items())
+        if isinstance(definition, dict) and definition.get("cn")
+    }
+    reconcile(
+        "mappings.VOICE_CREDIT 与固定枚举快照一致",
+        mappings["fact_labels"].get("VOICE_CREDIT"),
+        expected_voice_labels,
+    )
+    reconcile(
+        "mappings.episode_type 与 Bangumi EpType 一致",
+        mappings.get("episode_type"),
+        EPISODE_TYPE_NAMES,
+    )
+    expected_subject_types: dict[str, str] = {}
+    expected_platforms: dict[str, str] = {}
+    mapping_conflict = False
+    for mapping_batch in iter_parquet_dict_batches(
+        PARQUET / "subject.parquet",
+        ["type", "type_name", "platform_code", "platform"],
+    ):
+        for subject_type, type_name, platform_code, platform in zip(
+            mapping_batch["type"],
+            mapping_batch["type_name"],
+            mapping_batch["platform_code"],
+            mapping_batch["platform"],
+            strict=True,
+        ):
+            type_key = str(subject_type)
+            if type_key in expected_subject_types:
+                mapping_conflict |= (
+                    expected_subject_types[type_key] != type_name
+                )
+            else:
+                expected_subject_types[type_key] = type_name
+            if platform_code is None or not platform:
+                continue
+            platform_key = f"{subject_type}:{platform_code}"
+            if platform_key in expected_platforms:
+                mapping_conflict |= (
+                    expected_platforms[platform_key] != platform
+                )
+            else:
+                expected_platforms[platform_key] = platform
+    check("作品类型与平台解码无冲突", not mapping_conflict)
+    reconcile(
+        "mappings.subject_type 与 parquet 解码一致",
+        mappings.get("subject_type"),
+        expected_subject_types,
+    )
+    reconcile(
+        "mappings.platform 与 parquet 解码一致",
+        mappings.get("platform"),
+        dict(sorted(expected_platforms.items())),
+    )
+    reconcile(
+        "mappings.person_type 与公开人物类型一致",
+        mappings.get("person_type"),
+        PERSON_TYPE_NAMES,
+    )
+    reconcile(
+        "mappings.character_role 与公开角色定位一致",
+        mappings.get("character_role"),
+        CHARACTER_ROLE_NAMES,
+    )
+    person_codes = {
+        str(value)
+        for batch in iter_parquet_dict_batches(
+            PARQUET / "person.parquet", ["type"]
+        )
+        for value in batch["type"]
+    }
+    character_codes = {
+        str(value)
+        for batch in iter_parquet_dict_batches(
+            PARQUET / "character.parquet", ["role"]
+        )
+        for value in batch["role"]
+    }
+    check(
+        "发布人物类型只有官方值或已知零哨兵",
+        person_codes <= {*PERSON_TYPE_NAMES, "0"},
+        f"codes {sorted(person_codes)}",
+    )
+    check(
+        "发布角色定位均有领域名称",
+        character_codes <= CHARACTER_ROLE_NAMES.keys(),
+        f"codes {sorted(character_codes)}",
+    )
 
     elapsed = time.time() - t0
     if failures:

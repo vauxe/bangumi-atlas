@@ -19,6 +19,7 @@ import enum_mappings
 import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
+import site_release as sr
 
 if TYPE_CHECKING:
     from build_lock import PARQUET_BUILD_MARKER, parquet_layout_lock
@@ -75,78 +76,7 @@ def load_mappings() -> enum_mappings.MappingTables:
 # Fields this script imports, per source file. Anything beyond this contract
 # would be dropped by the typed projection, so schema drift stops the build.
 EXPECTED_FIELDS: dict[str, set[str]] = {
-    "subject": {
-        "id",
-        "type",
-        "name",
-        "name_cn",
-        "infobox",
-        "platform",
-        "summary",
-        "nsfw",
-        "tags",
-        "meta_tags",
-        "score",
-        "score_details",
-        "rank",
-        "date",
-        "favorite",
-        "series",
-    },
-    "person": {
-        "id",
-        "name",
-        "type",
-        "career",
-        "infobox",
-        "summary",
-        "comments",
-        "collects",
-    },
-    "character": {
-        "id",
-        "role",
-        "name",
-        "infobox",
-        "summary",
-        "comments",
-        "collects",
-    },
-    "episode": {
-        "id",
-        "name",
-        "name_cn",
-        "description",
-        "airdate",
-        "disc",
-        "duration",
-        "subject_id",
-        "sort",
-        "type",
-    },
-    "subject-relations": {
-        "subject_id",
-        "relation_type",
-        "related_subject_id",
-        "order",
-    },
-    "subject-persons": {"person_id", "subject_id", "position", "appear_eps"},
-    "subject-characters": {"character_id", "subject_id", "type", "order"},
-    "person-characters": {
-        "person_id",
-        "subject_id",
-        "character_id",
-        "type",
-        "summary",
-    },
-    "person-relations": {
-        "person_type",
-        "person_id",
-        "related_person_id",
-        "relation_type",
-        "spoiler",
-        "ended",
-    },
+    name: set(fields) for name, fields in sr.FIELD_POLICY.items()
 }
 SUBJECT_OBJECT_FIELDS = {
     "favorite": {"wish", "done", "doing", "on_hold", "dropped"},

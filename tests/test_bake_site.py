@@ -16,7 +16,144 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from scripts import bake_site
 
 
+class EntityEncodingTests(unittest.TestCase):
+    def test_subject_zero_score_and_rank_are_encoded_as_absent(self) -> None:
+        row = bake_site.subject_entity_row(
+            {
+                "name": ["未评分条目"],
+                "name_cn": [""],
+                "type": [2],
+                "platform_code": [0],
+                "platform": ["Web"],
+                "date": [""],
+                "score": [0.0],
+                "rank": [0],
+                "nsfw": [False],
+                "wish": [0],
+                "done": [0],
+                "doing": [0],
+                "on_hold": [0],
+                "dropped": [0],
+                "series": [False],
+                "score_details": [[0] * 10],
+                "meta_tags": [[]],
+                "tags": [[]],
+            },
+            0,
+            0,
+            text_bits={
+                "summary": bake_site.np.array([False]),
+                "infobox": bake_site.np.array([False]),
+            },
+            meta_id={},
+            tag_id={},
+        )
+
+        self.assertEqual(row[3], 0)  # platform 0 is a real mapped category
+        self.assertIsNone(row[5])
+        self.assertIsNone(row[6])
+
+    def test_subject_empty_platform_is_encoded_as_absent(self) -> None:
+        row = bake_site.subject_entity_row(
+            {
+                "name": ["未指定平台"],
+                "name_cn": [""],
+                "type": [3],
+                "platform_code": [0],
+                "platform": [""],
+                "date": [""],
+                "score": [0.0],
+                "rank": [0],
+                "nsfw": [False],
+                "wish": [0],
+                "done": [0],
+                "doing": [0],
+                "on_hold": [0],
+                "dropped": [0],
+                "series": [False],
+                "score_details": [[0] * 10],
+                "meta_tags": [[]],
+                "tags": [[]],
+            },
+            0,
+            0,
+            text_bits={
+                "summary": bake_site.np.array([False]),
+                "infobox": bake_site.np.array([False]),
+            },
+            meta_id={},
+            tag_id={},
+        )
+
+        self.assertIsNone(row[3])
+
+    def test_person_and_character_do_not_store_a_fake_chinese_name(
+        self,
+    ) -> None:
+        person = bake_site.person_entity_row(
+            {
+                "name": ["Alice"],
+                "type": [1],
+                "career": [["声优"]],
+                "comments": [2],
+                "collects": [3],
+            },
+            0,
+            0,
+            text_bits={
+                "summary": bake_site.np.asarray([True]),
+                "infobox": bake_site.np.asarray([False]),
+            },
+            career_id={"声优": 0},
+        )
+        character = bake_site.character_entity_row(
+            {
+                "name": ["Bob"],
+                "role": [1],
+                "comments": [4],
+                "collects": [5],
+            },
+            0,
+            0,
+            text_bits={
+                "summary": bake_site.np.asarray([False]),
+                "infobox": bake_site.np.asarray([True]),
+            },
+        )
+
+        self.assertEqual(person, ["Alice", 1, [0], 2, 3, 1, 0])
+        self.assertEqual(character, ["Bob", 1, 4, 5, 0, 1])
+
+
+class MappingTests(unittest.TestCase):
+    def test_voice_credit_codes_have_release_display_labels(self) -> None:
+        *_, voice_roles = bake_site.load_mappings(bake_site.MAPPING_SNAPSHOT)
+
+        self.assertEqual(voice_roles[0]["cn"], "CV")
+        self.assertEqual(voice_roles[4]["cn"], "日配")
+
+
 class StreamingPackTests(unittest.TestCase):
+    def test_episode_subject_index_is_dense_and_rejects_duplicates(
+        self,
+    ) -> None:
+        index = bake_site.build_episode_subject_index(
+            [3, 1],
+            [40, 20],
+        )
+
+        self.assertEqual(
+            index.tolist(),
+            [
+                bake_site.sr.EPISODE_SUBJECT_SENTINEL,
+                20,
+                bake_site.sr.EPISODE_SUBJECT_SENTINEL,
+                40,
+            ],
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            bake_site.build_episode_subject_index([1, 1], [20, 21])
+
     def test_pack_file_streams_members_and_preserves_offsets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             site = Path(directory)
@@ -61,6 +198,56 @@ class StreamingPackTests(unittest.TestCase):
 
 
 class SearchIndexTests(unittest.TestCase):
+    def test_delta_varint_postings_round_trip_boundaries(self) -> None:
+        encoded = bake_site.encode_delta_varints([0, 1, 127, 128, 16_000])
+        self.assertEqual(encoded, bytes([0, 1, 126, 1, 128, 124]))
+        with self.assertRaisesRegex(ValueError, "sorted"):
+            bake_site.encode_delta_varints([2, 2])
+
+    def test_text_search_indexes_members_and_keeps_hash_hits_as_candidates(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory)
+            with patch.object(bake_site, "SITE", site):
+                index = bake_site.TextSearchBuilder()
+                index.add(
+                    "entity-summary",
+                    1,
+                    [0, 12, 34],
+                    ["穿过星空的旅程"],
+                )
+                index.add(
+                    "episode-description",
+                    2,
+                    [0, 56, 78],
+                    ["没有相同词语"],
+                )
+                index.write()
+
+            directory_value = bake_site.orjson.loads(
+                gzip.decompress((site / "text.search.members").read_bytes())
+            )
+            raw_index = bake_site.np.frombuffer(
+                (site / "text.search.ngram.idx").read_bytes(), dtype="<u4"
+            )
+            bucket = bake_site.sr.search_gram_bucket("星空")
+            bucket_members = raw_index[:65_537]
+            posting_count = int(raw_index[-65_536 + bucket])
+
+        self.assertEqual(
+            directory_value["members"],
+            [
+                ["entity-summary", 1, 0, 12, 34],
+                ["episode-description", 2, 0, 56, 78],
+            ],
+        )
+        self.assertEqual(posting_count, 1)
+        self.assertEqual(
+            int(bucket_members[bucket + 1] - bucket_members[bucket]),
+            1,
+        )
+
     def test_alias_pack_halves_block_width_until_members_fit(self) -> None:
         random_text = random.Random(0).randbytes(180_000).hex()
         cases = {

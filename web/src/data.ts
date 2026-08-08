@@ -9,18 +9,20 @@ import type {
   FactKind,
   LongTextRef,
   LongTextResult,
-  Manifest,
   Mappings,
-  Names,
   Page,
   StructuralEntity,
 } from "./types";
 import { FACT_TAGS } from "./types";
 import {
+  anchorForFact,
   loadGzJson,
   loadPublishedJson,
   member,
+  prefetchPack,
   rankOfKey,
+  subjectForEpisode,
+  type TextSearchMember,
 } from "./loader";
 
 type Loc4 = [number, number, number, number];
@@ -58,10 +60,55 @@ interface FactEntry {
   op?: [number, number][];
 }
 
+interface EntityVocab {
+  career: string[];
+  metaTags: string[];
+  tags: string[];
+}
+
 interface EpisodeEntry {
   e: unknown[][];
   n: number;
   op?: [number, number][];
+}
+
+export type TextSearchRow =
+  | { owner: "subject" | "person" | "character"; id: number; field: "summary" | "infobox"; text: string }
+  | { owner: "episode"; id: number; field: "name" | "nameCn" | "description"; text: string }
+  | { owner: "fact"; id: number; field: "summary"; text: string };
+
+export type ProjectedEntityField =
+  | string
+  | number
+  | boolean
+  | null
+  | string[]
+  | number[]
+  | { name: string; count: number }[];
+
+export interface ProjectedEntity {
+  kind: "subject" | "person" | "character";
+  key: number;
+  fields: Record<string, ProjectedEntityField>;
+}
+
+function decodeEpisode(row: unknown[], subject: number): EpisodeRecord {
+  const [id, name, nameCn, airdate, disc, duration, sort, type, hd] = row as [
+    number, string, string, string, number, string,
+    number | null, number, number,
+  ];
+  return {
+    id,
+    subject,
+    name,
+    nameCn,
+    airdate,
+    disc,
+    duration,
+    sort,
+    type,
+    hasDescription: Boolean(hd),
+  };
 }
 
 /** 存在位为真时，索引或成员缺值是发布损坏，不能降级成源空值。 */
@@ -183,17 +230,11 @@ function findRange<T extends number[]>(
 }
 
 export class Data {
-  private vocabPromise: Promise<{
-    career: string[];
-    metaTags: string[];
-    tags: string[];
-  }> | null = null;
+  private vocabPromise: Promise<EntityVocab> | null = null;
   private mappingsPromise: Promise<Mappings> | null = null;
 
-  constructor(
-    private manifest: Manifest,
-    private names: Names,
-  ) {}
+  /** Keep the pre-query constructor call compatible while data is release-scoped. */
+  constructor(..._legacyArguments: unknown[]) {}
 
   /** rank-by-key 反向索引;未载入或不在当前发布时为 null。 */
   rankOf(key: number): number | null {
@@ -210,11 +251,7 @@ export class Data {
     return this.mappingsPromise;
   }
 
-  private vocab(): Promise<{
-    career: string[];
-    metaTags: string[];
-    tags: string[];
-  }> {
+  private vocab(): Promise<EntityVocab> {
     this.vocabPromise ??= (async () => {
       const idx = await loadGzJson<VocabIdx>("vocab.idx");
       const fetchAll = async (fam: string): Promise<string[]> => {
@@ -243,8 +280,174 @@ export class Data {
     return this.vocabPromise;
   }
 
-  /** 结构实体 = entities.pack 元组 + names.pack 名称行。 */
-  async entity(key: number): Promise<StructuralEntity | null> {
+  private decodeEntity(
+    kind: number,
+    id: number,
+    tuple: unknown[],
+    vocab: EntityVocab,
+  ): StructuralEntity {
+    const key = (kind << 24) | id;
+    if (kind === 1) {
+      const [
+        name, nameCn,
+        type, platformCode, date, score, bgmRank, nsfw,
+        wish, done, doing, onHold, dropped, series,
+        scoreDetails, metaTags, tags, hasSummary, hasInfobox,
+      ] = tuple as [
+        string, string | null,
+        number, number | null, string, number | null, number | null,
+        number, number, number, number, number, number, number,
+        number[], number[], [number, number][], number, number,
+      ];
+      return {
+        kind: "subject",
+        key,
+        name,
+        nameCn: nameCn ?? "",
+        type,
+        platformCode,
+        date,
+        score,
+        bgmRank,
+        nsfw: Boolean(nsfw),
+        favorite: [wish, done, doing, onHold, dropped],
+        series: Boolean(series),
+        scoreDetails,
+        metaTags: metaTags.map((tag) => vocab.metaTags[tag] ?? ""),
+        tags: tags.map(([tag, count]) => [vocab.tags[tag] ?? "", count]),
+        hasSummary: Boolean(hasSummary),
+        hasInfobox: Boolean(hasInfobox),
+      };
+    }
+    if (kind === 2) {
+      const [name, type, career, comments, collects, hasSummary, hasInfobox] =
+        tuple as [string, number, number[], number, number, number, number];
+      return {
+        kind: "person",
+        key,
+        name,
+        type,
+        career: career.map((item) => vocab.career[item] ?? ""),
+        comments,
+        collects,
+        hasSummary: Boolean(hasSummary),
+        hasInfobox: Boolean(hasInfobox),
+      };
+    }
+    if (kind === 3) {
+      const [name, role, comments, collects, hasSummary, hasInfobox] = tuple as [
+        string, number, number, number, number, number,
+      ];
+      return {
+        kind: "character",
+        key,
+        name,
+        role,
+        comments,
+        collects,
+        hasSummary: Boolean(hasSummary),
+        hasInfobox: Boolean(hasInfobox),
+      };
+    }
+    throw new TypeError(`unknown structural entity kind ${kind}`);
+  }
+
+  private projectEntity(
+    kind: number,
+    id: number,
+    tuple: unknown[],
+    requested: ReadonlySet<string>,
+    vocab: EntityVocab | null,
+  ): ProjectedEntity {
+    const fields: Record<string, ProjectedEntityField> = {};
+    if (kind === 1) {
+      for (const field of requested) {
+        switch (field) {
+          case "name": fields.name = String(tuple[0] ?? ""); break;
+          case "nameCn": fields.nameCn = String(tuple[1] ?? ""); break;
+          case "type": fields.type = Number(tuple[2]); break;
+          case "platformCode":
+            fields.platformCode = tuple[3] === null ? null : Number(tuple[3]);
+            break;
+          case "date": fields.date = String(tuple[4] ?? ""); break;
+          case "year": {
+            const match = /^(\d{4})(?:-|$)/.exec(String(tuple[4] ?? ""));
+            fields.year = match ? Number(match[1]) : null;
+            break;
+          }
+          case "score":
+            fields.score = tuple[5] === null ? null : Number(tuple[5]);
+            break;
+          case "rank":
+            fields.rank = tuple[6] === null ? null : Number(tuple[6]);
+            break;
+          case "nsfw": fields.nsfw = Boolean(tuple[7]); break;
+          case "wish": fields.wish = Number(tuple[8]); break;
+          case "done": fields.done = Number(tuple[9]); break;
+          case "doing": fields.doing = Number(tuple[10]); break;
+          case "onHold": fields.onHold = Number(tuple[11]); break;
+          case "dropped": fields.dropped = Number(tuple[12]); break;
+          case "series": fields.series = Boolean(tuple[13]); break;
+          case "scoreDetails": fields.scoreDetails = tuple[14] as number[]; break;
+          case "metaTags":
+            fields.metaTags = (tuple[15] as number[]).map(
+              (tag) => vocab?.metaTags[tag] ?? "",
+            );
+            break;
+          case "tags":
+            fields.tags = (tuple[16] as [number, number][]).map(
+              ([tag, count]) => ({ name: vocab?.tags[tag] ?? "", count }),
+            );
+            break;
+          case "hasSummary": fields.hasSummary = Boolean(tuple[17]); break;
+          case "summaryState": fields.summaryState = tuple[17] ? "HAS" : "EMPTY"; break;
+          case "hasInfobox": fields.hasInfobox = Boolean(tuple[18]); break;
+        }
+      }
+      return { kind: "subject", key: (kind << 24) | id, fields };
+    }
+    if (kind === 2) {
+      for (const field of requested) {
+        switch (field) {
+          case "name": fields.name = String(tuple[0] ?? ""); break;
+          case "type": fields.type = Number(tuple[1]); break;
+          case "career":
+            fields.career = (tuple[2] as number[]).map(
+              (career) => vocab?.career[career] ?? "",
+            );
+            break;
+          case "comments": fields.comments = Number(tuple[3]); break;
+          case "collects": fields.collects = Number(tuple[4]); break;
+          case "hasSummary": fields.hasSummary = Boolean(tuple[5]); break;
+          case "summaryState": fields.summaryState = tuple[5] ? "HAS" : "EMPTY"; break;
+          case "hasInfobox": fields.hasInfobox = Boolean(tuple[6]); break;
+        }
+      }
+      return { kind: "person", key: (kind << 24) | id, fields };
+    }
+    if (kind === 3) {
+      for (const field of requested) {
+        switch (field) {
+          case "name": fields.name = String(tuple[0] ?? ""); break;
+          case "role": fields.role = Number(tuple[1]); break;
+          case "comments": fields.comments = Number(tuple[2]); break;
+          case "collects": fields.collects = Number(tuple[3]); break;
+          case "hasSummary": fields.hasSummary = Boolean(tuple[4]); break;
+          case "summaryState": fields.summaryState = tuple[4] ? "HAS" : "EMPTY"; break;
+          case "hasInfobox": fields.hasInfobox = Boolean(tuple[5]); break;
+        }
+      }
+      return { kind: "character", key: (kind << 24) | id, fields };
+    }
+    throw new TypeError(`unknown projected entity kind ${kind}`);
+  }
+
+  /** 结构实体成员自含名称；点查不依赖视觉 rank 或名称缓存。 */
+  async entity(
+    key: number,
+    signal?: AbortSignal,
+  ): Promise<StructuralEntity | null> {
+    signal?.throwIfAborted();
     const kind = key >>> 24;
     const id = key & 0xffffff;
     const idx = await loadGzJson<EntitiesIdx>("entities.idx");
@@ -255,83 +458,94 @@ export class Data {
       "entities.pack",
       row[2],
       row[3],
+      signal,
     );
     const pos = m.i.indexOf(id);
     if (pos < 0) return null;
     const tup = m.r[pos];
     if (!tup) return null;
-    const rank = this.rankOf(key);
-    if (rank !== null) await this.names.load([rank]);
-    const nameRow = rank !== null ? this.names.row(rank) : null;
-    const name = nameRow?.[0] ?? "";
-    const nameCn = nameRow?.[1] ?? "";
     const vocab = await this.vocab();
-    if (kind === 1) {
-      const [
-        type, platformCode, date, score, bgmRank, nsfw,
-        wish, done, doing, onHold, dropped, series,
-        scoreDetails, metaTags, tags, hasSummary, hasInfobox,
-      ] = tup as [
-        number, number | null, string, number | null, number | null,
-        number, number, number, number, number, number, number,
-        number[], number[], [number, number][], number, number,
-      ];
-      return {
-        kind: "subject",
-        key,
-        name,
-        nameCn,
-        type,
-        platformCode,
-        date,
-        score,
-        bgmRank,
-        nsfw: Boolean(nsfw),
-        favorite: [wish, done, doing, onHold, dropped],
-        series: Boolean(series),
-        scoreDetails,
-        metaTags: metaTags.map((t) => vocab.metaTags[t] ?? ""),
-        tags: tags.map(([t, c]) => [vocab.tags[t] ?? "", c]),
-        hasSummary: Boolean(hasSummary),
-        hasInfobox: Boolean(hasInfobox),
-      };
-    }
-    if (kind === 2) {
-      const [type, career, comments, collects, hasSummary, hasInfobox] =
-        tup as [number, number[], number, number, number, number];
-      return {
-        kind: "person",
-        key,
-        name,
-        nameCn,
-        type,
-        career: career.map((c) => vocab.career[c] ?? ""),
-        comments,
-        collects,
-        hasSummary: Boolean(hasSummary),
-        hasInfobox: Boolean(hasInfobox),
-      };
-    }
-    if (kind === 3) {
-      const [role, comments, collects, hasSummary, hasInfobox] = tup as [
-        number, number, number, number, number,
-      ];
-      return {
-        kind: "character",
-        key,
-        name,
-        nameCn,
-        role,
-        comments,
-        collects,
-        hasSummary: Boolean(hasSummary),
-        hasInfobox: Boolean(hasInfobox),
-      };
-    }
-    return null;
+    return this.decodeEntity(kind, id, tup, vocab);
   }
 
-  private async factEntry(key: number): Promise<FactEntry | null> {
+  /** 按实体目录成员顺序批量扫描；整包只在扫描时预取，点查仍走 Range。 */
+  async *entities(
+    owner: StructuralEntity["kind"],
+    signal?: AbortSignal,
+    access: "stream" | "whole" = "whole",
+  ): AsyncIterable<StructuralEntity> {
+    const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
+    const [idx, vocab] = await Promise.all([
+      loadGzJson<EntitiesIdx>("entities.idx"),
+      this.vocab(),
+    ]);
+    if (access === "whole") await prefetchPack("entities.pack", signal);
+    for (const row of idx.k[String(kind)] ?? []) {
+      signal?.throwIfAborted();
+      const block = await member<{ i: number[]; r: unknown[][] }>(
+        "structure",
+        "entities.pack",
+        row[2],
+        row[3],
+        signal,
+      );
+      if (block.i.length !== block.r.length)
+        throw new Error("entities member ids and rows have different lengths");
+      for (let index = 0; index < block.i.length; index++) {
+        signal?.throwIfAborted();
+        const id = block.i[index];
+        const tuple = block.r[index];
+        if (id === undefined || !tuple)
+          throw new Error("entities member contains an incomplete row");
+        yield this.decodeEntity(kind, id, tuple, vocab);
+      }
+    }
+  }
+
+  /** Query-only projection pushdown avoids materializing unused entity fields. */
+  async *projectEntities(
+    owner: ProjectedEntity["kind"],
+    fieldNames: readonly string[],
+    signal?: AbortSignal,
+    access: "stream" | "whole" = "whole",
+  ): AsyncIterable<ProjectedEntity> {
+    const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
+    const requested = new Set(fieldNames);
+    const needsVocab = [...requested].some((field) =>
+      field === "career" || field === "metaTags" || field === "tags"
+    );
+    const [idx, vocab] = await Promise.all([
+      loadGzJson<EntitiesIdx>("entities.idx"),
+      needsVocab ? this.vocab() : Promise.resolve(null),
+    ]);
+    if (access === "whole") await prefetchPack("entities.pack", signal);
+    for (const row of idx.k[String(kind)] ?? []) {
+      signal?.throwIfAborted();
+      const block = await member<{ i: number[]; r: unknown[][] }>(
+        "structure",
+        "entities.pack",
+        row[2],
+        row[3],
+        signal,
+      );
+      if (block.i.length !== block.r.length)
+        throw new Error("entities member ids and rows have different lengths");
+      for (let index = 0; index < block.i.length; index++) {
+        signal?.throwIfAborted();
+        const id = block.i[index];
+        const tuple = block.r[index];
+        if (id === undefined || !tuple)
+          throw new Error("entities member contains an incomplete row");
+        yield this.projectEntity(kind, id, tuple, requested, vocab);
+      }
+    }
+  }
+
+  private async factEntry(
+    key: number,
+    signal?: AbortSignal,
+  ): Promise<FactEntry | null> {
+    signal?.throwIfAborted();
     const idx = await loadGzJson<FactsIdx>("facts.idx");
     const bucket = idx.b[key % idx.buckets] ?? [];
     const loc = bucket.find((m) => key <= (m[2] ?? -1));
@@ -341,13 +555,18 @@ export class Data {
       "facts.pack",
       loc[0],
       loc[1],
+      signal,
     );
     return m[String(key)] ?? null;
   }
 
   /** 完整类型化事实,分页读取。cursor 为溢出页号(条目内嵌偏移)。 */
-  async factsFor(key: number, cursor?: string): Promise<Page<Fact>> {
-    const entry = await this.factEntry(key);
+  async factsFor(
+    key: number,
+    cursor?: string,
+    signal?: AbortSignal,
+  ): Promise<Page<Fact>> {
+    const entry = await this.factEntry(key, signal);
     if (!entry) return { items: [], total: 0, next: null };
     const total = Object.values(entry.n).reduce((a, b) => a + b, 0);
     if (cursor === undefined) {
@@ -370,6 +589,7 @@ export class Data {
       "pages.pack",
       loc[0],
       loc[1],
+      signal,
     );
     return {
       items: page.map((item) =>
@@ -382,11 +602,28 @@ export class Data {
     };
   }
 
+  /** Resolve a release-local FactRef through one canonical participant. */
+  async fact(ref: number, signal?: AbortSignal): Promise<Fact | null> {
+    const anchor = await anchorForFact(ref, signal);
+    if (anchor === null) return null;
+    let cursor: string | undefined;
+    do {
+      signal?.throwIfAborted();
+      const page = await this.factsFor(anchor, cursor, signal);
+      const fact = page.items.find((candidate) => candidate.ref === ref);
+      if (fact) return fact;
+      cursor = page.next ?? undefined;
+    } while (cursor !== undefined);
+    throw new Error(`fact-anchor.bin points to a participant without fact:${ref}`);
+  }
+
   /** Episode 是 Subject 的分页从属集合;只接受 SubjectKey。 */
   async episodesFor(
     subject: number,
     cursor?: string,
+    signal?: AbortSignal,
   ): Promise<Page<EpisodeRecord>> {
+    signal?.throwIfAborted();
     if (subject >>> 24 !== 1)
       throw new RangeError("episodesFor: subject key required");
     const sid = subject & 0xffffff;
@@ -398,32 +635,14 @@ export class Data {
       "episodes.pack",
       row[2],
       row[3],
+      signal,
     );
     const pos = m.i.indexOf(sid);
     const entry = pos >= 0 ? m.g[pos] : undefined;
     if (!entry) return { items: [], total: 0, next: null };
-    const decode = (r: unknown[]): EpisodeRecord => {
-      const [id, name, nameCn, airdate, disc, duration, sort, type, hd] =
-        r as [
-          number, string, string, string, number, string,
-          number | null, number, number,
-        ];
-      return {
-        id,
-        subject,
-        name,
-        nameCn,
-        airdate,
-        disc,
-        duration,
-        sort,
-        type,
-        hasDescription: Boolean(hd),
-      };
-    };
     if (cursor === undefined)
       return {
-        items: entry.e.map(decode),
+        items: entry.e.map((row) => decodeEpisode(row, subject)),
         total: entry.n,
         next: entry.op?.length ? "0" : null,
       };
@@ -436,14 +655,154 @@ export class Data {
       "pages.pack",
       loc[0],
       loc[1],
+      signal,
     );
     return {
-      items: page.map(decode),
+      items: page.map((row) => decodeEpisode(row, subject)),
       total: entry.n,
       next: (entry.op?.length ?? 0) > pageIdx + 1
         ? String(pageIdx + 1)
         : null,
     };
+  }
+
+  /** 全局 Episode 扫描复用按 Subject 分区的权威成员，不复制字段数据。 */
+  async *episodes(
+    signal?: AbortSignal,
+    access: "stream" | "whole" = "whole",
+  ): AsyncIterable<EpisodeRecord> {
+    const idx = await loadGzJson<EpisodesIdx>("episodes.idx");
+    if (access === "whole")
+      await Promise.all([
+        prefetchPack("episodes.pack", signal),
+        prefetchPack("pages.pack", signal),
+      ]);
+    for (const range of idx.ranges) {
+      signal?.throwIfAborted();
+      const block = await member<{ i: number[]; g: EpisodeEntry[] }>(
+        "structure",
+        "episodes.pack",
+        range[2],
+        range[3],
+        signal,
+      );
+      if (block.i.length !== block.g.length)
+        throw new Error("episodes member subjects and groups have different lengths");
+      for (let index = 0; index < block.i.length; index++) {
+        const subjectId = block.i[index];
+        const entry = block.g[index];
+        if (subjectId === undefined || !entry)
+          throw new Error("episodes member contains an incomplete group");
+        const subject = (1 << 24) | subjectId;
+        for (const row of entry.e) yield decodeEpisode(row, subject);
+        for (const loc of entry.op ?? []) {
+          signal?.throwIfAborted();
+          const page = await member<unknown[][]>(
+            "structure",
+            "pages.pack",
+            loc[0],
+            loc[1],
+            signal,
+          );
+          for (const row of page) yield decodeEpisode(row, subject);
+        }
+      }
+    }
+  }
+
+  async episode(id: number, signal?: AbortSignal): Promise<EpisodeRecord | null> {
+    const subjectId = await subjectForEpisode(id, signal);
+    if (subjectId === null) return null;
+    const subject = (1 << 24) | subjectId;
+    let cursor: string | undefined;
+    do {
+      signal?.throwIfAborted();
+      const page = await this.episodesFor(subject, cursor, signal);
+      const found = page.items.find((episode) => episode.id === id);
+      if (found) return found;
+      cursor = page.next ?? undefined;
+    } while (cursor !== undefined);
+    return null;
+  }
+
+  async textSearchRows(
+    descriptor: TextSearchMember,
+    signal?: AbortSignal,
+  ): Promise<TextSearchRow[]> {
+    const [family, entityKind, fileIndex, offset, length] = descriptor;
+    if (family === "episode-identity") {
+      if (fileIndex !== 0)
+        throw new Error("episode identity member has an invalid storage file");
+      const block = await member<{ i: number[]; g: EpisodeEntry[] }>(
+        "structure",
+        "episodes.pack",
+        offset,
+        length,
+        signal,
+      );
+      if (block.i.length !== block.g.length)
+        throw new Error("episode identity member groups are misaligned");
+      const tuples: unknown[][] = [];
+      for (const entry of block.g) {
+        tuples.push(...entry.e);
+        for (const loc of entry.op ?? [])
+          tuples.push(...await member<unknown[][]>(
+            "structure",
+            "pages.pack",
+            loc[0],
+            loc[1],
+            signal,
+          ));
+      }
+      return tuples.flatMap((row) => {
+        const id = Number(row[0]);
+        const name = String(row[1] ?? "");
+        const nameCn = String(row[2] ?? "");
+        return [
+          ...(name ? [{ owner: "episode" as const, id, field: "name" as const, text: name }] : []),
+          ...(nameCn ? [{ owner: "episode" as const, id, field: "nameCn" as const, text: nameCn }] : []),
+        ];
+      });
+    }
+    const index = await loadGzJson<{ families: Record<string, TextFamily> }>(
+      "text.idx",
+    );
+    const definition = index.families[family];
+    const path = definition?.files[fileIndex];
+    if (!definition || !path)
+      throw new Error(`${family}: text search member file is missing`);
+    const block = await member<{ i: number[]; t: unknown[] }>(
+      "text",
+      path,
+      offset,
+      length,
+      signal,
+    );
+    if (block.i.length !== block.t.length)
+      throw new Error(`${family}: text search member rows are misaligned`);
+    if (family === "episode-description") {
+      const rows: TextSearchRow[] = [];
+      for (const pairs of block.t as [number, string][][])
+        for (const [id, text] of pairs)
+          rows.push({ owner: "episode", id, field: "description", text });
+      return rows;
+    }
+    const field = family === "entity-infobox" ? "infobox" : "summary";
+    if (family === "fact-summary")
+      return block.i.map((id, index) => ({
+        owner: "fact" as const,
+        id,
+        field: "summary" as const,
+        text: String(block.t[index] ?? ""),
+      }));
+    const owner = (["", "subject", "person", "character"] as const)[entityKind];
+    if (!owner) throw new Error(`${family}: invalid entity kind ${entityKind}`);
+    return block.i.map((id, index) => ({
+      owner,
+      id,
+      field,
+      text: String(block.t[index] ?? ""),
+    }));
   }
 
   /** 长文本按需读取;`empty` 表示源值为空,错误一律抛出。 */
