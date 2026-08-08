@@ -4,9 +4,11 @@ import type { NodeView } from "prosemirror-view";
 import { EditorView } from "prosemirror-view";
 
 import type { Owner } from "./contract";
+import type { QueryOperator } from "./document";
 import {
   createQueryEditorState,
   lowerQueryEditorDocument,
+  QUERY_OPERATOR_NODE,
   queryEditorSchema,
   type LoweredQueryEditorDocument,
 } from "./editor";
@@ -40,8 +42,8 @@ export interface QueryEditorViewOptions {
   reportError(error: unknown): void;
 }
 
-type ClauseName = "search" | "condition" | "relation" | "projection" |
-  "sort" | "limit";
+type ClauseName = "search" | "condition" | "condition_group" | "relation" |
+  "projection" | "sort" | "limit";
 
 function option(value: string, label: string): HTMLOptionElement {
   const item = document.createElement("option");
@@ -90,6 +92,17 @@ function stopControlEvent(event: Event): boolean {
     event.target instanceof HTMLButtonElement ||
     event.target instanceof HTMLDetailsElement ||
     event.target instanceof HTMLLabelElement;
+}
+
+function defaultConditionAttrs(owner: Owner): Record<string, unknown> {
+  const available = new Set(queryFieldsFor(owner, "filter"));
+  const field = [...COMMON_FIELDS[owner]].find((item) => available.has(item)) ??
+    [...available].find((item) => !INTERNAL_FIELDS.has(item)) ?? "";
+  return {
+    field,
+    operator: queryConditionOperators(owner, field)[0] ?? "",
+    raw: "",
+  };
 }
 
 class ClauseView implements NodeView {
@@ -213,17 +226,6 @@ class ConditionView extends ClauseView {
     private readonly owner: Owner,
   ) {
     super("condition", node, view, getPos);
-    if (node.attrs.expression) {
-      const summary = document.createElement("span");
-      summary.className = "query-clause-summary";
-      summary.textContent = "复合条件";
-      this.dom.append(
-        document.createTextNode("其中"),
-        summary,
-        removeButton(() => this.remove(), "移除复合条件"),
-      );
-      return;
-    }
     const common = document.createElement("optgroup");
     common.label = "常用";
     const more = document.createElement("optgroup");
@@ -308,9 +310,111 @@ class ConditionView extends ClauseView {
 
   override update(node: ProseMirrorNode): boolean {
     if (!super.update(node)) return false;
-    if (!node.attrs.expression && this.value && this.value.value !== node.attrs.raw)
+    if (this.value && this.value.value !== node.attrs.raw)
       this.value.value = String(node.attrs.raw);
     return true;
+  }
+}
+
+class ConditionGroupView implements NodeView {
+  readonly dom = document.createElement("div");
+  readonly contentDOM = document.createElement("div");
+  private readonly mode = selectControl("条件组匹配方式");
+  private readonly addCondition = document.createElement("button");
+  private readonly addGroup = document.createElement("button");
+  private node: ProseMirrorNode;
+
+  constructor(
+    node: ProseMirrorNode,
+    private readonly view: EditorView,
+    private readonly getPos: () => number | undefined,
+    private readonly owner: Owner,
+  ) {
+    this.node = node;
+    this.dom.className = "query-condition-group";
+    this.contentDOM.className = "query-condition-terms";
+    this.mode.append(
+      option("all", "全部满足"),
+      option("any", "任一满足"),
+      option("not", "排除"),
+    );
+    this.addCondition.type = "button";
+    this.addCondition.textContent = "＋ 条件";
+    this.addGroup.type = "button";
+    this.addGroup.textContent = "＋ 条件组";
+    this.mode.addEventListener("change", () => {
+      if (this.mode.value === "not" && this.node.childCount !== 1) {
+        this.mode.value = String(this.node.attrs.mode);
+        return;
+      }
+      this.updateAttrs({ mode: this.mode.value });
+    });
+    this.addCondition.addEventListener("click", () => this.insert(false));
+    this.addGroup.addEventListener("click", () => this.insert(true));
+    const header = document.createElement("div");
+    header.className = "query-condition-group-head";
+    header.append(
+      document.createTextNode("其中"),
+      this.mode,
+      this.addCondition,
+      this.addGroup,
+      removeButton(() => this.remove(), "移除条件组"),
+    );
+    this.dom.append(header, this.contentDOM);
+    this.sync(node);
+  }
+
+  update(node: ProseMirrorNode): boolean {
+    if (node.type.name !== "condition_group") return false;
+    this.node = node;
+    this.sync(node);
+    return true;
+  }
+
+  stopEvent(event: Event): boolean {
+    return stopControlEvent(event);
+  }
+
+  ignoreMutation(mutation: { target: Node }): boolean {
+    return !this.contentDOM.contains(mutation.target);
+  }
+
+  private sync(node: ProseMirrorNode): void {
+    this.mode.value = String(node.attrs.mode);
+    const locked = this.mode.value === "not";
+    this.addCondition.disabled = locked;
+    this.addGroup.disabled = locked;
+  }
+
+  private updateAttrs(patch: Record<string, unknown>): void {
+    const position = this.getPos();
+    if (position === undefined) return;
+    const current = this.view.state.doc.nodeAt(position);
+    if (current)
+      this.view.dispatch(this.view.state.tr.setNodeMarkup(
+        position,
+        undefined,
+        { ...current.attrs, ...patch },
+      ));
+  }
+
+  private insert(group: boolean): void {
+    const position = this.getPos();
+    if (position === undefined || this.node.attrs.mode === "not") return;
+    const condition = queryEditorSchema.node("condition", defaultConditionAttrs(this.owner));
+    const child = group
+      ? queryEditorSchema.node("condition_group", { mode: "all" }, [condition])
+      : condition;
+    this.view.dispatch(this.view.state.tr.insert(
+      position + this.node.nodeSize - 1,
+      child,
+    ).scrollIntoView());
+  }
+
+  private remove(): void {
+    const position = this.getPos();
+    if (position === undefined) return;
+    this.view.dispatch(this.view.state.tr.delete(position, position + this.node.nodeSize));
   }
 }
 
@@ -577,14 +681,81 @@ class RecipeView extends ClauseView {
   }
 }
 
-class BundleView extends ClauseView {
+function advancedOperatorText(operator: QueryOperator): string {
+  switch (operator.kind) {
+    case "scan": return `查找 ${OWNER_LABEL[operator.owner]}`;
+    case "lookup": return `按名称定位 ${OWNER_LABEL[operator.owner]}`;
+    case "fullText": return operator.target === "entity"
+      ? `搜索 ${OWNER_LABEL[operator.owner]}正文`
+      : "搜索关系说明";
+    case "factLookup": return "读取完整关系";
+    case "values": return `使用 ${operator.rows.length} 组指定值`;
+    case "filter": return "其中满足条件";
+    case "project": return `返回 ${operator.columns.length} 项信息`;
+    case "matchFact": return "关联完整事实";
+    case "followRef": return `沿${operator.direction === "forward" ? "正向" : "反向"}引用关联`;
+    case "aggregate": return `统计 ${operator.metrics.length} 项指标`;
+    case "path": return `查找不超过 ${operator.maxHops} 跳的路径`;
+    case "union": return "合并查询结果";
+    case "intersect": return "只保留共同结果";
+    case "except": return "从前者排除后者";
+    case "exists": return "保留存在关联的结果";
+    case "notExists": return "排除存在关联的结果";
+  }
+}
+
+class AdvancedBundleView implements NodeView {
+  readonly dom = document.createElement("div");
+  readonly contentDOM = document.createElement("div");
+
+  constructor() {
+    this.dom.className = "query-advanced-bundle";
+    this.contentDOM.className = "query-advanced-sections";
+    this.dom.append(this.contentDOM);
+  }
+}
+
+class AdvancedSectionView implements NodeView {
+  readonly dom = document.createElement("section");
+  readonly contentDOM = document.createElement("div");
+  private readonly heading = document.createElement("h3");
+
+  constructor(node: ProseMirrorNode) {
+    this.dom.className = "query-advanced-section";
+    this.contentDOM.className = "query-advanced-operators";
+    this.sync(node);
+    this.dom.append(this.heading, this.contentDOM);
+  }
+
+  update(node: ProseMirrorNode): boolean {
+    if (node.type.name !== "query_section") return false;
+    this.sync(node);
+    return true;
+  }
+
+  private sync(node: ProseMirrorNode): void {
+    this.heading.textContent = String(node.attrs.answer?.title ?? "查询结果");
+  }
+}
+
+class AdvancedOperatorView extends ClauseView {
+  private readonly summary = document.createElement("span");
+
   constructor(node: ProseMirrorNode, view: EditorView, getPos: () => number | undefined) {
-    super("bundle", node, view, getPos);
-    const titles = node.attrs.titles as string[];
-    const label = document.createElement("span");
-    label.className = "query-slot query-readonly-slot";
-    label.textContent = titles.join("、") || "查询结果";
-    this.dom.append(document.createTextNode("已保存查询"), label);
+    super("advanced", node, view, getPos);
+    this.summary.className = "query-clause-summary";
+    this.sync(node);
+    this.dom.append(this.summary);
+  }
+
+  override update(node: ProseMirrorNode): boolean {
+    if (!super.update(node)) return false;
+    this.sync(node);
+    return true;
+  }
+
+  private sync(node: ProseMirrorNode): void {
+    this.summary.textContent = advancedOperatorText(node.attrs.value as QueryOperator);
   }
 }
 
@@ -651,11 +822,16 @@ export class QueryDocumentEditor {
       return false;
     const owner = this.owner();
     const attrs = this.defaultAttrs(name, owner);
-    const node = queryEditorSchema.node(name, attrs);
+    const node = name === "condition_group"
+      ? queryEditorSchema.node("condition_group", { mode: "all" }, [
+          queryEditorSchema.node("condition", defaultConditionAttrs(owner)),
+        ])
+      : queryEditorSchema.node(name, attrs);
     const rank: Record<string, number> = {
       find: 0,
       search: 1,
       condition: 2,
+      condition_group: 2,
       relation: 3,
       projection: 4,
       sort: 5,
@@ -685,17 +861,9 @@ export class QueryDocumentEditor {
       raw: "",
     };
     if (name === "condition") {
-      const available = new Set(queryFieldsFor(owner, "filter"));
-      const field = [...COMMON_FIELDS[owner]]
-        .find((item) => available.has(item)) ??
-        [...available].find((item) => !INTERNAL_FIELDS.has(item)) ?? "";
-      return {
-        field,
-        operator: queryConditionOperators(owner, field)[0] ?? "",
-        raw: "",
-        expression: null,
-      };
+      return defaultConditionAttrs(owner);
     }
+    if (name === "condition_group") return { mode: "all" };
     if (name === "relation") return {
       selection: queryRelationOptions(owner)[0]?.value ?? "",
       exists: true,
@@ -719,11 +887,17 @@ export class QueryDocumentEditor {
     const owner = this.view?.state
       ? this.owner()
       : String(this.options.doc.firstChild?.attrs.owner ?? "subject") as Owner;
-    return {
+    const nodeViews: Record<string, (
+      node: ProseMirrorNode,
+      view: EditorView,
+      getPos: () => number | undefined,
+    ) => NodeView> = {
       find: (node, view, getPos) => new FindView(node, view, getPos),
       search: (node, view, getPos) => new SearchView(node, view, getPos, owner),
       condition: (node, view, getPos) =>
         new ConditionView(node, view, getPos, owner),
+      condition_group: (node, view, getPos) =>
+        new ConditionGroupView(node, view, getPos, owner),
       relation: (node, view, getPos) =>
         new RelationView(node, view, getPos, owner, this.options),
       projection: (node, view, getPos) =>
@@ -732,7 +906,12 @@ export class QueryDocumentEditor {
       limit: (node, view, getPos) => new LimitView(node, view, getPos),
       recipe: (node, view, getPos) =>
         new RecipeView(node, view, getPos, this.options),
-      bundle: (node, view, getPos) => new BundleView(node, view, getPos),
+      query_bundle: () => new AdvancedBundleView(),
+      query_section: (node) => new AdvancedSectionView(node),
     };
+    for (const name of Object.values(QUERY_OPERATOR_NODE))
+      nodeViews[name] = (node, view, getPos) =>
+        new AdvancedOperatorView(node, view, getPos);
+    return nodeViews;
   }
 }

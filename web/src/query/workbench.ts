@@ -37,12 +37,13 @@ export interface QueryWorkbenchDependencies {
   updateUrl(): void;
 }
 
-type AddableClause = "search" | "condition" | "relation" | "projection" |
-  "sort" | "limit";
+type AddableClause = "search" | "condition" | "condition_group" | "relation" |
+  "projection" | "sort" | "limit";
 
 const ADD_ACTIONS: Array<[AddableClause, string]> = [
   ["search", "搜索文字"],
   ["condition", "筛选条件"],
+  ["condition_group", "条件组"],
   ["relation", "关联实体"],
   ["projection", "返回信息"],
   ["sort", "排序"],
