@@ -225,7 +225,6 @@ export interface SearchElements {
   list: HTMLElement;
   status: HTMLElement;
   more: HTMLButtonElement;
-  explore?: HTMLButtonElement;
 }
 
 export interface SearchDependencies {
@@ -243,6 +242,73 @@ const DEFAULT_DEPENDENCIES: SearchDependencies = {
   searchSubstringPage,
   substringDelayMs: 100,
 };
+
+export interface NameSuggestionOptions {
+  limit: number;
+  entityKinds: readonly EntityKind[];
+  signal?: AbortSignal;
+  dependencies?: SearchDependencies;
+}
+
+async function prefixEntries(
+  query: string,
+  dependencies: SearchDependencies,
+  signal: AbortSignal,
+): Promise<SearchEntry[]> {
+  const directory = await dependencies.loadSearchDir();
+  signal.throwIfAborted();
+  let node: SearchNode | undefined;
+  let prefix = "";
+  let candidate = "";
+  for (const char of query) {
+    candidate += char;
+    if (!Object.hasOwn(directory, candidate)) continue;
+    const hit = directory[candidate];
+    if (!hit) throw new Error(`search node ${candidate} is missing`);
+    node = hit;
+    prefix = candidate;
+    if ("l" in hit) break;
+  }
+  if (node && "l" in node) {
+    const entries = await dependencies.searchMember(node.l, signal);
+    signal.throwIfAborted();
+    return entries.filter((entry) => entry[0].startsWith(query));
+  }
+  if (node && prefix === query) {
+    const entries = await dependencies.searchMember(node.t, signal);
+    signal.throwIfAborted();
+    return entries;
+  }
+  return [];
+}
+
+/** Compact autocomplete projection. Exact answers still run through QueryDraft. */
+export async function searchNameSuggestions(
+  text: string,
+  aliases: SearchAliases,
+  options: NameSuggestionOptions,
+): Promise<SearchResult[]> {
+  if (!Number.isSafeInteger(options.limit) || options.limit < 1)
+    throw new RangeError("name suggestion limit must be positive");
+  const dependencies = options.dependencies ?? DEFAULT_DEPENDENCIES;
+  const signal = options.signal ?? new AbortController().signal;
+  await dependencies.loadCharmap();
+  signal.throwIfAborted();
+  const query = fold(text);
+  if (!query) return [];
+  const entries = await prefixEntries(query, dependencies, signal);
+  if ([...query].length >= 2) {
+    const page = await findSubstringEntries(query, aliases, {
+      loadPage: dependencies.searchSubstringPage,
+      signal,
+    });
+    entries.push(...page.entries);
+  }
+  const kinds = new Set(options.entityKinds);
+  return rankSearchEntries(query, entries)
+    .filter((result) => kinds.has(result.entityKind))
+    .slice(0, options.limit);
+}
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
@@ -272,7 +338,6 @@ export class Search {
   private list: HTMLElement;
   private status: HTMLElement;
   private more: HTMLButtonElement;
-  private explore?: HTMLButtonElement;
   private aliases: SearchAliases;
   private pageSize: number;
   private onPick: (rank: number) => void;
@@ -294,7 +359,6 @@ export class Search {
     pageSize: number,
     onPick: (rank: number) => void,
     dependencies: SearchDependencies = DEFAULT_DEPENDENCIES,
-    onExploreText?: (text: string) => void,
   ) {
     if (!Number.isInteger(pageSize) || pageSize <= 0)
       throw new RangeError("search page size must be positive");
@@ -303,7 +367,6 @@ export class Search {
     this.list = elements.list;
     this.status = elements.status;
     this.more = elements.more;
-    this.explore = elements.explore;
     this.aliases = aliases;
     this.pageSize = pageSize;
     this.visibleLimit = pageSize;
@@ -323,33 +386,14 @@ export class Search {
     this.box.addEventListener("input", () => this.runUpdate());
     this.box.addEventListener("keydown", (ev) => this.onKey(ev));
     this.box.addEventListener("blur", (event) => {
-      if (
-        event.relatedTarget !== this.more &&
-        (!this.explore || event.relatedTarget !== this.explore)
-      )
-        this.close();
+      if (event.relatedTarget !== this.more) this.close();
     });
     this.more.addEventListener("mousedown", (event) =>
       event.preventDefault(),
     );
     this.more.addEventListener("click", () => this.runMore());
     this.more.addEventListener("blur", (event) => {
-      if (
-        event.relatedTarget !== this.box &&
-        (!this.explore || event.relatedTarget !== this.explore)
-      )
-        this.close();
-    });
-    this.explore?.addEventListener("mousedown", (event) => event.preventDefault());
-    this.explore?.addEventListener("click", () => {
-      const text = this.box.value.trim();
-      if (!text) return;
-      this.close();
-      onExploreText?.(text);
-    });
-    this.explore?.addEventListener("blur", (event) => {
-      if (event.relatedTarget !== this.box && event.relatedTarget !== this.more)
-        this.close();
+      if (event.relatedTarget !== this.box) this.close();
     });
     this.list.addEventListener("mousedown", (ev) => {
       const target = (ev.target as HTMLElement).closest("[data-rank]");
@@ -666,10 +710,6 @@ export class Search {
     this.status.setAttribute("aria-busy", String(busy));
     this.panel.hidden = false;
     this.box.setAttribute("aria-expanded", "true");
-    if (this.explore) {
-      this.explore.hidden = this.box.value.trim().length < 2;
-      this.explore.textContent = `在正文与关系备注中搜索“${this.box.value.trim()}”`;
-    }
   }
 
   private showPrefixStatus(count: number): void {
@@ -720,7 +760,6 @@ export class Search {
     this.status.textContent = "";
     this.status.setAttribute("aria-busy", "false");
     this.more.hidden = true;
-    if (this.explore) this.explore.hidden = true;
     this.setMoreLoading(false);
     this.panel.hidden = true;
     this.box.setAttribute("aria-expanded", "false");

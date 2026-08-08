@@ -19,13 +19,16 @@ import {
   SiteDataContractError,
 } from "./loader";
 import { relationNeighbors } from "./neighbors";
-import { parseEntityRef } from "./query/contract";
+import { parseEntityRef, QUERY_CONTRACT, type Owner } from "./query/contract";
+import { compileExplorerQuery } from "./query/explorer";
+import { rankEntitySuggestions } from "./query/query-bar";
+import { OWNER_LABEL } from "./query/workbench-model";
 import { QueryWorkbench } from "./query/workbench";
 import { QueryWorkerClient } from "./query/worker-client";
 import { Scene } from "./scene";
-import { Search } from "./search";
+import { searchNameSuggestions } from "./search";
 import { notify, state, subscribe } from "./store";
-import { TYPE_NAMES, etype } from "./types";
+import { TYPE_NAMES, etype, type EntityKind } from "./types";
 import { decode, encode, type LinkState } from "./url";
 import { locateStableTarget, resolveUrlSelection } from "./url-restore";
 
@@ -67,21 +70,25 @@ async function boot(): Promise<void> {
   const searchAliases = openSearchAliases(manifest);
   const data = new Data();
 
-  const drawer = new Drawer($("#drawer"), {
-    geo,
-    names,
-    manifest,
-    data,
-    reportError,
-    walk: (rank) => runTask(select(rank, "fly"), "节点加载"),
-    arm: (kind, fromRank, fromKey) => {
-      pendingLink = { kind, fromRank, fromKey };
-      hud.textContent =
-        kind === "common"
-          ? "已锁定起点——点击或搜索另一个节点,查看共同关联"
-          : "已锁定起点——点击或搜索另一个节点,查找最短路径";
+  const drawer = new Drawer(
+    $("#drawer"),
+    $<HTMLButtonElement>("#drawer-reopen"),
+    {
+      geo,
+      names,
+      manifest,
+      data,
+      reportError,
+      walk: (rank) => runTask(select(rank, "fly"), "节点加载"),
+      arm: (kind, fromRank, fromKey) => {
+        pendingLink = { kind, fromRank, fromKey };
+        hud.textContent =
+          kind === "common"
+            ? "已锁定起点——点击或搜索另一个节点,查看共同关联"
+            : "已锁定起点——点击或搜索另一个节点,查找最短路径";
+      },
     },
-  });
+  );
 
   const tooltip = $("#tooltip");
   let hoveredNode: { rank: number; x: number; y: number } | null = null;
@@ -295,6 +302,7 @@ async function boot(): Promise<void> {
     cam: "fly" | "center" | "none",
     push = true,
     keyHint: number | null = null,
+    episodeId: number | null = null,
   ): Promise<void> {
     const epoch = ++navigationEpoch;
     const link = pendingLink;
@@ -339,7 +347,10 @@ async function boot(): Promise<void> {
     );
     state.neighbors = nb.ranks;
     state.neighborLabels = nb.labels;
-    runTask(drawer.show(rank, key).then(warmTextIndex), "详情加载");
+    runTask(
+      drawer.show(rank, key, episodeId ?? undefined).then(warmTextIndex),
+      "详情加载",
+    );
     notify();
     if (push) pushUrl();
   }
@@ -428,7 +439,7 @@ async function boot(): Promise<void> {
     }
   };
 
-  // ---- 统一问题构建器:普通用户问题与高级查询共享 Worker 执行链 ----
+  // ---- 统一查询：名称定位与结构化答案共享 Worker 执行链 ----
   let queryClient: QueryWorkerClient | null = null;
   const client = (): QueryWorkerClient => {
     queryClient ??= new QueryWorkerClient(
@@ -436,7 +447,98 @@ async function boot(): Promise<void> {
     );
     return queryClient;
   };
+  let suggestionClient: QueryWorkerClient | null = null;
+  const suggestions = (): QueryWorkerClient => {
+    suggestionClient ??= new QueryWorkerClient(
+      new Worker(new URL("query-worker.js", document.baseURI)),
+    );
+    return suggestionClient;
+  };
+
+  const suggestQueryEntities = async (
+    text: string,
+    owners: readonly Owner[],
+    signal: AbortSignal,
+  ) => {
+    if (
+      [...text.trim()].length <
+        QUERY_CONTRACT.search.lookup.minNormalizedCharacters
+    ) return [];
+    const pages = await Promise.all(owners.map(async (owner) => {
+      const columns = [
+        "ref",
+        "name",
+        ...(owner === "subject" || owner === "episode" ? ["nameCn"] : []),
+        ...(owner === "episode" ? ["subjectRef"] : []),
+      ];
+      const section = compileExplorerQuery({
+        owner,
+        text: { value: text, capability: "lookup" },
+        columns,
+        limit: 12,
+      }).sections.results!;
+      const result = await suggestions().execute(
+        section.query,
+        section.parameterValues ?? {},
+        { offset: 0, pageSize: 12, signal },
+      );
+      const items = await Promise.all(result.rows.map(async (row, index) => {
+        const ref = row.ref;
+        const name = typeof row.nameCn === "string" && row.nameCn
+          ? row.nameCn
+          : row.name;
+        if (typeof ref !== "string" || typeof name !== "string") return null;
+        const match = Object.values(result.evidence[index] ?? {}).flat()
+          .find((item) => item.kind === "text-range")?.snippet;
+        let detail = OWNER_LABEL[owner];
+        if (owner === "episode" && typeof row.subjectRef === "string") {
+          const subjectRef = parseEntityRef(row.subjectRef);
+          if (subjectRef.owner === "subject" && subjectRef.archiveId <= 0xffffff) {
+            const subject = await data.entity((1 << 24) | subjectRef.archiveId, signal);
+            if (subject?.kind === "subject")
+              detail = `${detail} · ${subject.nameCn || subject.name}`;
+          }
+        }
+        return {
+          ref: ref as `${Owner}:${number}`,
+          owner,
+          label: name,
+          detail,
+          ...(match ? { match } : {}),
+        };
+      }));
+      return items.filter((item) => item !== null);
+    }));
+    return rankEntitySuggestions(text, pages.flat()).slice(0, 18);
+  };
+
+  const navigateEntity = async (ref: string): Promise<void> => {
+    const parsed = parseEntityRef(ref);
+    if (parsed.owner === "episode") {
+      const episode = await data.episode(parsed.archiveId);
+      if (!episode) throw new TypeError(`${ref} 不在当前数据版本中`);
+      await ensureRankIndex();
+      const rank = rankOfKeyLocal(episode.subject);
+      if (rank === null) throw new TypeError(`${ref} 所属作品不在当前星图中`);
+      await select(rank, "fly", true, episode.subject, episode.id);
+      return;
+    }
+    const kind = parsed.owner === "subject"
+      ? 1
+      : parsed.owner === "person"
+        ? 2
+        : 3;
+    if (parsed.archiveId > 0xffffff)
+      throw new TypeError(`${ref} 不能在当前星图中定位`);
+    const key = (kind << 24) | parsed.archiveId;
+    await ensureRankIndex();
+    const rank = rankOfKeyLocal(key);
+    if (rank === null) throw new TypeError(`${ref} 不在当前数据版本中`);
+    await select(rank, "fly", true, key);
+  };
+
   queryWorkbench = new QueryWorkbench({
+    host: $("#query-dock"),
     execute: (section, options) =>
       client().execute(section.query, section.parameterValues ?? {}, options),
     selectedEntity: async () => {
@@ -468,50 +570,69 @@ async function boot(): Promise<void> {
       if (!entity) throw new TypeError("实体不在当前数据版本中");
       return entity.kind === "subject" ? entity.nameCn || entity.name : entity.name;
     },
+    suggestEntities: suggestQueryEntities,
+    suggestNames: async (text, owners, signal) => {
+      const canvasKinds = owners.flatMap((owner): EntityKind[] =>
+        owner === "subject" ? [1]
+          : owner === "person" ? [2]
+            : owner === "character" ? [3]
+              : []
+      );
+      const [canvas, episodes] = await Promise.all([
+        canvasKinds.length
+          ? searchNameSuggestions(text, searchAliases, {
+              limit: 18,
+              entityKinds: canvasKinds,
+              signal,
+            })
+          : [],
+        owners.includes("episode")
+          ? suggestQueryEntities(text, ["episode"], signal)
+          : [],
+      ]);
+      const ownerOfKind = (["", "subject", "person", "character"] as const);
+      return [
+        ...canvas.map((item) => {
+          const owner = ownerOfKind[item.entityKind] as Owner;
+          return {
+            key: `rank:${item.rank}`,
+            rank: item.rank,
+            owner,
+            label: item.display,
+            detail: OWNER_LABEL[owner],
+            ...(item.matched !== item.display ? { match: item.matched } : {}),
+          };
+        }),
+        ...episodes.map((item) => ({
+          key: item.ref,
+          ref: item.ref,
+          owner: item.owner,
+          label: item.label,
+          detail: item.detail,
+          ...(item.match ? { match: item.match } : {}),
+        })),
+      ].slice(0, 18);
+    },
+    onNameSuggestion: async (suggestion) => {
+      if (suggestion.rank !== undefined) {
+        await select(suggestion.rank, "fly");
+        return;
+      }
+      if (suggestion.ref) {
+        await navigateEntity(suggestion.ref);
+        return;
+      }
+      throw new TypeError("无法定位这个名称建议");
+    },
     releaseId: () => manifest.version,
     mappings: () => data.mappings(),
-    onEntity: (ref) => {
-      runTask((async () => {
-        const parsed = parseEntityRef(ref);
-        const kind = parsed.owner === "subject"
-          ? 1
-          : parsed.owner === "person"
-            ? 2
-            : parsed.owner === "character"
-              ? 3
-              : 0;
-        if (!kind || parsed.archiveId > 0xffffff)
-          throw new TypeError(`${ref} 不能在当前星图中定位`);
-        const key = (kind << 24) | parsed.archiveId;
-        await ensureRankIndex();
-        const rank = rankOfKeyLocal(key);
-        if (rank === null) throw new TypeError(`${ref} 不在当前 Release 中`);
-        await select(rank, "fly", true, key);
-      })(), "查询结果定位");
-    },
+    onEntity: navigateEntity,
     updateUrl: replaceUrl,
     pushUrl,
   });
   subscribe(() => {
     queryWorkbench?.sync(state.queryBundle);
   });
-
-  // ---- 搜索(命中 → flyTo + 选中 + 亮邻居)----
-  new Search(
-    {
-      box: $("#search"),
-      panel: $("#search-panel"),
-      list: $("#hits"),
-      status: $("#search-status"),
-      more: $("#search-more"),
-      explore: $("#search-fulltext"),
-    },
-    searchAliases,
-    manifest.limits.search_top,
-    (rank) => runTask(select(rank, "fly"), "搜索结果加载"),
-    undefined,
-    (text) => queryWorkbench?.askFullText(text),
-  );
 
   // ---- 骰子:在当前已加载的 Canvas 节点中随机传送 ----
   const rollDice = (): void => {
@@ -536,6 +657,10 @@ async function boot(): Promise<void> {
     }
     if (k === "r") {
       scene.home();
+    }
+    if (k === "s") {
+      ev.preventDefault();
+      queryWorkbench?.focus();
     }
     if (ev.key === "Escape" && state.selection !== null) deselect(true);
   });

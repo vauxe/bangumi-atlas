@@ -7,6 +7,7 @@ import {
   matchingAliasEntry,
   rankSearchEntries,
   Search,
+  searchNameSuggestions,
 } from "../src/search";
 import type { SearchDependencies } from "../src/search";
 import type {
@@ -406,6 +407,54 @@ test("forwards substring cancellation to candidate name loading", async () => {
 
   await rejected;
   assert.equal(receivedSignal, controller.signal);
+});
+
+test("builds compact name suggestions from the published index and current scope", async () => {
+  const aliases = aliasesFromNames(new Map<number, NameRow>([
+    [0, ["x-ab-work", null, 1]],
+    [1, ["x-ab-person", null, 2]],
+    [2, ["x-ab-character", null, 3]],
+  ]));
+  const results = await searchNameSuggestions("ab", aliases, {
+    limit: 3,
+    entityKinds: [1, 3],
+    dependencies: {
+      ...immediateDependencies,
+      loadSearchDir: async () => ({ ab: { l: [0, 1] } }),
+      searchMember: async () => [
+        ["ab prefix", "ab prefix", 8, "ab prefix", 1],
+      ],
+      searchSubstringPage: async () => ({ ranks: [0, 1, 2], next: null }),
+    },
+  });
+
+  assert.deepEqual(results.map((result) => [result.rank, result.entityKind]), [
+    [0, 1],
+    [8, 1],
+    [2, 3],
+  ]);
+});
+
+test("keeps one-character suggestions on the compact prefix projection", async () => {
+  let substringReads = 0;
+  const results = await searchNameSuggestions("a", emptyNames, {
+    limit: 5,
+    entityKinds: [1, 2, 3],
+    dependencies: {
+      ...immediateDependencies,
+      loadSearchDir: async () => ({ a: { t: [0, 1] } }),
+      searchMember: async () => [
+        ["anime", "anime", 4, "Anime", 1],
+      ],
+      searchSubstringPage: async () => {
+        substringReads++;
+        return { ranks: [], next: null };
+      },
+    },
+  });
+
+  assert.equal(substringReads, 0);
+  assert.deepEqual(results.map((result) => result.display), ["Anime"]);
 });
 
 test("closes stale suggestions when search loses focus", () => {

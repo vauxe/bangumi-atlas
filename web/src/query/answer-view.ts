@@ -4,6 +4,7 @@ import type {
   FactValue,
   PathValue,
   QueryResult,
+  RowEvidence,
   RuntimeValue,
 } from "./engine";
 import type { AnswerSpec } from "./bundle";
@@ -57,6 +58,7 @@ const COLUMN_LABEL: Record<string, string> = {
   subject: "作品",
   subjectContext: "作品",
   neighbor: "关联条目",
+  entityType: "实体类型",
   count: "条数",
 };
 
@@ -130,6 +132,33 @@ function path(value: RuntimeValue): value is PathValue {
     "kind" in value && value.kind === "path";
 }
 
+function isFullTextMatch(
+  item: Evidence,
+): item is Extract<Evidence, { kind: "text-range" }> {
+  if (item.kind !== "text-range" || !item.snippet) return false;
+  if (item.ref.startsWith("fact:")) {
+    return Object.values(QUERY_CONTRACT.facts).some((fact) =>
+      fact.fields[item.field]?.capabilities.includes("fullText")
+    );
+  }
+  const owner = item.ref.slice(0, item.ref.indexOf(":")) as Owner;
+  return Boolean(
+    QUERY_CONTRACT.owners[owner]?.fields[item.field]?.capabilities.includes("fullText"),
+  );
+}
+
+export function queryMatchSnippet(evidence: RowEvidence | undefined): string | undefined {
+  return Object.values(evidence ?? {}).flat().find(isFullTextMatch)?.snippet;
+}
+
+export function queryRowMatchSnippet(
+  row: Record<string, RuntimeValue>,
+  evidence: RowEvidence | undefined,
+): string | undefined {
+  const identified = typeof row.ref === "string" || Object.values(row).some(entity);
+  return identified ? queryMatchSnippet(evidence) : undefined;
+}
+
 export function queryValueText(
   value: RuntimeValue,
   context?: ValueContext,
@@ -145,6 +174,10 @@ export function queryValueText(
   if (fact(value)) return FACT_LABEL[value.factKind] ?? value.factKind;
   if (path(value)) return `${value.cost} 跳路径`;
   if (typeof value === "boolean") return value ? "是" : "否";
+  if (
+    typeof value === "string" && context?.column === "entityType" &&
+    Object.hasOwn(OWNER_LABEL, value)
+  ) return OWNER_LABEL[value as Owner];
   if (typeof value === "number" && context) {
     const mapped = mappedNumber(value, context);
     if (mapped) return mapped;
@@ -167,9 +200,9 @@ function valueNode(
   options: AnswerViewOptions,
   label?: string,
 ): HTMLElement {
-  const ref = entity(value) && value.owner !== "episode"
+  const ref = entity(value)
     ? value.ref
-    : typeof value === "string" && /^(?:subject|person|character):(?:0|[1-9][0-9]*)$/.test(value)
+    : typeof value === "string" && /^(?:subject|person|character|episode):(?:0|[1-9][0-9]*)$/.test(value)
       ? value
       : null;
   if (ref) {
@@ -314,11 +347,7 @@ function renderTable(
         label,
       ));
     }
-    const snippet = Object.values(result.evidence[rowIndex] ?? {})
-      .flat()
-      .find((item): item is Extract<Evidence, { kind: "text-range" }> =>
-        item.kind === "text-range" && Boolean(item.snippet)
-      )?.snippet;
+    const snippet = queryRowMatchSnippet(row, result.evidence[rowIndex]);
     if (snippet) {
       const matchRow = body.insertRow();
       matchRow.className = "query-match-row";

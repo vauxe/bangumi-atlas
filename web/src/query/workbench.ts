@@ -1,24 +1,22 @@
 import { canonicalJson } from "./canonical";
 import { normalizeBundle, type QueryBundle, type QuerySection } from "./bundle";
 import {
-  createQueryBundleDocument,
-  createQueryEditorDocument,
-  createQueryRecipeDocument,
-  type LoweredQueryEditorDocument,
-} from "./editor";
-import {
-  QueryDocumentEditor,
-  type SelectedQueryEntity,
-} from "./editor-view";
-import { compileExplorerQuery, decompileExplorerQuery } from "./explorer";
+  compileQueryDraft,
+  defaultQueryDraft,
+  draftOwner,
+  draftQuery,
+  queryDraftFromBundle,
+  type EntityRef,
+  type QueryDraft,
+} from "./draft";
 import type { QueryResult, RuntimeValue } from "./engine";
 import { renderAnswer } from "./answer-view";
 import {
-  comparisonRecipe,
-  decompileQueryRecipe,
-  fullTextRecipe,
-  pathRecipe,
-} from "./recipes";
+  QueryBar,
+  type EntitySuggestion,
+  type NameSuggestion,
+  type SelectedQueryEntity,
+} from "./query-bar";
 import {
   appendQueryResultPage,
   commitRenderedResults,
@@ -32,230 +30,163 @@ import { notify, state } from "../store";
 import type { Mappings } from "../types";
 
 export interface QueryWorkbenchDependencies {
+  host?: HTMLElement;
   execute(
     section: QuerySection,
     options: { offset: number; pageSize: number; signal: AbortSignal },
   ): Promise<QueryResult>;
   selectedEntity?(): Promise<SelectedQueryEntity | null>;
   resolveEntityLabel?(ref: string): Promise<string>;
+  suggestEntities?(
+    text: string,
+    owners: readonly Owner[],
+    signal: AbortSignal,
+  ): Promise<EntitySuggestion[]>;
+  suggestNames?(
+    text: string,
+    owners: readonly Owner[],
+    signal: AbortSignal,
+  ): Promise<NameSuggestion[]>;
+  onNameSuggestion?(suggestion: NameSuggestion): void | Promise<void>;
   releaseId(): string;
-  onEntity(ref: string): void;
+  onEntity(ref: string): void | Promise<void>;
   mappings?(): Promise<Mappings>;
   onBundle?(bundle: QueryBundle): void;
   updateUrl(): void;
   pushUrl?(): void;
 }
 
-type AddableClause = "search" | "condition" | "condition_group" | "relation" |
-  "projection" | "aggregate" | "sort" | "limit";
-type AddAction = AddableClause | "common" | "path";
-
-const ADD_ACTIONS: Array<[AddAction, string]> = [
-  ["search", "搜索文字"],
-  ["condition", "筛选条件"],
-  ["condition_group", "条件组"],
-  ["relation", "关联实体"],
-  ["aggregate", "统计"],
-  ["common", "比较关联"],
-  ["path", "关系路径"],
-  ["projection", "返回信息"],
-  ["sort", "排序"],
-  ["limit", "结果条数"],
-];
-
 function action(label: string, className = ""): HTMLButtonElement {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = className;
-  button.textContent = label;
-  return button;
+  const result = document.createElement("button");
+  result.type = "button";
+  result.className = className;
+  result.textContent = label;
+  return result;
+}
+
+function enoughText(draft: QueryDraft): boolean {
+  const text = draft.kind === "list" && !draft.query
+    ? draft.allText.trim()
+    : draftQuery(draft)?.text?.value.trim();
+  return !text || [...text].length >= 2;
+}
+
+/** Plain name location stays on the canvas; every exact/structured answer uses the workspace. */
+export function queryNeedsWorkspace(draft: QueryDraft): boolean {
+  if (draft.kind !== "list" || !draft.query) return true;
+  const query = draft.query;
+  return query.text?.capability === "fullText" || Boolean(
+    query.condition || query.relations?.length || query.columns?.length ||
+    query.orderBy?.length || query.limit !== undefined,
+  );
 }
 
 export class QueryWorkbench {
-  private readonly openButton = action("详细查询");
-  private readonly panel = document.createElement("aside");
+  private readonly panel = document.createElement("main");
+  private readonly workspace = document.createElement("section");
   private readonly status = document.createElement("div");
   private readonly answers = document.createElement("div");
-  private readonly runButton = action("查询", "query-run");
-  private readonly editor: QueryDocumentEditor;
+  private readonly stopButton = action("停止", "query-stop");
+  private readonly reopenButton = action("↗", "query-reopen");
+  private readonly bar: QueryBar;
   private controller: AbortController | null = null;
   private running = false;
   private runnable = true;
+  private expanded = false;
+  private hasAnswer = false;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
-  private pending: LoweredQueryEditorDocument | null = null;
   private lastBundle = "";
-  private ready = false;
-  private pushNextUrl = false;
+  private editableBundle = true;
 
   constructor(private readonly dependencies: QueryWorkbenchDependencies) {
-    this.openButton.id = "query-open";
-    this.openButton.setAttribute("aria-controls", "query-workbench");
-    this.openButton.setAttribute("aria-expanded", "false");
-
     this.panel.id = "query-workbench";
-    this.panel.hidden = true;
-    this.panel.setAttribute("aria-label", "详细查询");
-
-    const header = document.createElement("header");
-    const mark = document.createElement("span");
-    mark.className = "query-mascot";
-    mark.textContent = "✦";
-    mark.setAttribute("aria-hidden", "true");
-    const heading = document.createElement("h2");
-    heading.textContent = "详细查询";
-    const reset = action("新查询", "query-reset");
-    const close = action("×", "query-close");
-    close.setAttribute("aria-label", "关闭详细查询");
-    header.append(mark, heading, reset, close);
+    this.panel.className = "query-workbench";
+    this.panel.setAttribute("aria-label", "统一查询");
 
     const compose = document.createElement("section");
     compose.className = "query-compose";
     compose.setAttribute("aria-label", "查询内容");
-    const editorHost = document.createElement("div");
-    editorHost.className = "query-editor-host";
+    const barHost = document.createElement("div");
+    barHost.className = "query-bar-host";
+    this.reopenButton.hidden = true;
+    this.reopenButton.setAttribute("aria-label", "重新打开查询答案");
+    this.reopenButton.setAttribute("aria-controls", "query-workspace");
+    compose.append(barHost, this.reopenButton);
 
-    const controls = document.createElement("div");
-    controls.className = "query-compose-actions";
-    const add = document.createElement("details");
-    add.className = "query-add-menu";
-    const addSummary = document.createElement("summary");
-    addSummary.textContent = "＋ 添加";
-    const addList = document.createElement("div");
-    for (const [name, label] of ADD_ACTIONS) {
-      const button = action(label);
-      button.dataset.clause = name;
-      addList.append(button);
-    }
-    add.append(addSummary, addList);
-    controls.append(add, this.runButton);
-    compose.append(editorHost, controls);
-
+    this.workspace.id = "query-workspace";
+    this.workspace.className = "query-workspace";
+    this.workspace.hidden = true;
+    this.workspace.setAttribute("aria-label", "查询答案");
+    const toolbar = document.createElement("header");
+    const reset = action("清空", "query-reset");
+    const collapse = action("×", "query-collapse");
+    collapse.setAttribute("aria-label", "收起查询答案");
+    this.stopButton.hidden = true;
+    this.stopButton.setAttribute("aria-label", "停止当前查询");
     this.status.className = "query-status";
     this.status.setAttribute("role", "status");
     this.status.setAttribute("aria-live", "polite");
+    toolbar.append(this.status, this.stopButton, reset, collapse);
+
     this.answers.className = "query-answers";
-    this.answers.setAttribute("aria-live", "polite");
-    this.panel.append(header, compose, this.status, this.answers);
+    this.answers.setAttribute("aria-label", "查询答案内容");
+    this.workspace.append(toolbar, this.answers);
+    this.panel.append(compose, this.workspace);
+    (dependencies.host ?? document.body).append(this.panel);
 
-    document.querySelector("#searchwrap-dock")?.append(this.openButton);
-    document.body.append(this.panel);
-
-    this.editor = new QueryDocumentEditor(editorHost, {
-      doc: createQueryEditorDocument({ owner: "subject" }),
-      onChange: (result) => this.editorChanged(result),
+    this.bar = new QueryBar({
+      draft: defaultQueryDraft(),
+      onChange: (draft) => this.draftChanged(draft),
+      onSubmit: () => this.runCurrent(),
+      reportError: (error) => this.showError(error),
       selectedEntity: dependencies.selectedEntity,
       resolveEntityLabel: dependencies.resolveEntityLabel,
+      suggestEntities: dependencies.suggestEntities,
+      suggestNames: dependencies.suggestNames,
+      onNameSuggestion: dependencies.onNameSuggestion
+        ? (suggestion) => {
+            void Promise.resolve(dependencies.onNameSuggestion?.(suggestion))
+              .catch((error) => this.showError(error));
+          }
+        : undefined,
       mappings: dependencies.mappings,
-      reportError: (error) => this.showError(error),
     });
-    this.ready = true;
+    barHost.append(this.bar.dom);
 
-    this.openButton.addEventListener("click", () =>
-      this.panel.hidden ? this.open() : this.close()
-    );
-    close.addEventListener("click", () => this.close());
+    this.reopenButton.addEventListener("click", () => this.expand(false));
+    collapse.addEventListener("click", () => this.collapse());
     reset.addEventListener("click", () => this.newQuery());
-    this.runButton.addEventListener("click", () =>
-      this.running ? this.cancelCurrent() : this.runCurrent()
-    );
-    addList.addEventListener("click", (event) => {
-      const button = (event.target as HTMLElement)
-        .closest<HTMLButtonElement>("[data-clause]");
-      if (!button) return;
-      const name = button.dataset.clause as AddAction;
-      const inserted = name === "common" || name === "path"
-        ? (() => {
-            this.transitionEditor(createQueryRecipeDocument(
-              name === "common"
-                ? { kind: name, from: "", to: "" }
-                : {
-                    kind: name,
-                    from: "",
-                    to: "",
-                    maxHops: 6,
-                    maxPaths: 10,
-                  },
-            ));
-            return true;
-          })()
-        : this.editor.insert(name);
-      add.open = false;
-      if (!inserted) this.setStatus("这项已经在查询中");
-    });
+    this.stopButton.addEventListener("click", () => this.cancelCurrent());
     this.panel.addEventListener("keydown", (event) => {
-      if (event.isComposing || event.defaultPrevented) return;
-      if (event.key === "Escape") {
-        const opened = [...this.panel.querySelectorAll<HTMLDetailsElement>("details[open]")];
-        const current = opened.at(-1);
-        if (current) {
-          current.open = false;
-          event.preventDefault();
-          event.stopPropagation();
-          return;
-        }
-      }
-      const modified = event.metaKey || event.ctrlKey;
-      if (modified && event.key.toLowerCase() === "z") {
-        const changed = event.shiftKey ? this.editor.redo() : this.editor.undo();
-        if (changed) event.preventDefault();
-        return;
-      }
-      if (modified && event.key.toLowerCase() === "y") {
-        if (this.editor.redo()) event.preventDefault();
-        return;
-      }
-      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      if (event.isComposing || event.defaultPrevented || event.key !== "Escape") return;
+      if (this.bar.dismissCompletion()) {
         event.preventDefault();
-        this.runCurrent();
+        event.stopPropagation();
         return;
       }
-      if (
-        event.key === "/" && !modified && !event.altKey &&
-        event.target instanceof HTMLElement &&
-        event.target.closest(".query-document") &&
-        !(event.target instanceof HTMLInputElement) &&
-        !(event.target instanceof HTMLSelectElement) &&
-        !(event.target instanceof HTMLButtonElement)
-      ) {
+      if (this.expanded) {
         event.preventDefault();
-        add.open = true;
-        addList.querySelector<HTMLButtonElement>("button")?.focus();
-        return;
-      }
-      if (
-        event.key === "Enter" && !modified && !event.altKey &&
-        event.target instanceof HTMLInputElement
-      ) {
-        event.preventDefault();
-        event.target.blur();
-      }
-    });
-    document.addEventListener("keydown", (event) => {
-      if (!event.isComposing && event.key === "Escape" && !this.panel.hidden) {
-        event.stopImmediatePropagation();
-        this.close();
+        event.stopPropagation();
+        this.collapse();
       }
     });
   }
 
-  askFullText(text: string): void {
-    const recipe = { kind: "fullText" as const, text: text.trim() };
-    this.transitionEditor(createQueryRecipeDocument(recipe));
-    this.open();
-    this.runCurrent();
+  focus(): void {
+    this.bar.focus();
   }
 
   askRelationship(
     kind: "common" | "path",
-    from: `${"subject" | "person" | "character" | "episode"}:${number}`,
-    to: `${"subject" | "person" | "character" | "episode"}:${number}`,
+    from: EntityRef,
+    to: EntityRef,
   ): void {
-    this.transitionEditor(createQueryRecipeDocument(
-      kind === "path"
-        ? { kind, from, to, maxHops: 6, maxPaths: 10 }
-        : { kind, from, to },
-    ));
-    this.open();
+    const draft: QueryDraft = kind === "path"
+      ? { kind: "path", from, to, maxHops: 6, maxPaths: 10 }
+      : { kind: "comparison", from, to };
+    this.editableBundle = true;
+    this.bar.replace(draft);
+    this.expand();
     this.runCurrent();
   }
 
@@ -264,115 +195,90 @@ export class QueryWorkbench {
       if (!this.lastBundle) return;
       this.abortCurrent(new DOMException("query navigation", "AbortError"));
       this.lastBundle = "";
-      this.pushNextUrl = false;
+      this.editableBundle = true;
+      this.hasAnswer = false;
       this.answers.replaceChildren();
       this.setStatus("");
-      this.replaceEditor(createQueryEditorDocument({ owner: "subject" }));
-      this.close();
+      this.bar.replace(defaultQueryDraft());
+      this.collapse(false);
       return;
     }
     const normalized = normalizeBundle(bundle);
     const key = canonicalJson(normalized);
     if (key === this.lastBundle) return;
-    this.pushNextUrl = false;
-    const draft = decompileExplorerQuery(normalized);
-    const recipe = draft ? null : decompileQueryRecipe(normalized);
-    this.replaceEditor(
-      draft
-        ? createQueryEditorDocument(draft)
-        : recipe
-          ? createQueryRecipeDocument(recipe)
-        : createQueryBundleDocument(normalized),
-    );
-    this.open();
-    void this.runBundle(normalized, false).catch((error) => this.showError(error));
+    const draft = queryDraftFromBundle(normalized);
+    this.editableBundle = draft !== null;
+    if (draft) this.bar.replace(draft);
+    this.expand();
+    void this.runBundle(normalized, false).then(() => {
+      if (!draft) this.setStatus("此旧查询只能查看结果");
+    }).catch((error) => this.showError(error));
   }
 
-  private open(): void {
-    this.panel.hidden = false;
-    this.openButton.setAttribute("aria-expanded", "true");
-    this.editor.focus();
-    if (!this.lastBundle && this.pending?.diagnostics.length === 0)
-      this.runCurrent();
+  private expand(focus = true): void {
+    this.expanded = true;
+    this.panel.classList.add("expanded");
+    this.workspace.hidden = false;
+    this.reopenButton.hidden = true;
+    if (focus) this.bar.focus();
   }
 
-  private close(): void {
-    this.panel.hidden = true;
-    this.openButton.setAttribute("aria-expanded", "false");
-    this.openButton.focus();
+  private collapse(focus = true): void {
+    if (this.running)
+      this.abortCurrent(new DOMException("query workspace collapsed", "AbortError"));
+    this.expanded = false;
+    this.panel.classList.remove("expanded");
+    this.workspace.hidden = true;
+    this.reopenButton.hidden = !this.hasAnswer;
+    if (focus) this.bar.focus();
   }
 
   private newQuery(): void {
     this.abortCurrent(new DOMException("new query", "AbortError"));
     this.lastBundle = "";
-    this.pushNextUrl = false;
+    this.editableBundle = true;
+    this.hasAnswer = false;
     state.queryBundle = null;
     notify();
     if (this.dependencies.pushUrl) this.dependencies.pushUrl();
     else this.dependencies.updateUrl();
     this.answers.replaceChildren();
     this.setStatus("");
-    this.replaceEditor(createQueryEditorDocument({ owner: "subject" }));
-    this.editor.focus();
+    this.bar.replace(defaultQueryDraft());
+    this.collapse();
   }
 
-  private replaceEditor(doc: Parameters<QueryDocumentEditor["replace"]>[0]): void {
-    this.ready = false;
-    this.editor.replace(doc);
-    this.ready = true;
-  }
-
-  private transitionEditor(doc: Parameters<QueryDocumentEditor["replace"]>[0]): void {
-    this.pushNextUrl = true;
-    this.editor.replaceTransaction(doc);
-  }
-
-  private editorChanged(result: LoweredQueryEditorDocument): void {
-    this.pending = result;
+  private draftChanged(draft: QueryDraft): void {
+    this.editableBundle = true;
     if (this.refreshTimer !== null) clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
-    if (result.diagnostics.length) {
+    this.abortCurrent(new DOMException("query changed", "AbortError"));
+    this.setStatus("");
+    if (!enoughText(draft)) {
       this.runnable = false;
-      this.abortCurrent(new DOMException("incomplete query", "AbortError"));
-      this.setStatus("");
+      this.setStatus("名称至少需要两个字才能查看完整结果");
       return;
     }
-    this.runnable = true;
-    this.updateRunButton();
-    this.setStatus("");
-    if (!this.ready || this.panel.hidden) return;
-    this.refreshTimer = setTimeout(() => {
-      this.refreshTimer = null;
-      this.runCurrent();
-    }, 260);
+    try {
+      compileQueryDraft(draft);
+      this.runnable = true;
+      if (queryNeedsWorkspace(draft)) this.expand(false);
+      if (!this.expanded) return;
+      this.refreshTimer = setTimeout(() => {
+        this.refreshTimer = null;
+        this.runCurrent(false);
+      }, 220);
+    } catch (error) {
+      this.runnable = false;
+      this.showError(error);
+    }
   }
 
-  private runCurrent(): void {
-    const current = this.pending;
-    if (!current || current.diagnostics.length) return;
+  private runCurrent(focus = true): void {
+    if (!this.runnable) return;
     try {
-      const bundle = current.bundle
-        ? current.bundle
-        : current.recipe?.kind === "fullText"
-          ? fullTextRecipe(current.recipe.text)
-          : current.recipe?.kind === "common"
-            ? comparisonRecipe(
-                current.recipe.from as `${"subject" | "person" | "character" | "episode"}:${number}`,
-                current.recipe.to as `${"subject" | "person" | "character" | "episode"}:${number}`,
-              )
-            : current.recipe?.kind === "path"
-              ? pathRecipe(
-                  current.recipe.from as `${"subject" | "person" | "character" | "episode"}:${number}`,
-                  current.recipe.to as `${"subject" | "person" | "character" | "episode"}:${number}`,
-                  {
-                    maxHops: current.recipe.maxHops,
-                    maxPaths: current.recipe.maxPaths,
-                  },
-                )
-              : current.draft
-                ? compileExplorerQuery(current.draft)
-                : null;
-      if (!bundle) throw new TypeError("当前查询不完整");
+      this.expand(focus);
+      const bundle = compileQueryDraft(this.bar.current());
       void this.runBundle(bundle, true).catch((error) => this.showError(error));
     } catch (error) {
       this.showError(error);
@@ -403,11 +309,7 @@ export class QueryWorkbench {
       state.queryBundle = normalized;
       this.dependencies.onBundle?.(normalized);
       notify();
-      if (this.pushNextUrl) {
-        this.pushNextUrl = false;
-        if (this.dependencies.pushUrl) this.dependencies.pushUrl();
-        else this.dependencies.updateUrl();
-      } else this.dependencies.updateUrl();
+      this.dependencies.updateUrl();
     }
     const cards = Object.entries(normalized.sections).map(([name, section]) => {
       const card = document.createElement("section");
@@ -417,7 +319,7 @@ export class QueryWorkbench {
       return { card, section };
     });
     this.answers.setAttribute("aria-busy", "true");
-    this.setStatus("查询中…");
+    this.setStatus("正在查询");
     try {
       const results = await commitRenderedResults(
         controller.signal,
@@ -427,6 +329,7 @@ export class QueryWorkbench {
         () => {
           this.answers.replaceChildren(...cards.map(({ card }) => card));
           this.answers.setAttribute("aria-busy", "false");
+          this.hasAnswer = true;
         },
       );
       if (results) {
@@ -434,7 +337,9 @@ export class QueryWorkbench {
         this.setStatus(failed ? `${failed} 组结果加载失败` : "");
       }
     } finally {
-      if (this.controller === controller) this.setRunning(false);
+      if (this.controller === controller) {
+        this.setRunning(false);
+      }
     }
   }
 
@@ -466,7 +371,7 @@ export class QueryWorkbench {
         if (loadingMore) return;
         if (shown < result.rows.length) {
           shown = Math.min(shown + 50, result.rows.length);
-          render();
+          render(true);
           return;
         }
         if (!result.hasMore) return;
@@ -480,7 +385,7 @@ export class QueryWorkbench {
           });
           result = appendQueryResultPage(result, next);
           shown = Math.min(shown + 50, result.rows.length);
-          render();
+          render(true);
         } catch (error) {
           this.showError(error);
         } finally {
@@ -488,20 +393,30 @@ export class QueryWorkbench {
           if (this.controller?.signal === signal) this.setRunning(false);
         }
       };
-      const render = (): void => {
+      const render = (focusMore = false): void => {
         const visible = revealQueryResult(result, shown);
         renderAnswer(card, section.answer, visible, {
-          onEntity: (ref) => this.dependencies.onEntity(ref),
+          onEntity: (ref) => {
+            void Promise.resolve(this.dependencies.onEntity(ref))
+              .catch((error) => this.showError(error));
+          },
           onMore: visible.hasMore ? () => void showMore() : undefined,
-          onSort: (semantic, direction) => this.sortResult(semantic, direction),
-          onGroup: (semantic) => this.groupResult(semantic),
-          onFilter: (semantic, value, exclude) =>
-            this.filterResult(semantic, value, exclude),
+          onSort: this.editableBundle
+            ? (semantic, direction) => this.sortResult(semantic, direction)
+            : undefined,
+          onGroup: this.editableBundle
+            ? (semantic) => this.groupResult(semantic)
+            : undefined,
+          onFilter: this.editableBundle
+            ? (semantic, value, exclude) => this.filterResult(semantic, value, exclude)
+            : undefined,
           canSort: (semantic) => this.resultField(semantic, "sort") !== null,
           canGroup: (semantic) => this.resultField(semantic, "group") !== null,
           canFilter: (semantic) => this.resultField(semantic, "filter") !== null,
           mappings,
         });
+        if (focusMore)
+          card.querySelector<HTMLElement>(".query-more")?.focus();
       };
       card.classList.remove("loading");
       render();
@@ -520,8 +435,8 @@ export class QueryWorkbench {
 
   private cancelCurrent(): void {
     if (!this.controller) return;
-    this.abortCurrent(new DOMException("用户取消查询", "AbortError"));
-    this.setStatus("已取消");
+    this.abortCurrent(new DOMException("用户停止查询", "AbortError"));
+    this.setStatus("已停止");
   }
 
   private abortCurrent(reason: DOMException): void {
@@ -534,12 +449,7 @@ export class QueryWorkbench {
 
   private setRunning(running: boolean): void {
     this.running = running;
-    this.updateRunButton();
-  }
-
-  private updateRunButton(): void {
-    this.runButton.textContent = this.running ? "取消" : "查询";
-    this.runButton.disabled = !this.running && !this.runnable;
+    this.stopButton.hidden = !running;
   }
 
   private resultField(
@@ -549,10 +459,10 @@ export class QueryWorkbench {
     const split = semantic.indexOf(".");
     const owner = semantic.slice(0, split) as Owner;
     const field = semantic.slice(split + 1);
-    const draft = this.pending?.draft;
+    const query = draftQuery(this.bar.current());
+    const currentOwner = draftOwner(this.bar.current());
     if (
-      split <= 0 || !draft || draft.owner !== owner ||
-      INTERNAL_FIELDS.has(field) ||
+      split <= 0 || !query || currentOwner !== owner || INTERNAL_FIELDS.has(field) ||
       !queryFieldsFor(owner, capability).includes(field)
     ) return null;
     return { owner, field };
@@ -565,31 +475,53 @@ export class QueryWorkbench {
   ): void {
     const target = this.resultField(semantic, "filter");
     if (!target) return;
-    let operator: string;
-    let raw = "";
-    if (isMissing(value)) operator = exclude ? "isPresent" : "isMissing";
-    else if (value === null) operator = exclude ? "isNotNull" : "isNull";
-    else if (
-      typeof value === "string" || typeof value === "number" ||
-      typeof value === "boolean"
-    ) {
-      operator = exclude ? "ne" : "eq";
-      raw = String(value);
-    } else return;
-    if (!this.editor.addFilter(target.field, operator, raw))
-      this.setStatus("当前字段不能使用这个筛选");
+    const condition = isMissing(value)
+      ? { kind: "isMissing" as const, field: target.field, ...(exclude ? { negated: true } : {}) }
+      : value === null
+        ? { kind: "isNull" as const, field: target.field, ...(exclude ? { negated: true } : {}) }
+        : typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+          ? {
+              kind: "compare" as const,
+              field: target.field,
+              operator: exclude ? "ne" as const : "eq" as const,
+              value,
+            }
+          : null;
+    if (condition) {
+      this.bar.dispatch({ type: "addCondition", condition, owner: target.owner });
+      this.bar.focus();
+    }
   }
 
   private sortResult(semantic: string, direction: "asc" | "desc"): void {
     const target = this.resultField(semantic, "sort");
-    if (target && !this.editor.setSort(target.field, direction))
-      this.setStatus("当前结果不能按此列排序");
+    if (!target) return;
+    this.bar.dispatch({
+      type: "setOrder",
+      owner: target.owner,
+      orderBy: [{
+        column: target.field,
+        direction,
+        nulls: direction === "asc" ? "first" : "last",
+      }],
+    });
+    this.bar.focus();
   }
 
   private groupResult(semantic: string): void {
     const target = this.resultField(semantic, "group");
-    if (target && !this.editor.addGroup(target.field))
-      this.setStatus("当前结果不能按此列分组");
+    if (!target) return;
+    const draft = this.bar.current();
+    const aggregate = draft.kind === "aggregate"
+      ? {
+          ...draft.query.aggregate,
+          groupBy: draft.query.aggregate.groupBy.includes(target.field)
+            ? draft.query.aggregate.groupBy
+            : [...draft.query.aggregate.groupBy, target.field],
+        }
+      : { groupBy: [target.field], metrics: [{ function: "count" as const }] };
+    this.bar.dispatch({ type: "setAggregate", aggregate, owner: target.owner });
+    this.bar.focus();
   }
 
   private setStatus(message: string): void {

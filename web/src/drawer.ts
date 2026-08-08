@@ -146,15 +146,23 @@ function infoboxFieldMarkup(field: ParsedInfoboxField): string {
 
 export class Drawer {
   private el: HTMLElement;
+  private reopenButton: HTMLButtonElement;
   private deps: DrawerDeps;
   private cur: Current | null = null;
   private viewEpoch = 0;
 
-  constructor(el: HTMLElement, deps: DrawerDeps) {
+  constructor(
+    el: HTMLElement,
+    reopenButton: HTMLButtonElement,
+    deps: DrawerDeps,
+  ) {
     this.el = el;
+    this.reopenButton = reopenButton;
     this.deps = deps;
     this.el.inert = true;
     this.el.setAttribute("aria-hidden", "true");
+    this.reopenButton.hidden = true;
+    this.reopenButton.addEventListener("click", () => this.reopenSelected());
     el.addEventListener("click", (ev) => {
       const t = ev.target as HTMLElement;
       const tab = t.closest("[data-tab]")?.getAttribute("data-tab");
@@ -220,18 +228,38 @@ export class Drawer {
 
   hide(): void {
     const restoreFocus = this.el.contains(document.activeElement);
+    const canReopen = state.selection !== null;
     this.viewEpoch++;
     this.el.classList.remove("open");
-    if (restoreFocus)
-      document.querySelector<HTMLInputElement>("#search")?.focus();
     this.el.inert = true;
     this.el.setAttribute("aria-hidden", "true");
+    this.reopenButton.hidden = !canReopen;
+    if (restoreFocus) {
+      if (canReopen) this.reopenButton.focus();
+      else document.querySelector<HTMLInputElement>(".query-name-input")?.focus();
+    }
   }
 
   private open(): void {
+    this.reopenButton.hidden = true;
     this.el.inert = false;
     this.el.setAttribute("aria-hidden", "false");
     this.el.classList.add("open");
+  }
+
+  private reopenSelected(): void {
+    const rank = state.selection;
+    if (rank === null) {
+      this.reopenButton.hidden = true;
+      return;
+    }
+    const cached = this.cur?.rank === rank;
+    this.open();
+    this.el.focus();
+    if (!cached) {
+      this.el.innerHTML = html`<div class="loading">加载中…</div>`;
+      this.deps.walk(rank);
+    }
   }
 
   private run(task: Promise<void>, context: string): void {
@@ -246,8 +274,9 @@ export class Drawer {
 
   /** key 由调用方解析传入:深链/行走落点未流式覆盖时
    * geo.key[rank] 还是 0,直接读会查错分片(main 已 Range 点查)。 */
-  async show(rank: number, key: number): Promise<void> {
+  async show(rank: number, key: number, episodeId?: number): Promise<void> {
     const viewEpoch = ++this.viewEpoch;
+    this.cur = null;
     this.open();
     this.el.innerHTML = html`<div class="loading">加载中…</div>`;
     const { data } = this.deps;
@@ -281,8 +310,34 @@ export class Drawer {
     };
     this.cur = cur;
     this.rerender();
+    if (episodeId !== undefined) await this.focusEpisode(cur, episodeId);
     if (cur.entity?.hasSummary)
       this.run(this.loadSummary(), "简介加载");
+  }
+
+  private async focusEpisode(cur: Current, episodeId: number): Promise<void> {
+    if (cur.entity?.kind !== "subject")
+      throw new TypeError(`分集 #${episodeId} 的所属作品无法打开`);
+    cur.tab = "episodes";
+    cur.epsExpanded = true;
+    this.rerender();
+    await this.loadEpisodes();
+    while (
+      this.cur === cur && cur.eps !== null &&
+      !cur.eps.some((episode) => episode.id === episodeId) &&
+      cur.epsNext !== null
+    ) await this.expandEpisodes(null);
+    if (
+      this.cur !== cur || cur.eps === null ||
+      !cur.eps.some((episode) => episode.id === episodeId)
+    ) throw new TypeError(`分集 #${episodeId} 不属于当前作品`);
+    this.rerender();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    const row = this.el.querySelector<HTMLElement>(
+      `[data-episode-row="${episodeId}"]`,
+    );
+    row?.scrollIntoView({ block: "center" });
+    row?.focus({ preventScroll: true });
   }
 
   private activateTab(tab: DrawerTab): void {
@@ -353,11 +408,11 @@ export class Drawer {
       return;
     if (cur.summary.s === "ready") {
       cur.summaryOpen = true;
-      this.rerender();
+      if (cur.tab === "overview") this.rerender();
       return;
     }
     cur.summary = { s: "loading" };
-    this.rerender();
+    if (cur.tab === "overview") this.rerender();
     const res = await this.deps.data.longText({
       kind: "entity-summary",
       entity: cur.key,
@@ -369,7 +424,7 @@ export class Drawer {
         ? { s: "ready", text: res.text, shown: TEXT_SEGMENT }
         : { s: "empty" };
     cur.summaryOpen = false;
-    this.rerender();
+    if (cur.tab === "overview") this.rerender();
   }
 
   private async loadInfobox(): Promise<void> {
@@ -899,7 +954,7 @@ export class Drawer {
         : desc?.s === "loading"
           ? html`<div class="ep-body">介绍加载中…</div>`
           : "";
-    return html`<div class="ep">
+    return html`<div class="ep" data-episode-row="${e.id}" tabindex="-1">
       ${e.sort ?? ""}. ${e.nameCn || e.name}
       <span class="ep-date">${e.airdate}</span>
       ${raw(toggle)} ${raw(body)}
