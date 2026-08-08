@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { semanticValueLabel } from "../src/query/editor-controls";
+
 import {
   combineExplorerConditions,
   conditionEditorOperator,
@@ -24,6 +26,12 @@ import {
   queryStatisticColumns,
   queryTextScopes,
 } from "../src/query/workbench-model";
+
+test("renders literal slots as readable query text instead of empty form fields", () => {
+  assert.equal(semanticValueLabel("机器人", "输入关键词", true), "“机器人”");
+  assert.equal(semanticValueLabel("", "输入关键词", true), "输入关键词");
+  assert.equal(semanticValueLabel("8", "输入数值"), "8");
+});
 
 test("offers one readable text-scope control for each entity type", () => {
   assert.deepEqual(queryTextScopes("subject"), [

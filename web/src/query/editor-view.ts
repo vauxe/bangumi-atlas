@@ -9,9 +9,11 @@ import { EditorView } from "prosemirror-view";
 
 import {
   ClauseView,
+  ControlSlot,
   ParameterSlot,
   literalInput,
   option,
+  queryWord,
   removeButton,
   selectControl,
   stopControlEvent,
@@ -91,21 +93,24 @@ function defaultConditionAttrs(owner: Owner): Record<string, unknown> {
 
 class FindView extends ClauseView {
   private readonly owner = selectControl("查找对象");
+  private readonly ownerSlot = new ControlSlot(this.owner, "查找对象");
 
   constructor(node: ProseMirrorNode, view: EditorView, getPos: () => number | undefined) {
     super("find", node, view, getPos);
     for (const [value, label] of Object.entries(OWNER_LABEL))
       this.owner.append(option(value, label));
     this.owner.value = String(node.attrs.owner);
+    this.ownerSlot.sync();
     this.owner.addEventListener("change", () =>
       this.updateAttrs({ owner: this.owner.value })
     );
-    this.dom.append(document.createTextNode("查找"), this.owner);
+    this.dom.append(queryWord("查找"), this.ownerSlot.dom);
   }
 
   override update(node: ProseMirrorNode): boolean {
     if (!super.update(node)) return false;
     this.owner.value = String(node.attrs.owner);
+    this.ownerSlot.sync();
     return true;
   }
 }
@@ -113,6 +118,12 @@ class FindView extends ClauseView {
 class SearchView extends ClauseView {
   private readonly scope = selectControl("搜索范围");
   private readonly value = literalInput("搜索文字");
+  private readonly scopeSlot = new ControlSlot(this.scope, "搜索范围");
+  private readonly valueSlot = new ControlSlot(this.value, "搜索文字", {
+    placeholder: "输入关键词",
+    quote: true,
+    closeOnChange: false,
+  });
   private readonly parameter: ParameterSlot;
 
   constructor(
@@ -127,6 +138,8 @@ class SearchView extends ClauseView {
     this.scope.value = String(node.attrs.scope);
     this.value.value = String(node.attrs.raw);
     this.value.placeholder = "输入关键词";
+    this.scopeSlot.sync();
+    this.valueSlot.sync();
     this.parameter = new ParameterSlot(
       String(node.attrs.parameter ?? ""),
       () => "keyword",
@@ -138,11 +151,11 @@ class SearchView extends ClauseView {
     this.value.addEventListener("input", () =>
       this.updateAttrs({ raw: this.value.value })
     );
+    this.valueSlot.panel.append(this.parameter.dom);
     this.dom.append(
-      document.createTextNode("搜索"),
-      this.scope,
-      this.parameter.dom,
-      this.value,
+      queryWord("搜索"),
+      this.scopeSlot.dom,
+      this.valueSlot.dom,
       removeButton(() => this.remove(), "移除搜索"),
     );
   }
@@ -152,6 +165,8 @@ class SearchView extends ClauseView {
     this.scope.value = String(node.attrs.scope);
     if (this.value.value !== node.attrs.raw) this.value.value = String(node.attrs.raw);
     this.parameter.sync(String(node.attrs.parameter ?? ""));
+    this.scopeSlot.sync();
+    this.valueSlot.sync();
     return true;
   }
 }
@@ -159,7 +174,10 @@ class SearchView extends ClauseView {
 class ConditionView extends ClauseView {
   private readonly field = selectControl("条件字段");
   private readonly operator = selectControl("比较方式");
+  private readonly fieldSlot = new ControlSlot(this.field, "条件字段");
+  private readonly operatorSlot = new ControlSlot(this.operator, "比较方式");
   private value: HTMLInputElement | HTMLSelectElement | null = null;
+  private valueSlot: ControlSlot<HTMLInputElement | HTMLSelectElement> | null = null;
   private readonly valueHost = document.createElement("span");
   private readonly parameter: ParameterSlot;
   private mappings: Mappings | undefined;
@@ -185,6 +203,7 @@ class ConditionView extends ClauseView {
     if (common.childElementCount) this.field.append(common);
     if (more.childElementCount) this.field.append(more);
     this.field.value = String(node.attrs.field);
+    this.fieldSlot.sync();
     this.parameter = new ParameterSlot(
       String(node.attrs.parameter ?? ""),
       () => `${this.field.value || "value"}Value${getPos() ?? ""}`,
@@ -207,10 +226,9 @@ class ConditionView extends ClauseView {
     this.fillOperators(String(node.attrs.operator));
     this.fillValue(String(node.attrs.raw));
     this.dom.append(
-      document.createTextNode("其中"),
-      this.field,
-      this.operator,
-      this.parameter.dom,
+      queryWord("其中"),
+      this.fieldSlot.dom,
+      this.operatorSlot.dom,
       this.valueHost,
       removeButton(() => this.remove(), "移除条件"),
     );
@@ -226,6 +244,7 @@ class ConditionView extends ClauseView {
       this.operator.append(option(name, OPERATOR_LABEL[name] ?? name));
     this.operator.value = selected;
     if (!this.operator.value) this.operator.selectedIndex = 0;
+    this.operatorSlot.sync();
   }
 
   private fillValue(raw: string): void {
@@ -237,6 +256,7 @@ class ConditionView extends ClauseView {
     if (!parameterAvailable) this.parameter.sync("");
     if (["isNull", "isNotNull", "isMissing", "isPresent"].includes(operator)) {
       this.value = null;
+      this.valueSlot = null;
       this.valueHost.replaceChildren();
       return;
     }
@@ -251,6 +271,7 @@ class ConditionView extends ClauseView {
         this.updateAttrs({ raw: select.value })
       );
       this.value = select;
+      this.valueSlot = new ControlSlot(select, `${FIELD_LABEL[this.field.value] ?? this.field.value}的值`);
     } else {
       const input = literalInput(`${FIELD_LABEL[this.field.value] ?? this.field.value}的值`);
       input.value = raw;
@@ -266,8 +287,18 @@ class ConditionView extends ClauseView {
         this.updateAttrs({ raw: input.value })
       );
       this.value = input;
+      this.valueSlot = new ControlSlot(
+        input,
+        `${FIELD_LABEL[this.field.value] ?? this.field.value}的值`,
+        {
+          placeholder: input.placeholder,
+          quote: input.type !== "number" && operator !== "in" && operator !== "notIn",
+          closeOnChange: false,
+        },
+      );
     }
-    this.valueHost.replaceChildren(this.value);
+    this.valueSlot.panel.append(this.parameter.dom);
+    this.valueHost.replaceChildren(this.valueSlot.dom);
   }
 
   override update(node: ProseMirrorNode): boolean {
@@ -275,6 +306,9 @@ class ConditionView extends ClauseView {
     if (this.value && this.value.value !== node.attrs.raw)
       this.value.value = String(node.attrs.raw);
     this.parameter.sync(String(node.attrs.parameter ?? ""));
+    this.fieldSlot.sync();
+    this.operatorSlot.sync();
+    this.valueSlot?.sync();
     return true;
   }
 }
@@ -283,6 +317,7 @@ class ConditionGroupView implements NodeView {
   readonly dom = document.createElement("div");
   readonly contentDOM = document.createElement("div");
   private readonly mode = selectControl("条件组匹配方式");
+  private readonly modeSlot = new ControlSlot(this.mode, "条件组匹配方式");
   private readonly addCondition = document.createElement("button");
   private readonly addGroup = document.createElement("button");
   private node: ProseMirrorNode;
@@ -303,8 +338,10 @@ class ConditionGroupView implements NodeView {
     );
     this.addCondition.type = "button";
     this.addCondition.textContent = "＋ 条件";
+    this.addCondition.className = "query-inline-action";
     this.addGroup.type = "button";
     this.addGroup.textContent = "＋ 条件组";
+    this.addGroup.className = "query-inline-action";
     this.mode.addEventListener("change", () => {
       if (this.mode.value === "not" && this.node.childCount !== 1) {
         this.mode.value = String(this.node.attrs.mode);
@@ -317,8 +354,8 @@ class ConditionGroupView implements NodeView {
     const header = document.createElement("div");
     header.className = "query-condition-group-head";
     header.append(
-      document.createTextNode("其中"),
-      this.mode,
+      queryWord("其中"),
+      this.modeSlot.dom,
       this.addCondition,
       this.addGroup,
       removeButton(() => this.remove(), "移除条件组"),
@@ -344,6 +381,7 @@ class ConditionGroupView implements NodeView {
 
   private sync(node: ProseMirrorNode): void {
     this.mode.value = String(node.attrs.mode);
+    this.modeSlot.sync();
     const locked = this.mode.value === "not";
     this.addCondition.disabled = locked;
     this.addGroup.disabled = locked;
@@ -384,6 +422,8 @@ class ConditionGroupView implements NodeView {
 class RelationView extends ClauseView {
   private readonly relation = selectControl("关联类型");
   private readonly exists = selectControl("是否存在关联");
+  private readonly relationSlot = new ControlSlot(this.relation, "关联类型");
+  private readonly existsSlot = new ControlSlot(this.exists, "是否存在关联");
   private readonly entity = document.createElement("button");
   private readonly factDetails = document.createElement("details");
   private readonly factList = document.createElement("div");
@@ -405,11 +445,14 @@ class RelationView extends ClauseView {
     if (!this.relation.value) this.relation.selectedIndex = 0;
     this.exists.append(option("true", "存在"), option("false", "不存在"));
     this.exists.value = String(Boolean(node.attrs.exists));
+    this.relationSlot.sync();
+    this.existsSlot.sync();
     this.entity.type = "button";
     this.entity.className = "query-slot query-entity-slot";
     this.entity.addEventListener("click", () => void this.pickSelected());
     this.factDetails.className = "query-relation-details";
     const factSummary = document.createElement("summary");
+    factSummary.className = "query-slot";
     factSummary.textContent = "关系属性";
     this.factList.className = "query-fact-conditions";
     this.factAdd.type = "button";
@@ -429,9 +472,9 @@ class RelationView extends ClauseView {
     );
     this.syncEntity(String(node.attrs.related));
     this.dom.append(
-      document.createTextNode("关联"),
-      this.relation,
-      this.exists,
+      queryWord("关联"),
+      this.relationSlot.dom,
+      this.existsSlot.dom,
       this.entity,
       this.factDetails,
       removeButton(() => this.remove(), "移除关联"),
@@ -627,6 +670,8 @@ class RelationView extends ClauseView {
     if (!super.update(node)) return false;
     this.relation.value = String(node.attrs.selection);
     this.exists.value = String(Boolean(node.attrs.exists));
+    this.relationSlot.sync();
+    this.existsSlot.sync();
     if (previous !== node.attrs.related) this.syncEntity(String(node.attrs.related));
     this.renderFactConditions();
     return true;
@@ -645,8 +690,9 @@ class ProjectionView extends ClauseView {
   ) {
     super("projection", node, view, getPos);
     const details = document.createElement("details");
-    details.className = "query-slot-menu";
+    details.className = "query-slot-editor query-multi-slot";
     this.summary.className = "query-slot";
+    this.list.className = "query-slot-popover query-choice-grid";
     const fields = ["ref", ...queryProjectFields(owner)];
     for (const field of fields) {
       const item = document.createElement("label");
@@ -670,7 +716,7 @@ class ProjectionView extends ClauseView {
     this.syncSummary(node.attrs.columns as string[]);
     details.append(this.summary, this.list);
     this.dom.append(
-      document.createTextNode("返回"),
+      queryWord("返回"),
       details,
       removeButton(() => this.remove(), "移除返回设置"),
     );
@@ -696,6 +742,9 @@ class SortView extends ClauseView {
   private readonly field = selectControl("排序字段");
   private readonly direction = selectControl("排序方向");
   private readonly nulls = selectControl("空值位置");
+  private readonly fieldSlot = new ControlSlot(this.field, "排序字段");
+  private readonly directionSlot = new ControlSlot(this.direction, "排序方向");
+  private readonly nullsSlot = new ControlSlot(this.nulls, "空值位置");
 
   constructor(
     node: ProseMirrorNode,
@@ -712,6 +761,9 @@ class SortView extends ClauseView {
     if (!this.field.value) this.field.selectedIndex = 0;
     this.direction.value = String(node.attrs.direction);
     this.nulls.value = String(node.attrs.nulls);
+    this.fieldSlot.sync();
+    this.directionSlot.sync();
+    this.nullsSlot.sync();
     this.field.addEventListener("change", () => {
       const direction = defaultSortDirection(this.field.value);
       this.direction.value = direction;
@@ -724,10 +776,10 @@ class SortView extends ClauseView {
       this.updateAttrs({ nulls: this.nulls.value })
     );
     this.dom.append(
-      document.createTextNode("按"),
-      this.field,
-      this.direction,
-      this.nulls,
+      queryWord("按"),
+      this.fieldSlot.dom,
+      this.directionSlot.dom,
+      this.nullsSlot.dom,
       removeButton(() => this.remove(), "移除排序"),
     );
   }
@@ -737,12 +789,19 @@ class SortView extends ClauseView {
     this.field.value = String(node.attrs.field);
     this.direction.value = String(node.attrs.direction);
     this.nulls.value = String(node.attrs.nulls);
+    this.fieldSlot.sync();
+    this.directionSlot.sync();
+    this.nullsSlot.sync();
     return true;
   }
 }
 
 class LimitView extends ClauseView {
   private readonly value = literalInput("结果条数");
+  private readonly valueSlot = new ControlSlot(this.value, "结果条数", {
+    placeholder: "输入条数",
+    closeOnChange: false,
+  });
 
   constructor(node: ProseMirrorNode, view: EditorView, getPos: () => number | undefined) {
     super("limit", node, view, getPos);
@@ -751,13 +810,14 @@ class LimitView extends ClauseView {
     this.value.step = "1";
     this.value.size = 5;
     this.value.value = String(node.attrs.raw);
+    this.valueSlot.sync();
     this.value.addEventListener("input", () =>
       this.updateAttrs({ raw: this.value.value })
     );
     this.dom.append(
-      document.createTextNode("限制"),
-      this.value,
-      document.createTextNode("条"),
+      queryWord("限制"),
+      this.valueSlot.dom,
+      queryWord("条"),
       removeButton(() => this.remove(), "移除结果上限"),
     );
   }
@@ -765,6 +825,7 @@ class LimitView extends ClauseView {
   override update(node: ProseMirrorNode): boolean {
     if (!super.update(node)) return false;
     if (this.value.value !== node.attrs.raw) this.value.value = String(node.attrs.raw);
+    this.valueSlot.sync();
     return true;
   }
 }

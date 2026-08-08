@@ -334,7 +334,7 @@ export class QueryWorkbench {
     if (result.diagnostics.length) {
       this.runnable = false;
       this.abortCurrent(new DOMException("incomplete query", "AbortError"));
-      this.setStatus(result.diagnostics[0]?.message ?? "当前查询不完整");
+      this.setStatus("");
       return;
     }
     this.runnable = true;
