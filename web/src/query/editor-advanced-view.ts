@@ -4,8 +4,10 @@ import { EditorView } from "prosemirror-view";
 
 import {
   ClauseView,
+  ControlSlot,
   literalInput,
   option,
+  queryWord,
   selectControl,
   stopControlEvent,
 } from "./editor-controls";
@@ -107,10 +109,9 @@ export class AdvancedSectionView implements NodeView {
     type: ParameterType,
     value: LiteralValue | undefined,
   ): HTMLElement {
-    const label = document.createElement("label");
-    label.className = "query-advanced-parameter";
-    const caption = document.createElement("span");
-    caption.textContent = `$${name}`;
+    const host = document.createElement("span");
+    host.className = "query-advanced-parameter";
+    const caption = queryWord(`参数 ${name}`);
     const typeLabel: Record<string, string> = {
       string: "文字",
       number: "数字",
@@ -126,8 +127,9 @@ export class AdvancedSectionView implements NodeView {
       select.addEventListener("change", () =>
         this.updateParameter(name, select.value === "true")
       );
-      label.append(caption, select);
-      return label;
+      const slot = new ControlSlot(select, `参数 ${name}`);
+      host.append(caption, slot.dom);
+      return host;
     }
     const input = literalInput(`参数 ${name}`);
     input.value = value === undefined || value === null ? "" : String(value);
@@ -145,8 +147,13 @@ export class AdvancedSectionView implements NodeView {
         : raw;
       this.updateParameter(name, parsed);
     });
-    label.append(caption, input);
-    return label;
+    const slot = new ControlSlot(input, `参数 ${name}`, {
+      placeholder: input.placeholder,
+      quote: type === "string",
+      closeOnChange: false,
+    });
+    host.append(caption, slot.dom);
+    return host;
   }
 
   private sync(node: ProseMirrorNode): void {

@@ -1,15 +1,23 @@
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { EditorView } from "prosemirror-view";
 
-import { ClauseView, literalInput } from "./editor-controls";
+import {
+  ClauseView,
+  ControlSlot,
+  literalInput,
+  queryWord,
+} from "./editor-controls";
 import type { QueryEditorViewOptions } from "./editor-view";
 
 export class RecipeView extends ClauseView {
   private readonly text: HTMLInputElement | null;
+  private readonly textSlot: ControlSlot<HTMLInputElement> | null;
   private readonly from: HTMLButtonElement | null;
   private readonly to: HTMLButtonElement | null;
   private readonly maxHops: HTMLInputElement | null;
   private readonly maxPaths: HTMLInputElement | null;
+  private readonly maxHopsSlot: ControlSlot<HTMLInputElement> | null;
+  private readonly maxPathsSlot: ControlSlot<HTMLInputElement> | null;
 
   constructor(
     node: ProseMirrorNode,
@@ -24,21 +32,29 @@ export class RecipeView extends ClauseView {
       this.to = null;
       this.maxHops = null;
       this.maxPaths = null;
+      this.maxHopsSlot = null;
+      this.maxPathsSlot = null;
       this.text = literalInput("正文关键词");
       this.text.value = String(node.attrs.text);
       this.text.placeholder = "输入关键词";
       this.text.addEventListener("input", () =>
         this.updateAttrs({ text: this.text?.value ?? "" })
       );
+      this.textSlot = new ControlSlot(this.text, "正文关键词", {
+        placeholder: "输入关键词",
+        quote: true,
+        closeOnChange: false,
+      });
       this.dom.append(this.line(
-        this.word("搜索"),
+        queryWord("搜索"),
         this.slot("所有正文"),
-        this.word("包含"),
-        this.text,
+        queryWord("包含"),
+        this.textSlot.dom,
       ));
       return;
     }
     this.text = null;
+    this.textSlot = null;
     this.from = this.entitySlot("起点实体", "选择起点");
     this.to = this.entitySlot("终点实体", "选择终点");
     this.from.addEventListener("click", () => void this.pickEntity("from"));
@@ -46,11 +62,11 @@ export class RecipeView extends ClauseView {
     this.syncEntity("from", String(node.attrs.from));
     this.syncEntity("to", String(node.attrs.to));
     this.dom.append(this.line(
-      this.word("查找"),
+      queryWord("查找"),
       this.from,
-      this.word(kind === "common" ? "与" : "到"),
+      queryWord(kind === "common" ? "与" : "到"),
       this.to,
-      this.word(kind === "common" ? "的关联比较" : "的关系路径"),
+      queryWord(kind === "common" ? "的关联比较" : "的关系路径"),
     ));
     if (kind === "path") {
       this.maxHops = literalInput("最大路径跳数");
@@ -67,16 +83,26 @@ export class RecipeView extends ClauseView {
       this.maxPaths.addEventListener("input", () =>
         this.updateAttrs({ maxPaths: Number(this.maxPaths?.value) })
       );
+      this.maxHopsSlot = new ControlSlot(this.maxHops, "最大路径跳数", {
+        placeholder: "跳数",
+        closeOnChange: false,
+      });
+      this.maxPathsSlot = new ControlSlot(this.maxPaths, "最多路径数", {
+        placeholder: "条数",
+        closeOnChange: false,
+      });
       this.dom.append(this.line(
-        this.word("最多"),
-        this.maxHops,
-        this.word("跳，显示"),
-        this.maxPaths,
-        this.word("条"),
+        queryWord("最多"),
+        this.maxHopsSlot.dom,
+        queryWord("跳，显示"),
+        this.maxPathsSlot.dom,
+        queryWord("条"),
       ));
     } else {
       this.maxHops = null;
       this.maxPaths = null;
+      this.maxHopsSlot = null;
+      this.maxPathsSlot = null;
     }
   }
 
@@ -92,13 +118,6 @@ export class RecipeView extends ClauseView {
     line.className = "query-recipe-line";
     line.append(...children);
     return line;
-  }
-
-  private word(text: string): HTMLSpanElement {
-    const word = document.createElement("span");
-    word.className = "query-word";
-    word.textContent = text;
-    return word;
   }
 
   private entitySlot(label: string, placeholder: string): HTMLButtonElement {
@@ -161,6 +180,7 @@ export class RecipeView extends ClauseView {
     if (!super.update(node)) return false;
     if (this.text && this.text.value !== node.attrs.text)
       this.text.value = String(node.attrs.text);
+    this.textSlot?.sync();
     if (this.from && this.to) {
       if (previousFrom !== String(node.attrs.from))
         this.syncEntity("from", String(node.attrs.from));
@@ -171,6 +191,8 @@ export class RecipeView extends ClauseView {
       this.maxHops.value = String(node.attrs.maxHops);
     if (this.maxPaths && this.maxPaths.value !== String(node.attrs.maxPaths))
       this.maxPaths.value = String(node.attrs.maxPaths);
+    this.maxHopsSlot?.sync();
+    this.maxPathsSlot?.sync();
     return true;
   }
 }

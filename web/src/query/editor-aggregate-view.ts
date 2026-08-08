@@ -6,6 +6,7 @@ import {
   ParameterSlot,
   literalInput,
   option,
+  queryWord,
   removeButton,
   selectControl,
 } from "./editor-controls";
@@ -44,22 +45,25 @@ export class AggregateView extends ClauseView {
   ) {
     super("aggregate", node, view, getPos);
     const groups = document.createElement("details");
-    groups.className = "query-slot-menu";
+    groups.className = "query-slot-editor query-multi-slot";
     this.groupSummary.className = "query-slot";
+    this.groupList.className = "query-slot-popover query-choice-grid";
     groups.append(this.groupSummary, this.groupList);
 
     const metrics = document.createElement("details");
-    metrics.className = "query-aggregate-menu";
+    metrics.className = "query-slot-editor query-aggregate-menu";
     this.metricSummary.className = "query-slot";
+    this.metricList.className = "query-slot-popover query-aggregate-list";
     metrics.append(this.metricSummary, this.metricList);
 
     const having = document.createElement("details");
-    having.className = "query-aggregate-menu";
+    having.className = "query-slot-editor query-aggregate-menu";
     this.havingSummary.className = "query-slot";
+    this.havingList.className = "query-slot-popover query-aggregate-list";
     having.append(this.havingSummary, this.havingList);
 
     this.dom.append(
-      document.createTextNode("统计"),
+      queryWord("统计"),
       groups,
       metrics,
       having,
