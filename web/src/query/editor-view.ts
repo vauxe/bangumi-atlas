@@ -3,7 +3,7 @@ import {
   type Node as ProseMirrorNode,
 } from "prosemirror-model";
 import { redo, undo } from "prosemirror-history";
-import type { Transaction } from "prosemirror-state";
+import { NodeSelection, type Transaction } from "prosemirror-state";
 import type { NodeView } from "prosemirror-view";
 import { EditorView } from "prosemirror-view";
 
@@ -27,6 +27,7 @@ import type { Owner, QueryFactKind } from "./contract";
 import type { ExplorerAggregate, ExplorerAggregateMetric } from "./explorer";
 import {
   createQueryEditorState,
+  queryClauseInsertionPosition,
   lowerQueryEditorDocument,
   QUERY_OPERATOR_NODE,
   queryEditorSchema,
@@ -76,18 +77,6 @@ type ClauseName = "search" | "condition" | "condition_group" | "relation" |
   "projection" | "aggregate" | "sort" | "limit";
 
 const MAX_STRUCTURED_CLIPBOARD_BYTES = 65_536;
-
-const CLAUSE_RANK: Record<string, number> = {
-  find: 0,
-  search: 1,
-  condition: 2,
-  condition_group: 2,
-  relation: 3,
-  projection: 4,
-  aggregate: 4,
-  sort: 5,
-  limit: 6,
-};
 
 function defaultConditionAttrs(owner: Owner): Record<string, unknown> {
   const available = new Set(queryFieldsFor(owner, "filter"));
@@ -966,15 +955,15 @@ export class QueryDocumentEditor {
     node: ProseMirrorNode,
     transaction: Transaction,
   ): void {
-    const targetRank = CLAUSE_RANK[name] ?? 99;
-    let position = transaction.doc.content.size;
-    transaction.doc.forEach((child, offset) => {
-      if (
-        position === transaction.doc.content.size &&
-        (CLAUSE_RANK[child.type.name] ?? 99) > targetRank
-      ) position = offset;
-    });
-    this.view.dispatch(transaction.insert(position, node).scrollIntoView());
+    const position = queryClauseInsertionPosition(
+      transaction.doc,
+      name,
+      transaction.selection.from,
+    );
+    transaction.insert(position, node);
+    transaction.setSelection(NodeSelection.create(transaction.doc, position));
+    this.view.dispatch(transaction.scrollIntoView());
+    this.view.focus();
   }
 
   private deleteClauses(

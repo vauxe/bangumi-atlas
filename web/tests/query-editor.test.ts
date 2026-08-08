@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { undo } from "prosemirror-history";
-import { EditorState } from "prosemirror-state";
+import { EditorState, NodeSelection } from "prosemirror-state";
 
 import type { QueryBundle } from "../src/query/bundle";
 import type { QueryOperator } from "../src/query/document";
@@ -11,10 +11,55 @@ import {
   createQueryBundleDocument,
   createQueryRecipeDocument,
   createQueryEditorState,
+  deleteSelectedQueryNode,
   lowerQueryEditorDocument,
+  queryClauseInsertionPosition,
   queryEditorSchema,
   readableQueryEditorDocument,
 } from "../src/query/editor";
+
+test("inserts a same-kind query clause after the selected semantic node", () => {
+  const doc = queryEditorSchema.node("doc", null, [
+    queryEditorSchema.node("find", { owner: "subject" }),
+    queryEditorSchema.node("condition", {
+      field: "score", operator: "gte", raw: "8",
+    }),
+    queryEditorSchema.node("condition", {
+      field: "year", operator: "gte", raw: "2000",
+    }),
+    queryEditorSchema.node("relation", {
+      selection: "WORKED_ON|subject|person",
+      exists: true,
+      related: "person:7",
+    }),
+  ]);
+
+  assert.equal(queryClauseInsertionPosition(doc, "condition", 1), 2);
+  assert.equal(queryClauseInsertionPosition(doc, "condition", 3), 3);
+  assert.equal(queryClauseInsertionPosition(doc, "relation", 3), 4);
+});
+
+test("deletes a selected semantic clause but preserves required document structure", () => {
+  const doc = queryEditorSchema.node("doc", null, [
+    queryEditorSchema.node("find", { owner: "subject" }),
+    queryEditorSchema.node("condition", {
+      field: "score", operator: "gte", raw: "8",
+    }),
+  ]);
+  let state = createQueryEditorState(doc);
+  state = state.apply(state.tr.setSelection(NodeSelection.create(state.doc, 1)));
+  let next = state;
+
+  assert.equal(deleteSelectedQueryNode(state, (transaction) => {
+    next = state.apply(transaction);
+  }), true);
+  assert.deepEqual(next.doc.toJSON().content?.map(
+    (node: { type: string }) => node.type,
+  ), ["find"]);
+
+  state = state.apply(state.tr.setSelection(NodeSelection.create(state.doc, 0)));
+  assert.equal(deleteSelectedQueryNode(state), false);
+});
 
 test("round-trips the ordinary query through one structural document", () => {
   const doc = createQueryEditorDocument({
