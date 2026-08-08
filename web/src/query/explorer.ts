@@ -1,5 +1,6 @@
 import {
   QUERY_CONTRACT,
+  assertFactFieldCapability,
   assertFieldCapability,
   fieldsWithCapability,
   parseEntityRef,
@@ -42,6 +43,8 @@ export interface ExplorerRelation {
   relatedRole: string;
   related: `${Owner}:${number}`;
   exists: boolean;
+  /** Predicates over the relationship fact itself (role, position, etc.). */
+  condition?: ExplorerCondition;
 }
 
 export interface ExplorerQuery {
@@ -105,33 +108,37 @@ function queryLiteral(value: LiteralValue): string {
   return "NULL";
 }
 
-function conditionSource(condition: ExplorerCondition, parentPrecedence = 0): string {
+function conditionSource(
+  condition: ExplorerCondition,
+  parentPrecedence = 0,
+  fieldName: (field: string) => string = (field) => field,
+): string {
   switch (condition.kind) {
     case "compare":
       return condition.negated
-        ? `NOT (${condition.field} ${QUERY_OPERATOR[condition.operator]} ${queryLiteral(condition.value)})`
-        : `${condition.field} ${QUERY_OPERATOR[condition.operator]} ${queryLiteral(condition.value)}`;
+        ? `NOT (${fieldName(condition.field)} ${QUERY_OPERATOR[condition.operator]} ${queryLiteral(condition.value)})`
+        : `${fieldName(condition.field)} ${QUERY_OPERATOR[condition.operator]} ${queryLiteral(condition.value)}`;
     case "in": {
       if (!condition.values.length) throw new TypeError("值集合不能为空");
-      const source = `${condition.field} IN [${condition.values.map(queryLiteral).join(", ")}]`;
+      const source = `${fieldName(condition.field)} IN [${condition.values.map(queryLiteral).join(", ")}]`;
       return condition.negated ? `NOT (${source})` : source;
     }
     case "isNull":
       return condition.negated
-        ? `NOT (${condition.field} IS NULL)`
-        : `${condition.field} IS NULL`;
+        ? `NOT (${fieldName(condition.field)} IS NULL)`
+        : `${fieldName(condition.field)} IS NULL`;
     case "isMissing":
       return condition.negated
-        ? `NOT (${condition.field} IS MISSING)`
-        : `${condition.field} IS MISSING`;
+        ? `NOT (${fieldName(condition.field)} IS MISSING)`
+        : `${fieldName(condition.field)} IS MISSING`;
     case "not":
-      return `NOT (${conditionSource(condition.term)})`;
+      return `NOT (${conditionSource(condition.term, 0, fieldName)})`;
     case "all":
     case "any": {
       if (!condition.terms.length) throw new TypeError("条件组不能为空");
       const precedence = condition.kind === "all" ? 2 : 1;
       const source = condition.terms
-        .map((term) => conditionSource(term, precedence))
+        .map((term) => conditionSource(term, precedence, fieldName))
         .join(condition.kind === "all" ? " AND " : " OR ");
       return precedence < parentPrecedence ? `(${source})` : source;
     }
@@ -167,7 +174,17 @@ function relationSource(
         : `relation${index}_${role}`;
     return `${role}: ${variable}`;
   });
-  return `${relation.exists ? "" : "NOT "}EXISTS { MATCH ${relation.factKind}(${roles.join(", ")}) AS relation${index} WHERE ${related}.ref = ${queryLiteral(relation.related)} }`;
+  const predicates = [
+    `${related}.ref = ${queryLiteral(relation.related)}`,
+    ...(relation.condition
+      ? [conditionSource(
+          relation.condition,
+          0,
+          (field) => `relation${index}.${field}`,
+        )]
+      : []),
+  ];
+  return `${relation.exists ? "" : "NOT "}EXISTS { MATCH ${relation.factKind}(${roles.join(", ")}) AS relation${index} WHERE ${predicates.join(" AND ")} }`;
 }
 
 export function formatExplorerQuery(draft: ExplorerQuery): string {
@@ -253,6 +270,62 @@ function conditionExpression(
   }
 }
 
+function factConditionExpression(
+  kind: QueryFactKind,
+  binding: string,
+  condition: ExplorerCondition,
+): Expression {
+  switch (condition.kind) {
+    case "compare": {
+      assertFactFieldCapability(kind, condition.field, "filter");
+      const comparison: Expression = {
+        kind: "compare",
+        operator: condition.operator,
+        left: { kind: "field", binding, field: condition.field },
+        right: { kind: "literal", value: condition.value },
+      };
+      return condition.negated ? { kind: "not", term: comparison } : comparison;
+    }
+    case "in": {
+      assertFactFieldCapability(kind, condition.field, "filter");
+      if (!condition.values.length) throw new TypeError("值集合不能为空");
+      const expression: Expression = {
+        kind: "or",
+        terms: condition.values.map((value) => ({
+          kind: "compare",
+          operator: "eq",
+          left: { kind: "field", binding, field: condition.field },
+          right: { kind: "literal", value },
+        })),
+      };
+      return condition.negated ? { kind: "not", term: expression } : expression;
+    }
+    case "isNull":
+    case "isMissing": {
+      assertFactFieldCapability(kind, condition.field, "filter");
+      const presence: Expression = {
+        kind: condition.kind,
+        term: { kind: "field", binding, field: condition.field },
+      };
+      return condition.negated ? { kind: "not", term: presence } : presence;
+    }
+    case "all":
+    case "any":
+      if (!condition.terms.length) throw new TypeError("条件组不能为空");
+      return {
+        kind: condition.kind === "all" ? "and" : "or",
+        terms: condition.terms.map((term) =>
+          factConditionExpression(kind, binding, term)
+        ),
+      };
+    case "not":
+      return {
+        kind: "not",
+        term: factConditionExpression(kind, binding, condition.term),
+      };
+  }
+}
+
 export function compileExplorerQuery(draft: ExplorerQuery): QueryBundle {
   const binding = "entity";
   const operators: Record<string, QueryOperator> = {};
@@ -326,9 +399,21 @@ export function compileExplorerQuery(draft: ExplorerQuery): QueryBundle {
       factBinding: `${prefix}Fact`,
       roles,
     };
+    const matchRoot = relation.condition ? `${prefix}Filter` : `${prefix}Match`;
+    if (relation.condition) {
+      operators[matchRoot] = {
+        kind: "filter",
+        input: `${prefix}Match`,
+        predicate: factConditionExpression(
+          relation.factKind,
+          `${prefix}Fact`,
+          relation.condition,
+        ),
+      };
+    }
     operators[`${prefix}Project`] = {
       kind: "project",
-      input: `${prefix}Match`,
+      input: matchRoot,
       columns: [{
         name: "candidate",
         value: { kind: "column", name: candidate },
@@ -450,6 +535,14 @@ function explorerCondition(expression: Expression, binding: string): ExplorerCon
   return null;
 }
 
+function editableRelationCondition(condition: ExplorerCondition): boolean {
+  if (condition.kind === "all")
+    return condition.terms.length > 0 && condition.terms.every(editableRelationCondition);
+  if (condition.kind === "any" || condition.kind === "not") return false;
+  return condition.kind !== "compare" ||
+    !condition.negated || condition.operator === "contains";
+}
+
 function sourceExplorerRelation(
   query: QueryDocument,
   operator: Extract<QueryOperator, { kind: "exists" | "notExists" }>,
@@ -528,7 +621,10 @@ export function decompileExplorerQuery(bundle: QueryBundle): ExplorerQuery | nul
       const matchProject = query.operators[operator.match];
       if (matchProject?.kind === "project" && matchProject.columns.length === 1) {
         const candidate = matchProject.columns[0]?.value;
-        const match = query.operators[matchProject.input];
+        const possibleFilter = query.operators[matchProject.input];
+        const match = possibleFilter?.kind === "filter"
+          ? query.operators[possibleFilter.input]
+          : possibleFilter;
         if (candidate?.kind !== "column" || match?.kind !== "matchFact") return null;
         const values = query.operators[match.input];
         if (values?.kind !== "values" || values.columns.length !== 1 || values.rows.length !== 1)
@@ -543,12 +639,22 @@ export function decompileExplorerQuery(bundle: QueryBundle): ExplorerQuery | nul
           !candidateRole || !relatedRole || typeof related !== "string" ||
           !related.includes(":")
         ) return null;
+        let factCondition: ExplorerCondition | undefined;
+        if (possibleFilter?.kind === "filter") {
+          const condition = explorerCondition(
+            possibleFilter.predicate,
+            match.factBinding,
+          );
+          if (!condition || !editableRelationCondition(condition)) return null;
+          factCondition = condition;
+        }
         relations.push({
           factKind: match.factKind,
           candidateRole,
           relatedRole,
           related: related as ExplorerRelation["related"],
           exists: operator.kind === "exists",
+          ...(factCondition ? { condition: factCondition } : {}),
         });
       } else {
         const relation = sourceExplorerRelation(query, operator, binding);

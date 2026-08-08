@@ -8,15 +8,19 @@ import type { QueryBundle } from "./bundle";
 import type { Owner, QueryFactKind } from "./contract";
 import type { QueryDocument, QueryOperator } from "./document";
 import {
+  FACT_FIELD_LABEL,
   FIELD_LABEL,
   OPERATOR_LABEL,
   OWNER_LABEL,
   conditionEditorOperator,
   enumValuesFor,
   parseExplorerLimit,
+  parseFactValue,
+  parseFactValues,
   parseValue,
   parseValues,
   queryConditionOperators,
+  queryFactConditionOperators,
   queryRelationOptions,
 } from "./workbench-model";
 
@@ -90,6 +94,7 @@ export const queryEditorSchema = new Schema({
       selection: { default: "" },
       exists: { default: true },
       related: { default: "" },
+      factConditions: { default: [] },
     }),
     projection: clause("projection", {
       columns: { default: [] },
@@ -97,6 +102,7 @@ export const queryEditorSchema = new Schema({
     sort: clause("sort", {
       field: { default: "" },
       direction: { default: "asc" },
+      nulls: { default: "last" },
     }),
     limit: clause("limit", {
       raw: { default: "200" },
@@ -203,6 +209,23 @@ function conditionEditorNode(condition: ExplorerCondition): ProseMirrorNode {
   throw new TypeError("当前条件无法转换为结构化编辑节点");
 }
 
+export interface EditableFactCondition {
+  field: string;
+  operator: string;
+  raw: string;
+}
+
+function editableFactConditions(
+  condition: ExplorerCondition | undefined,
+): EditableFactCondition[] {
+  if (!condition) return [];
+  const terms = condition.kind === "all" ? condition.terms : [condition];
+  const editable = terms.map(editableCondition);
+  if (editable.some((item) => item === null))
+    throw new TypeError("当前关系条件需要高级查询编辑器");
+  return editable as EditableFactCondition[];
+}
+
 export function createQueryEditorDocument(draft: ExplorerQuery): ProseMirrorNode {
   const children: ProseMirrorNode[] = [
     queryEditorSchema.node("find", { owner: draft.owner }),
@@ -227,6 +250,7 @@ export function createQueryEditorDocument(draft: ExplorerQuery): ProseMirrorNode
       ].join("|"),
       exists: relation.exists,
       related: relation.related,
+      factConditions: editableFactConditions(relation.condition),
     }));
   }
   if (draft.columns) {
@@ -238,6 +262,7 @@ export function createQueryEditorDocument(draft: ExplorerQuery): ProseMirrorNode
     children.push(queryEditorSchema.node("sort", {
       field: order.column,
       direction: order.direction,
+      nulls: order.nulls,
     }));
   }
   if (draft.limit !== undefined && draft.limit !== null) {
@@ -389,6 +414,52 @@ function conditionFromNode(owner: Owner, node: ProseMirrorNode): ExplorerConditi
   return { kind: mode, terms };
 }
 
+function factConditionFromAttrs(
+  kind: QueryFactKind,
+  attrs: EditableFactCondition,
+): ExplorerCondition {
+  const field = String(attrs.field ?? "");
+  const operator = String(attrs.operator ?? "");
+  const raw = String(attrs.raw ?? "");
+  if (!field || !queryFactConditionOperators(kind, field).includes(operator))
+    throw new TypeError("请选择有效的关系属性和比较方式");
+  if (
+    operator !== "isNull" && operator !== "isNotNull" &&
+    operator !== "isMissing" && operator !== "isPresent" &&
+    !raw.trim()
+  ) throw new TypeError("请填写关系属性的值");
+  if (operator === "in" || operator === "notIn") {
+    return {
+      kind: "in",
+      field,
+      values: parseFactValues(kind, field, raw),
+      ...(operator === "notIn" ? { negated: true } : {}),
+    };
+  }
+  if (operator === "isNull" || operator === "isNotNull") {
+    return {
+      kind: "isNull",
+      field,
+      ...(operator === "isNotNull" ? { negated: true } : {}),
+    };
+  }
+  if (operator === "isMissing" || operator === "isPresent") {
+    return {
+      kind: "isMissing",
+      field,
+      ...(operator === "isPresent" ? { negated: true } : {}),
+    };
+  }
+  return {
+    kind: "compare",
+    field,
+    operator: operator === "notContains" ? "contains" : operator as
+      "eq" | "ne" | "lt" | "lte" | "gt" | "gte" | "contains",
+    value: parseFactValue(kind, field, raw),
+    ...(operator === "notContains" ? { negated: true } : {}),
+  };
+}
+
 export function lowerQueryEditorDocument(
   doc: ProseMirrorNode,
 ): LoweredQueryEditorDocument {
@@ -466,12 +537,28 @@ export function lowerQueryEditorDocument(
           if (!factKind || !candidateRole || !relatedRole)
             throw new TypeError("请选择关联类型");
           if (!related) throw new TypeError("请选择关联实体");
+          const rawFactConditions = node.attrs.factConditions;
+          if (!Array.isArray(rawFactConditions))
+            throw new TypeError("关系属性条件无效");
+          const factConditions = rawFactConditions.map((item) =>
+            factConditionFromAttrs(
+              factKind as QueryFactKind,
+              item as EditableFactCondition,
+            )
+          );
           relations.push({
             factKind: factKind as QueryFactKind,
             candidateRole,
             relatedRole,
             related: related as `${Owner}:${number}`,
             exists: Boolean(node.attrs.exists),
+            ...(factConditions.length
+              ? {
+                  condition: factConditions.length === 1
+                    ? factConditions[0]
+                    : { kind: "all" as const, terms: factConditions },
+                }
+              : {}),
           });
           break;
         }
@@ -486,9 +573,13 @@ export function lowerQueryEditorDocument(
         case "sort": {
           const field = String(node.attrs.field ?? "");
           const direction = String(node.attrs.direction ?? "");
-          if (!field || (direction !== "asc" && direction !== "desc"))
+          const nulls = String(node.attrs.nulls ?? "");
+          if (
+            !field || (direction !== "asc" && direction !== "desc") ||
+            (nulls !== "first" && nulls !== "last")
+          )
             throw new TypeError("请完成排序设置");
-          orderBy.push({ column: field, direction, nulls: "last" });
+          orderBy.push({ column: field, direction, nulls });
           break;
         }
         case "limit":
@@ -569,12 +660,19 @@ export function readableQueryEditorDocument(
       const relation = queryRelationOptions(owner).find((item) =>
         item.value === selection
       )?.label ?? "关联";
-      lines.push(`${Boolean(node.attrs.exists) ? "关联" : "不关联"} ${relation} ${entityLabel(String(node.attrs.related ?? ""))}`);
+      const facts = Array.isArray(node.attrs.factConditions)
+        ? (node.attrs.factConditions as EditableFactCondition[]).map((condition) =>
+            `${FACT_FIELD_LABEL[condition.field] ?? condition.field} ${OPERATOR_LABEL[condition.operator] ?? condition.operator}${condition.raw ? ` ${condition.raw}` : ""}`
+          )
+        : [];
+      lines.push(
+        `${Boolean(node.attrs.exists) ? "关联" : "不关联"} ${relation} ${entityLabel(String(node.attrs.related ?? ""))}${facts.length ? `，且${facts.join("、")}` : ""}`,
+      );
     } else if (node.type.name === "projection") {
       lines.push(`返回 ${(node.attrs.columns as string[]).map((field) => FIELD_LABEL[field] ?? field).join("、")}`);
     } else if (node.type.name === "sort") {
       const field = String(node.attrs.field ?? "");
-      lines.push(`按 ${FIELD_LABEL[field] ?? field} ${node.attrs.direction === "desc" ? "从高到低" : "从低到高"}`);
+      lines.push(`按 ${FIELD_LABEL[field] ?? field} ${node.attrs.direction === "desc" ? "从高到低" : "从低到高"}，空值${node.attrs.nulls === "first" ? "最前" : "最后"}`);
     } else if (node.type.name === "limit") {
       lines.push(`限制 ${String(node.attrs.raw ?? "")} 条`);
     }

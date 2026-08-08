@@ -185,6 +185,49 @@ test("formats relationship filters with every canonical fact role", () => {
   }), draft);
 });
 
+test("filters attributes on the matched fact and round-trips them", () => {
+  const draft: Parameters<typeof formatExplorerQuery>[0] = {
+    owner: "subject",
+    relations: [{
+      factKind: "WORKED_ON",
+      candidateRole: "subject",
+      relatedRole: "person",
+      related: "person:7",
+      exists: true,
+      condition: {
+        kind: "in",
+        field: "position",
+        values: [1, 2],
+      },
+    }],
+    columns: ["ref", "name"],
+    orderBy: [
+      { column: "score", direction: "desc", nulls: "last" },
+      { column: "name", direction: "asc", nulls: "first" },
+    ],
+    limit: 20,
+  };
+
+  const bundle = compileExplorerQuery(draft);
+  const query = bundle.sections.results!.query;
+  const factFilter = Object.values(query.operators).find((operator) =>
+    operator.kind === "filter" &&
+    operator.predicate.kind === "or" &&
+    operator.predicate.terms.every((term) =>
+      term.kind === "compare" &&
+      term.left.kind === "field" &&
+      term.left.binding === "relation0Fact"
+    )
+  );
+
+  assert.ok(factFilter);
+  assert.match(
+    formatExplorerQuery(draft),
+    /relation0\.position IN \[1, 2\]/,
+  );
+  assert.deepEqual(decompileExplorerQuery(bundle), draft);
+});
+
 test("keeps escaped text and negative numeric filters executable", () => {
   const source = formatExplorerQuery({
     owner: "subject",

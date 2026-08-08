@@ -32,9 +32,13 @@ test("round-trips the ordinary query through one structural document", () => {
       relatedRole: "person",
       related: "person:7",
       exists: true,
+      condition: { kind: "compare", field: "position", operator: "eq", value: 2 },
     }],
     columns: ["ref", "name", "nameCn", "score"],
-    orderBy: [{ column: "score", direction: "desc", nulls: "last" }],
+    orderBy: [
+      { column: "score", direction: "desc", nulls: "last" },
+      { column: "name", direction: "asc", nulls: "first" },
+    ],
     limit: 50,
   });
 
@@ -46,6 +50,7 @@ test("round-trips the ordinary query through one structural document", () => {
     "condition",
     "relation",
     "projection",
+    "sort",
     "sort",
     "limit",
   ]);
@@ -65,9 +70,13 @@ test("round-trips the ordinary query through one structural document", () => {
         relatedRole: "person",
         related: "person:7",
         exists: true,
+        condition: { kind: "compare", field: "position", operator: "eq", value: 2 },
       }],
       columns: ["ref", "name", "nameCn", "score"],
-      orderBy: [{ column: "score", direction: "desc", nulls: "last" }],
+      orderBy: [
+        { column: "score", direction: "desc", nulls: "last" },
+        { column: "name", direction: "asc", nulls: "first" },
+      ],
       limit: 50,
     },
     diagnostics: [],
