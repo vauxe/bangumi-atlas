@@ -129,6 +129,7 @@ export class QueryWorkbench {
       onChange: (result) => this.editorChanged(result),
       selectedEntity: dependencies.selectedEntity,
       resolveEntityLabel: dependencies.resolveEntityLabel,
+      mappings: dependencies.mappings,
       reportError: (error) => this.showError(error),
     });
     this.ready = true;

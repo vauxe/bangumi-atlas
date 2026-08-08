@@ -1,12 +1,15 @@
 import {
   QUERY_CONTRACT,
+  factFieldDefinition,
   parseEntityRef,
   type FieldCapability,
   type Owner,
+  type QueryFactKind,
 } from "./contract";
 import type { ExplorerCondition, ExplorerQuery } from "./explorer";
 import type { CompareOperator } from "./value";
 import { MEDIA_NAMES } from "../types";
+import type { Mappings } from "../types";
 
 export const OWNER_LABEL: Record<Owner, string> = {
   subject: "作品",
@@ -46,6 +49,15 @@ export const FIELD_LABEL: Record<string, string> = {
   description: "分集介绍",
   summaryState: "简介状态",
   descriptionState: "分集介绍状态",
+};
+
+export const FACT_FIELD_LABEL: Record<string, string> = {
+  relationType: "关系类型",
+  position: "职位",
+  type: "关系类型",
+  spoiler: "包含剧透",
+  ended: "已经结束",
+  summaryState: "说明状态",
 };
 
 export const OPERATOR_LABEL: Record<string, string> = {
@@ -210,6 +222,12 @@ export function describeExplorerQuery(draft: ExplorerQuery): string {
 
 export function queryConditionOperators(owner: Owner, field: string): string[] {
   const definition = QUERY_CONTRACT.owners[owner].fields[field];
+  return conditionOperators(definition);
+}
+
+function conditionOperators(
+  definition: { operators?: string; nullable?: boolean; missing?: boolean } | undefined,
+): string[] {
   const names = definition?.operators
     ? QUERY_CONTRACT.operatorSets[definition.operators] ?? []
     : [];
@@ -223,6 +241,79 @@ export function queryConditionOperators(owner: Owner, field: string): string[] {
   }
   if (definition?.missing) operators.push("isMissing", "isPresent");
   return operators;
+}
+
+export function queryFactFields(
+  kind: QueryFactKind,
+  capability: FieldCapability,
+): string[] {
+  return Object.entries(QUERY_CONTRACT.facts[kind].fields)
+    .filter(([, definition]) =>
+      definition.exposure !== "private" &&
+      definition.capabilities.includes(capability)
+    )
+    .map(([field]) => field);
+}
+
+export function queryFactConditionOperators(
+  kind: QueryFactKind,
+  field: string,
+): string[] {
+  return conditionOperators(factFieldDefinition(kind, field));
+}
+
+export function factEnumValues(
+  kind: QueryFactKind,
+  field: string,
+  mappings?: Mappings,
+): Record<string, string> | null {
+  const definition = factFieldDefinition(kind, field);
+  if (definition.enum?.startsWith("fact_labels.")) {
+    const namespace = definition.enum.slice("fact_labels.".length);
+    return mappings?.fact_labels[namespace] ?? null;
+  }
+  if (definition.type === "boolean") return { true: "是", false: "否" };
+  if (field === "summaryState") return { HAS: "有内容", EMPTY: "无内容" };
+  return null;
+}
+
+export function parseFactValue(
+  kind: QueryFactKind,
+  field: string,
+  raw: string,
+): string | number | boolean {
+  const type = factFieldDefinition(kind, field).type;
+  if (type === "integer" || type === "number") {
+    const value = Number(raw);
+    if (!Number.isFinite(value) || (type === "integer" && !Number.isSafeInteger(value)))
+      throw new TypeError(`${FACT_FIELD_LABEL[field] ?? field}需要有效数字`);
+    return value;
+  }
+  if (type === "boolean") {
+    if (raw !== "true" && raw !== "false")
+      throw new TypeError(`${FACT_FIELD_LABEL[field] ?? field}请选择是或否`);
+    return raw === "true";
+  }
+  return raw;
+}
+
+export function parseFactValues(
+  kind: QueryFactKind,
+  field: string,
+  raw: string,
+  mappings?: Mappings,
+): Array<string | number | boolean> {
+  const labels = factEnumValues(kind, field, mappings);
+  const byLabel = new Map(
+    Object.entries(labels ?? {}).map(([value, label]) => [label, value]),
+  );
+  const values = raw
+    .split(/[,，、\n]+/)
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => parseFactValue(kind, field, byLabel.get(value) ?? value));
+  if (!values.length) throw new TypeError("值集合不能为空");
+  return values;
 }
 
 export function queryProjectFields(owner: Owner): string[] {

@@ -3,16 +3,18 @@ import { redo, undo } from "prosemirror-history";
 import type { NodeView } from "prosemirror-view";
 import { EditorView } from "prosemirror-view";
 
-import type { Owner } from "./contract";
+import type { Owner, QueryFactKind } from "./contract";
 import type { QueryOperator } from "./document";
 import {
   createQueryEditorState,
   lowerQueryEditorDocument,
   QUERY_OPERATOR_NODE,
   queryEditorSchema,
+  type EditableFactCondition,
   type LoweredQueryEditorDocument,
 } from "./editor";
 import {
+  FACT_FIELD_LABEL,
   FIELD_LABEL,
   COMMON_FIELDS,
   INTERNAL_FIELDS,
@@ -20,6 +22,9 @@ import {
   OWNER_LABEL,
   defaultSortDirection,
   enumValuesFor,
+  factEnumValues,
+  queryFactConditionOperators,
+  queryFactFields,
   queryConditionOperators,
   queryFieldsFor,
   queryProjectFields,
@@ -28,6 +33,7 @@ import {
   querySortFields,
   queryTextScopes,
 } from "./workbench-model";
+import type { Mappings } from "../types";
 
 export interface SelectedQueryEntity {
   ref: string;
@@ -39,6 +45,7 @@ export interface QueryEditorViewOptions {
   onChange(result: LoweredQueryEditorDocument): void;
   selectedEntity?(): Promise<SelectedQueryEntity | null>;
   resolveEntityLabel?(ref: string): Promise<string>;
+  mappings?(): Promise<Mappings>;
   reportError(error: unknown): void;
 }
 
@@ -422,6 +429,11 @@ class RelationView extends ClauseView {
   private readonly relation = selectControl("关联类型");
   private readonly exists = selectControl("是否存在关联");
   private readonly entity = document.createElement("button");
+  private readonly factDetails = document.createElement("details");
+  private readonly factList = document.createElement("div");
+  private readonly factAdd = document.createElement("button");
+  private mappings: Mappings | undefined;
+  private renderedFactConditions = "";
 
   constructor(
     node: ProseMirrorNode,
@@ -440,9 +452,22 @@ class RelationView extends ClauseView {
     this.entity.type = "button";
     this.entity.className = "query-slot query-entity-slot";
     this.entity.addEventListener("click", () => void this.pickSelected());
-    this.relation.addEventListener("change", () =>
-      this.updateAttrs({ selection: this.relation.value, related: "" })
-    );
+    this.factDetails.className = "query-relation-details";
+    const factSummary = document.createElement("summary");
+    factSummary.textContent = "关系属性";
+    this.factList.className = "query-fact-conditions";
+    this.factAdd.type = "button";
+    this.factAdd.className = "query-fact-add";
+    this.factAdd.textContent = "＋ 属性条件";
+    this.factAdd.addEventListener("click", () => this.addFactCondition());
+    this.factDetails.append(factSummary, this.factList, this.factAdd);
+    this.relation.addEventListener("change", () => {
+      this.updateAttrs({
+        selection: this.relation.value,
+        related: "",
+        factConditions: [],
+      });
+    });
     this.exists.addEventListener("change", () =>
       this.updateAttrs({ exists: this.exists.value === "true" })
     );
@@ -452,8 +477,145 @@ class RelationView extends ClauseView {
       this.relation,
       this.exists,
       this.entity,
+      this.factDetails,
       removeButton(() => this.remove(), "移除关联"),
     );
+    this.renderFactConditions();
+    void options.mappings?.().then((mappings) => {
+      this.mappings = mappings;
+      this.renderedFactConditions = "";
+      this.renderFactConditions();
+    }).catch((error: unknown) => options.reportError(error));
+  }
+
+  private factKind(): QueryFactKind {
+    return this.relation.value.split("|", 1)[0] as QueryFactKind;
+  }
+
+  private factConditions(): EditableFactCondition[] {
+    return Array.isArray(this.node.attrs.factConditions)
+      ? (this.node.attrs.factConditions as EditableFactCondition[])
+      : [];
+  }
+
+  private addFactCondition(): void {
+    const kind = this.factKind();
+    const field = queryFactFields(kind, "filter")[0] ?? "";
+    if (!field) return;
+    const next = [
+      ...this.factConditions(),
+      {
+        field,
+        operator: queryFactConditionOperators(kind, field)[0] ?? "",
+        raw: "",
+      },
+    ];
+    this.updateAttrs({ factConditions: next });
+  }
+
+  private updateFactCondition(
+    index: number,
+    patch: Partial<EditableFactCondition>,
+    rerender: boolean,
+  ): void {
+    const next = this.factConditions().map((condition, current) =>
+      current === index ? { ...condition, ...patch } : condition
+    );
+    if (!rerender) {
+      this.renderedFactConditions = `${this.factKind()}:${JSON.stringify(next)}:${Boolean(this.mappings)}`;
+    }
+    this.updateAttrs({ factConditions: next });
+  }
+
+  private removeFactCondition(index: number): void {
+    this.updateAttrs({
+      factConditions: this.factConditions().filter((_, current) => current !== index),
+    });
+  }
+
+  private renderFactConditions(): void {
+    const kind = this.factKind();
+    const fields = queryFactFields(kind, "filter");
+    const conditions = this.factConditions();
+    const signature = `${kind}:${JSON.stringify(conditions)}:${Boolean(this.mappings)}`;
+    if (signature === this.renderedFactConditions) return;
+    this.renderedFactConditions = signature;
+    this.factDetails.hidden = !fields.length;
+    this.factAdd.disabled = !fields.length;
+    const rows = conditions.map((condition, index) => {
+      const host = document.createElement("div");
+      host.className = "query-fact-condition";
+      const field = selectControl("关系属性");
+      for (const name of fields)
+        field.append(option(name, FACT_FIELD_LABEL[name] ?? name));
+      field.value = condition.field;
+      if (!field.value) field.selectedIndex = 0;
+      const operator = selectControl("关系属性比较方式");
+      const fillOperators = (): void => {
+        operator.replaceChildren();
+        for (const name of queryFactConditionOperators(kind, field.value))
+          operator.append(option(name, OPERATOR_LABEL[name] ?? name));
+        operator.value = condition.operator;
+        if (!operator.value) operator.selectedIndex = 0;
+      };
+      fillOperators();
+      const valueHost = document.createElement("span");
+      const fillValue = (): void => {
+        valueHost.replaceChildren();
+        if (["isNull", "isNotNull", "isMissing", "isPresent"].includes(operator.value))
+          return;
+        const labels = factEnumValues(kind, field.value, this.mappings);
+        if (labels) {
+          const input = selectControl(`${FACT_FIELD_LABEL[field.value] ?? field.value}的值`);
+          const multiple = operator.value === "in" || operator.value === "notIn";
+          input.multiple = multiple;
+          if (multiple) input.size = Math.min(4, Math.max(2, Object.keys(labels).length));
+          else input.append(option("", "选择…"));
+          for (const [value, label] of Object.entries(labels))
+            input.append(option(value, label));
+          const selected = new Set(condition.raw.split("、").filter(Boolean));
+          for (const item of input.options)
+            item.selected = selected.has(item.value) || (!multiple && item.value === condition.raw);
+          input.addEventListener("change", () => {
+            const raw = multiple
+              ? [...input.selectedOptions].map((item) => item.value).join("、")
+              : input.value;
+            this.updateFactCondition(index, { raw }, false);
+          });
+          valueHost.append(input);
+          return;
+        }
+        const input = literalInput(`${FACT_FIELD_LABEL[field.value] ?? field.value}的值`);
+        input.value = condition.raw;
+        input.placeholder = operator.value === "in" || operator.value === "notIn"
+          ? "多个值用顿号分隔"
+          : "输入值";
+        input.addEventListener("input", () =>
+          this.updateFactCondition(index, { raw: input.value }, false)
+        );
+        valueHost.append(input);
+      };
+      fillValue();
+      field.addEventListener("change", () => {
+        const nextOperator = queryFactConditionOperators(kind, field.value)[0] ?? "";
+        this.updateFactCondition(index, {
+          field: field.value,
+          operator: nextOperator,
+          raw: "",
+        }, true);
+      });
+      operator.addEventListener("change", () =>
+        this.updateFactCondition(index, { operator: operator.value, raw: "" }, true)
+      );
+      host.append(
+        field,
+        operator,
+        valueHost,
+        removeButton(() => this.removeFactCondition(index), "移除关系属性条件"),
+      );
+      return host;
+    });
+    this.factList.replaceChildren(...rows);
   }
 
   private syncEntity(ref: string): void {
@@ -486,6 +648,7 @@ class RelationView extends ClauseView {
     this.relation.value = String(node.attrs.selection);
     this.exists.value = String(Boolean(node.attrs.exists));
     if (previous !== node.attrs.related) this.syncEntity(String(node.attrs.related));
+    this.renderFactConditions();
     return true;
   }
 }
@@ -552,6 +715,7 @@ class ProjectionView extends ClauseView {
 class SortView extends ClauseView {
   private readonly field = selectControl("排序字段");
   private readonly direction = selectControl("排序方向");
+  private readonly nulls = selectControl("空值位置");
 
   constructor(
     node: ProseMirrorNode,
@@ -563,9 +727,11 @@ class SortView extends ClauseView {
     for (const field of querySortFields(owner))
       this.field.append(option(field, FIELD_LABEL[field] ?? field));
     this.direction.append(option("desc", "从高到低"), option("asc", "从低到高"));
+    this.nulls.append(option("last", "空值最后"), option("first", "空值最前"));
     this.field.value = String(node.attrs.field);
     if (!this.field.value) this.field.selectedIndex = 0;
     this.direction.value = String(node.attrs.direction);
+    this.nulls.value = String(node.attrs.nulls);
     this.field.addEventListener("change", () => {
       const direction = defaultSortDirection(this.field.value);
       this.direction.value = direction;
@@ -574,10 +740,14 @@ class SortView extends ClauseView {
     this.direction.addEventListener("change", () =>
       this.updateAttrs({ direction: this.direction.value })
     );
+    this.nulls.addEventListener("change", () =>
+      this.updateAttrs({ nulls: this.nulls.value })
+    );
     this.dom.append(
       document.createTextNode("按"),
       this.field,
       this.direction,
+      this.nulls,
       removeButton(() => this.remove(), "移除排序"),
     );
   }
@@ -586,6 +756,7 @@ class SortView extends ClauseView {
     if (!super.update(node)) return false;
     this.field.value = String(node.attrs.field);
     this.direction.value = String(node.attrs.direction);
+    this.nulls.value = String(node.attrs.nulls);
     return true;
   }
 }
@@ -868,13 +1039,14 @@ export class QueryDocumentEditor {
       selection: queryRelationOptions(owner)[0]?.value ?? "",
       exists: true,
       related: "",
+      factConditions: [],
     };
     if (name === "projection") return {
       columns: ["ref", ...queryProjectFields(owner).slice(0, 6)],
     };
     if (name === "sort") {
       const field = querySortFields(owner)[0] ?? "";
-      return { field, direction: defaultSortDirection(field) };
+      return { field, direction: defaultSortDirection(field), nulls: "last" };
     }
     return { raw: "200" };
   }

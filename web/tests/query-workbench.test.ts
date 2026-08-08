@@ -8,7 +8,11 @@ import {
   describeExplorerQuery,
   isExplorerConditionComplete,
   parseExplorerLimit,
+  factEnumValues,
+  parseFactValue,
   queryConditionOperators,
+  queryFactConditionOperators,
+  queryFactFields,
   queryProjectFields,
   queryRelationOptions,
   queryRelationTargetOwner,
@@ -56,6 +60,25 @@ test("derives friendly condition operators from the field contract", () => {
     "contains",
     "notContains",
   ]);
+});
+
+test("derives relationship attribute controls from the same query contract", () => {
+  assert.deepEqual(queryFactFields("WORKED_ON", "filter"), ["position"]);
+  assert.deepEqual(queryFactConditionOperators("WORKED_ON", "position"), [
+    "eq",
+    "ne",
+    "in",
+    "notIn",
+  ]);
+  assert.deepEqual(factEnumValues("WORKED_ON", "position", {
+    fact_labels: { WORKED_ON: { "1": "原作", "2": "导演" } },
+    subject_type: {},
+    platform: {},
+    person_type: {},
+    character_role: {},
+    episode_type: {},
+  }), { "1": "原作", "2": "导演" });
+  assert.equal(parseFactValue("WORKED_ON", "position", "2"), 2);
 });
 
 test("maps editable complementary conditions without hiding unsupported negation", () => {
