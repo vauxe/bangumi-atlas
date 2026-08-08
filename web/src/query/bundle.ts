@@ -1,5 +1,5 @@
 import { canonicalJson, normalizeQuery } from "./canonical";
-import type { QueryDocument } from "./document";
+import type { ParameterValues, QueryDocument } from "./document";
 import { QUERY_SECURITY_PROFILE, safeRecordKey } from "./security";
 
 export type AnswerShape =
@@ -18,6 +18,8 @@ export interface AnswerSpec {
 
 export interface QuerySection {
   query: QueryDocument;
+  /** Typed values belong to the executable section and travel with shared URLs. */
+  parameterValues?: ParameterValues;
   answer: AnswerSpec;
 }
 
@@ -64,8 +66,14 @@ export function normalizeBundle(bundle: QueryBundle): QueryBundle {
     safeRecordKey(name, "query section name");
     if (!name || !section?.answer?.title || !ANSWER_SHAPES.has(section.answer.shape))
       throw new TypeError("query bundle answer specification is invalid");
+    const parameterValues = Object.fromEntries(
+      Object.entries(section.parameterValues ?? {}).sort(([left], [right]) =>
+        left < right ? -1 : left > right ? 1 : 0
+      ),
+    );
     sections[name] = {
-      query: normalizeQuery(section.query, {}),
+      query: normalizeQuery(section.query, parameterValues),
+      ...(Object.keys(parameterValues).length ? { parameterValues } : {}),
       answer: { ...section.answer },
     };
   }

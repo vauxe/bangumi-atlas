@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { normalizeBundle, type QueryBundle } from "../src/query/bundle";
+import {
+  normalizeBundle,
+  queryBundleDigest,
+  type QueryBundle,
+} from "../src/query/bundle";
 import { QUERY_SECURITY_PROFILE } from "../src/query/security";
 
 test("bounds the number of independently executed bundle sections", () => {
@@ -29,4 +33,54 @@ test("bounds the number of independently executed bundle sections", () => {
   };
 
   assert.throws(() => normalizeBundle(bundle), /too many sections/);
+});
+
+test("keeps typed parameter values with the section they execute", async () => {
+  const bundle: QueryBundle = {
+    schema: "atlas-query-bundle-v2",
+    release: { policy: "latest" },
+    sections: {
+      results: {
+        query: {
+          schema: "atlas-query-document-v2",
+          root: "filter",
+          parameters: { minimum: "number" },
+          operators: {
+            source: { kind: "scan", owner: "subject", binding: "item" },
+            filter: {
+              kind: "filter",
+              input: "source",
+              predicate: {
+                kind: "compare",
+                operator: "gte",
+                left: { kind: "field", binding: "item", field: "score" },
+                right: { kind: "parameter", name: "minimum" },
+              },
+            },
+          },
+        },
+        parameterValues: { minimum: 8 },
+        answer: { shape: "entity-list", title: "高分作品" },
+      },
+    },
+  };
+
+  const normalized = normalizeBundle(bundle);
+  assert.deepEqual(normalized.sections.results?.parameterValues, { minimum: 8 });
+  assert.throws(
+    () => normalizeBundle({
+      ...bundle,
+      sections: {
+        results: { ...bundle.sections.results!, parameterValues: {} },
+      },
+    }),
+    /parameter minimum is missing/,
+  );
+
+  const changed = structuredClone(bundle);
+  changed.sections.results!.parameterValues!.minimum = 9;
+  assert.notEqual(
+    await queryBundleDigest(bundle),
+    await queryBundleDigest(changed),
+  );
 });
