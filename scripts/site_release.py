@@ -36,6 +36,7 @@ KIND_NAMES = {
     KIND_CHARACTER: "character",
 }
 MAX_SOURCE_ID = (1 << 24) - 1
+EPISODE_SUBJECT_SENTINEL = (1 << 32) - 1
 
 # ---- u24 反向索引(VisualRank by EntityKey)----
 RANK_SENTINEL = int(SITE_CONTRACT["rank"]["sentinel"])
@@ -68,7 +69,7 @@ NAME_P99_CAP = 64_000
 
 # ---- explorer-v1 声明的初始分块与内联/分页参数(§5)----
 NAME_BLOCK_SIZE = 2048
-ENTITY_BLOCK_IDS = 256
+ENTITY_BLOCK_IDS = 4096
 EPISODE_BLOCK_SUBJECTS = 128
 FACT_BUCKETS = 8192
 FACT_INLINE = 200
@@ -174,6 +175,8 @@ TUPLE_SCHEMAS: dict[str, Any] = {
     "name": ["name", "name_cn|null", "entity_kind"],
     "entity": {
         "subject": [
+            "name",
+            "name_cn|null",
             "type",
             "platform_code|null",
             "date",
@@ -193,6 +196,7 @@ TUPLE_SCHEMAS: dict[str, Any] = {
             "has_infobox01",
         ],
         "person": [
+            "name",
             "type",
             "career[vocab]",
             "comments",
@@ -201,6 +205,7 @@ TUPLE_SCHEMAS: dict[str, Any] = {
             "has_infobox01",
         ],
         "character": [
+            "name",
             "role",
             "comments",
             "collects",
@@ -259,6 +264,21 @@ TUPLE_SCHEMAS: dict[str, Any] = {
         "postings": (
             "gzip members of at most "
             f"{SEARCH_NGRAM_MEMBER_RANKS} u24le VisualRanks"
+        ),
+    },
+    "text_search": {
+        "member": [
+            "text_family",
+            "entity_kind|0",
+            "file_index",
+            "offset",
+            "length",
+        ],
+        "hash": "fnv1a32-codepoint",
+        "width": SEARCH_NGRAM_WIDTH,
+        "buckets": SEARCH_NGRAM_BUCKETS,
+        "postings": (
+            "gzip members of unsigned varint first id and positive deltas"
         ),
     },
 }

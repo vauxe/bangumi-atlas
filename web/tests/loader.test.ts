@@ -6,14 +6,19 @@ import { gzipSync } from "node:zlib";
 import siteContract from "../../scripts/site-contract.json";
 import {
   loadManifest,
+  intersectSortedPostings,
   member,
   openNames,
   openSearchAliases,
   openGeometry,
   pointByRank,
+  prefetchPack,
   rankOfKey,
+  subjectForEpisode,
   ensureRankIndex,
+  decodeDeltaPosting,
   foldWithCharmap,
+  foldedUtf8Range,
   loadCharmap,
   releaseWasReplaced,
   ReleaseChangedError,
@@ -23,6 +28,7 @@ import {
   SiteDataContractError,
 } from "../src/loader";
 import type { Manifest, NameRow } from "../src/types";
+import { SiteRuntimeError } from "../src/site-error";
 
 const originalFetch = globalThis.fetch;
 
@@ -108,6 +114,8 @@ function testManifest(
     "score.bin": [nNodes, "0".repeat(64)] as [number, string],
     "tags.bin": [nNodes * 4, "0".repeat(64)] as [number, string],
     "rank-by-key.bin": [nNodes * 3, "0".repeat(64)] as [number, string],
+    "episode-subject.bin": [0, hash(new Uint8Array())] as [number, string],
+    "fact-anchor.bin": [0, hash(new Uint8Array())] as [number, string],
     "names.idx": [8, "0".repeat(64)] as [number, string],
     "names.pack": [1, hash(new Uint8Array([0]))] as [number, string],
     "charmap.json": [2, hash(new TextEncoder().encode("{}"))] as [
@@ -191,6 +199,15 @@ function testManifest(
         "3": { offset: nNodes * 3, count: 0 },
       },
     },
+    episode_index: {
+      encoding: "u32le-subject-id",
+      sentinel: 0xffffffff,
+      count: 0,
+    },
+    fact_index: {
+      encoding: "u32le-anchor-entity-key",
+      count: 0,
+    },
     n_nodes: nNodes,
     n_edges_skeleton: 0,
     name_block_size: 2,
@@ -236,6 +253,24 @@ test("rejects manifests from the obsolete det/adj generation", async () => {
   globalThis.fetch = (async () =>
     new Response(JSON.stringify(legacy))) as typeof fetch;
   await assert.rejects(loadManifest(), /structural-site-v1/);
+});
+
+test("classifies unavailable releases and transport failures", async () => {
+  globalThis.fetch = (async () => new Response(null, { status: 404 })) as typeof fetch;
+  await assert.rejects(
+    loadManifest(),
+    (error: unknown) =>
+      error instanceof SiteRuntimeError && error.code === "RELEASE_UNAVAILABLE",
+  );
+
+  globalThis.fetch = (async () => {
+    throw new TypeError("Failed to fetch");
+  }) as typeof fetch;
+  await assert.rejects(
+    loadManifest(),
+    (error: unknown) =>
+      error instanceof SiteRuntimeError && error.code === "NETWORK",
+  );
 });
 
 test("rejects a non-positive search page size at the manifest boundary", async () => {
@@ -374,6 +409,34 @@ test("rejects a manifest missing a mandatory search artifact", async () => {
   }
 });
 
+test("rejects an incomplete full-text-v1 query release", async () => {
+  const malformed = testManifest({});
+  malformed.query = {
+    schema: "atlas-release-query-v2",
+    capabilities: ["atlas-query-v2", "full-text-v1"],
+    contractDigest: "0".repeat(64),
+  };
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(malformed))) as typeof fetch;
+
+  await assert.rejects(loadManifest(), /full-text-v1 查询索引不完整/);
+});
+
+test("accepts a query release without a deployment marker", async () => {
+  const manifest = testManifest({});
+  manifest.query = {
+    schema: "atlas-release-query-v2",
+    capabilities: ["atlas-query-v2"],
+    contractDigest: "0".repeat(64),
+  };
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(manifest))) as typeof fetch;
+
+  const loaded = await loadManifest();
+
+  assert.equal(loaded.query?.schema, "atlas-release-query-v2");
+});
+
 test("hashes Unicode bigrams exactly like the site baker", () => {
   assert.deepEqual(searchGramBuckets("ab"), [36752]);
   assert.deepEqual(searchGramBuckets("之境界"), [53925, 53696]);
@@ -388,6 +451,39 @@ test("folding is defined only by the published character map", () => {
     foldWithCharmap("\u0085A\u0085", { A: "a" }),
     "\u0085a\u0085",
   );
+});
+
+test("reports authoritative text matches as UTF-8 byte ranges", () => {
+  assert.deepEqual(foldedUtf8Range("  穿过 星空 ", "星空"), [9, 15]);
+  assert.equal(foldedUtf8Range("穿过旅程", "星空"), null);
+});
+
+test("decodes canonical delta-varint text postings", () => {
+  assert.deepEqual(
+    decodeDeltaPosting(new Uint8Array([0, 1, 126, 1, 128, 124]), 5, 20_000),
+    [0, 1, 127, 128, 16_000],
+  );
+  assert.throws(
+    () => decodeDeltaPosting(new Uint8Array([128]), 1, 10),
+    /截断/,
+  );
+  assert.throws(
+    () => decodeDeltaPosting(new Uint8Array([129, 0]), 1, 10),
+    /最短编码/,
+  );
+});
+
+test("intersects every text bigram posting before reading source members", () => {
+  assert.deepEqual(
+    intersectSortedPostings([
+      [1, 2, 4, 7, 9],
+      [0, 2, 4, 8, 9],
+      [2, 3, 4, 9],
+    ]),
+    [2, 4, 9],
+  );
+  assert.deepEqual(intersectSortedPostings([[1, 2], []]), []);
+  assert.deepEqual(intersectSortedPostings([]), []);
 });
 
 test("rejects a character map with non-codepoint keys", async () => {
@@ -1213,6 +1309,7 @@ test("streams complete xyz geometry without planar expansion", async () => {
   for (const [path, bytes] of Object.entries(artifacts))
     metadata[path] = [bytes.byteLength, hash(bytes)];
   const manifest = testManifest(metadata, 2);
+  const fetched = new Set<string>();
   await installFetch(manifest, async (path) => {
     const physicalName = path.slice(path.lastIndexOf("/") + 1);
     const logicalName = Object.entries(manifest.files).find(
@@ -1220,6 +1317,7 @@ test("streams complete xyz geometry without planar expansion", async () => {
     )?.[0];
     const bytes = logicalName ? artifacts[logicalName] : undefined;
     assert.ok(bytes);
+    fetched.add(logicalName as string);
     return new Response(bytes.buffer as ArrayBuffer);
   });
 
@@ -1228,6 +1326,15 @@ test("streams complete xyz geometry without planar expansion", async () => {
 
   assert.equal(stream.geo.loaded, 2);
   assert.deepEqual(Array.from(stream.geo.positions), [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual([...fetched].sort(), [
+    "flags.bin",
+    "key.bin",
+    "positions.bin",
+    "score.bin",
+    "size.bin",
+    "tags.bin",
+    "year.bin",
+  ]);
 });
 
 test("decodes the u24 rank-by-key reverse index", async () => {
@@ -1260,6 +1367,28 @@ test("decodes the u24 rank-by-key reverse index", async () => {
   assert.equal(rankOfKey((2 << 24) | 1), null);
 });
 
+test("resolves an Episode id to its owning Subject with one fixed-width lookup", async () => {
+  const bytes = u32le([0xffffffff, 42, 7]);
+  const manifest = {
+    ...testManifest({
+      "episode-subject.bin": [bytes.byteLength, hash(bytes)],
+    }),
+    episode_index: {
+      encoding: "u32le-subject-id" as const,
+      sentinel: 0xffffffff,
+      count: 3,
+    },
+  };
+  await installFetch(manifest, async () =>
+    new Response(bytes.buffer as ArrayBuffer),
+  );
+
+  assert.equal(await subjectForEpisode(0), null);
+  assert.equal(await subjectForEpisode(1), 42);
+  assert.equal(await subjectForEpisode(2), 7);
+  assert.equal(await subjectForEpisode(3), null);
+});
+
 test("shares one whole-pack fallback across concurrent members", async () => {
   const first: NameRow[] = [["a", "A", 1]];
   const second: NameRow[] = [["b", "B", 2]];
@@ -1290,6 +1419,50 @@ test("shares one whole-pack fallback across concurrent members", async () => {
   assert.equal(packRequests, 1);
   await member("structure", "facts.pack", 0, firstGzip.byteLength);
   assert.equal(packRequests, 1);
+});
+
+test("prefetches a range-capable pack once for a local full scan", async () => {
+  const first: NameRow[] = [["a", "A", 1]];
+  const second: NameRow[] = [["b", "B", 2]];
+  const firstGzip = gzipSync(JSON.stringify(first));
+  const secondGzip = gzipSync(JSON.stringify(second));
+  const pack = new Uint8Array(Buffer.concat([firstGzip, secondGzip]));
+  const manifest = testManifest({
+    "facts.pack": [pack.byteLength, hash(pack)],
+  });
+  const ranges: Array<string | null> = [];
+  await installFetch(manifest, async (_path, init) => {
+    const range = new Headers(init?.headers).get("Range");
+    ranges.push(range);
+    if (!range) return new Response(body(pack));
+    const match = /^bytes=(\d+)-(\d+)$/.exec(range);
+    assert.ok(match);
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    return new Response(body(pack.slice(start, end + 1)), {
+      status: 206,
+      headers: {
+        "Content-Range": `bytes ${start}-${end}/${pack.byteLength}`,
+      },
+    });
+  });
+
+  await prefetchPack("facts.pack");
+  assert.deepEqual(
+    await member("structure", "facts.pack", 0, firstGzip.byteLength),
+    first,
+  );
+  assert.deepEqual(
+    await member(
+      "structure",
+      "facts.pack",
+      firstGzip.byteLength,
+      secondGzip.byteLength,
+    ),
+    second,
+  );
+
+  assert.deepEqual(ranges, [null]);
 });
 
 test("bounds whole-pack fallbacks with a weighted LRU", async () => {

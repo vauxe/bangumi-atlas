@@ -20,6 +20,7 @@ import {
   assertContentRange,
   sha256Hex,
 } from "./data-integrity";
+import { SiteRuntimeError } from "./site-error";
 
 const BASE = "data";
 const {
@@ -37,6 +38,7 @@ const {
 } = siteContract.limits;
 const RANK_ENCODING = siteContract.rank.encoding;
 const RANK_SENTINEL = siteContract.rank.sentinel;
+const EPISODE_SUBJECT_SENTINEL = 0xffffffff;
 const NAME_BLOCK_SIZE = 2_048;
 const MANIFEST_BYTE_CAP = 1_000_000;
 const SMALL_FILE_CAP = 16_000_000;
@@ -51,6 +53,11 @@ const REQUIRED_SEARCH_FILES = [
   "search.ngram.pack",
   "search.alias.idx",
   "search.alias.pack",
+] as const;
+const REQUIRED_TEXT_QUERY_FILES = [
+  "text.search.members",
+  "text.search.ngram.idx",
+  "text.search.ngram.pack",
 ] as const;
 const CACHE_BUDGET = {
   total: 64_000_000,
@@ -68,20 +75,32 @@ const GEOMETRY_STRIDES = {
   "score.bin": 1,
   "tags.bin": 4,
 } as const;
+const CANVAS_STREAM_STRIDES = {
+  positions: GEOMETRY_STRIDES["positions.bin"],
+  year: GEOMETRY_STRIDES["year.bin"],
+  key: GEOMETRY_STRIDES["key.bin"],
+  size: GEOMETRY_STRIDES["size.bin"],
+  flags: GEOMETRY_STRIDES["flags.bin"],
+  score: GEOMETRY_STRIDES["score.bin"],
+  tags: GEOMETRY_STRIDES["tags.bin"],
+} as const;
 let manifestRef: Manifest | null = null;
 
-export class SiteDataContractError extends Error {
+export class SiteDataContractError extends SiteRuntimeError {
   constructor(detail: string) {
-    super(`站点数据版本不兼容:${detail},请重建站点数据`);
+    super(
+      "DATA_INTEGRITY",
+      `站点数据版本不兼容:${detail},请重建站点数据`,
+    );
     this.name = "SiteDataContractError";
   }
 }
 
 /** manifest 可更新，但负载是不可变内容对象；旧对象消失或数据与
  * manifest 不一致时停止请求并要求刷新，不混用两个发布。 */
-export class ReleaseChangedError extends Error {
+export class ReleaseChangedError extends SiteRuntimeError {
   constructor(detail: string) {
-    super(`站点数据已更新(${detail}),请刷新页面`);
+    super("RELEASE_EVICTED", `站点数据已更新(${detail}),请刷新页面`);
     this.name = "ReleaseChangedError";
   }
 }
@@ -137,14 +156,25 @@ export function cacheUsage(): Record<CacheFamily, number> {
 }
 
 export async function loadManifest(): Promise<Manifest> {
-  const res = await fetch(`${BASE}/manifest.json`, { cache: "no-cache" });
-  if (!res.ok) throw new Error(`manifest.json: ${res.status}`);
+  const res = await fetchSite(`${BASE}/manifest.json`, { cache: "no-cache" });
+  if (!res.ok)
+    throw new SiteRuntimeError(
+      "RELEASE_UNAVAILABLE",
+      `当前数据发布不可用（manifest.json: ${res.status}）`,
+    );
   const manifestBytes = await readLimitedBody(
     res,
     MANIFEST_BYTE_CAP,
     "manifest.json",
   );
-  const m = JSON.parse(new TextDecoder().decode(manifestBytes)) as Manifest;
+  let m: Manifest;
+  try {
+    m = JSON.parse(new TextDecoder().decode(manifestBytes)) as Manifest;
+  } catch (error) {
+    throw new SiteDataContractError(
+      `manifest.json 不是有效 JSON${error instanceof Error ? `: ${error.message}` : ""}`,
+    );
+  }
   if (m.schema_digest !== siteContract.schema_digest)
     throw new SiteDataContractError("manifest.schema_digest 与客户端不一致");
   if (
@@ -176,6 +206,22 @@ export async function loadManifest(): Promise<Manifest> {
       `n_nodes ${m.n_nodes} 超过 u24 节点上限 ${RANK_SENTINEL - 1}`,
     );
   if (
+    m.query !== undefined &&
+    (
+      m.query.schema !== "atlas-release-query-v2" ||
+      !Array.isArray(m.query.capabilities) ||
+      m.query.capabilities.some((item) => typeof item !== "string") ||
+      new Set(m.query.capabilities).size !== m.query.capabilities.length ||
+      !/^[0-9a-f]{64}$/.test(m.query.contractDigest)
+    )
+  )
+    throw new SiteDataContractError("manifest.query 查询能力声明无效");
+  if (
+    m.query?.capabilities.includes("full-text-v1") &&
+    REQUIRED_TEXT_QUERY_FILES.some((path) => !m.files[path])
+  )
+    throw new SiteDataContractError("full-text-v1 查询索引不完整");
+  if (
     m.rank_index.encoding !== RANK_ENCODING ||
     m.rank_index.sentinel !== RANK_SENTINEL
   )
@@ -200,6 +246,25 @@ export async function loadManifest(): Promise<Manifest> {
     m.files["rank-by-key.bin"]?.[0] !== rankIndexBytes
   )
     throw new SiteDataContractError("rank_index 与 rank-by-key.bin 不一致");
+  if (
+    m.episode_index?.encoding !== "u32le-subject-id" ||
+    m.episode_index.sentinel !== EPISODE_SUBJECT_SENTINEL ||
+    !Number.isSafeInteger(m.episode_index.count) ||
+    m.episode_index.count < 0 ||
+    m.files["episode-subject.bin"]?.[0] !== m.episode_index.count * 4
+  )
+    throw new SiteDataContractError(
+      "episode_index 与 episode-subject.bin 不一致",
+    );
+  if (
+    m.fact_index?.encoding !== "u32le-anchor-entity-key" ||
+    !Number.isSafeInteger(m.fact_index.count) ||
+    m.fact_index.count !== m.counts.facts ||
+    m.files["fact-anchor.bin"]?.[0] !== m.fact_index.count * 4
+  )
+    throw new SiteDataContractError(
+      "fact_index 与 fact-anchor.bin 不一致",
+    );
   if (
     !Number.isInteger(m.limits.search_top) ||
     m.limits.search_top <= 0 ||
@@ -333,6 +398,7 @@ export async function loadManifest(): Promise<Manifest> {
   pinned.clear();
   idxCache.clear();
   packAccess.clear();
+  wholePackLoads.clear();
   packModes.clear();
   wholePacks.clear();
   rankBytes = null;
@@ -349,14 +415,30 @@ function publishedMeta(path: string): [number, string, string] {
   return meta;
 }
 
+async function fetchSite(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  try {
+    return await fetch(input, init);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new SiteRuntimeError("NETWORK", "站点数据请求失败，请检查网络后重试", {
+      cause: error,
+    });
+  }
+}
+
 async function fetchPublished(
   path: string,
   init?: RequestInit,
 ): Promise<Response> {
   guard();
-  const res = await fetch(url(path), init);
+  const res = await fetchSite(url(path), init);
   if (res.status === 404 || res.status === 410)
     enterReleaseChanged(`${path} 的旧内容对象已不存在`);
+  if (!res.ok)
+    throw new SiteRuntimeError("NETWORK", `${path} 请求失败（HTTP ${res.status}）`);
   return res;
 }
 
@@ -488,15 +570,6 @@ export function openGeometry(manifest: Manifest): GeometryStream {
     score: new Uint8Array(n),
     tags: new Uint8Array(n * 4),
   };
-  const stride: Record<keyof typeof raw, number> = {
-    positions: 12,
-    year: 2,
-    key: 4,
-    size: 1,
-    flags: 1,
-    score: 1,
-    tags: 4,
-  };
   const progress: Record<string, number> = {};
   const geo: Geometry = {
     positions: new Float32Array(raw.positions.buffer),
@@ -514,9 +587,9 @@ export function openGeometry(manifest: Manifest): GeometryStream {
   const start = (onChunk: (loaded: number) => void): Promise<void> => {
     const update = (): void => {
       const loaded = Math.min(
-        ...Object.keys(raw).map((k) =>
+        ...(Object.keys(raw) as (keyof typeof raw)[]).map((k) =>
           Math.floor(
-            (progress[k] ?? 0) / stride[k as keyof typeof raw],
+            (progress[k] ?? 0) / CANVAS_STREAM_STRIDES[k],
           ),
         ),
       );
@@ -655,7 +728,44 @@ type PackMode = "range" | "whole";
 /** 首次点查共享一次探测:服务器不支持 Range(开发环境)时整包
  * 缓存一次,后续切片全部本地完成,并发调用合并为一个请求。 */
 const packAccess = new SharedAbortableMemo<string, PackAccess>();
+const wholePackLoads = new SharedAbortableMemo<string, ArrayBuffer>();
 const packModes = new Map<string, PackMode>();
+
+/** 全量扫描前显式预取一个受上限约束、内容寻址且摘要校验过的 pack。
+ * 点查不调用它，仍保持 Range 成员读取。 */
+export async function prefetchPack(
+  path: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  signal?.throwIfAborted();
+  if (wholePacks.get(path)) return;
+  const [size] = publishedMeta(path);
+  const cap = manifestRef?.limits.pack_cap ?? 0;
+  if (size > cap)
+    throw new SiteDataContractError(`${path} 超过整包预取上限 ${cap}`);
+  const buffer = await wholePackLoads.get(
+    path,
+    async (workSignal) => {
+      const bytes = await loadPublishedBytes(
+        path,
+        { priority: "low", signal: workSignal } as RequestInit,
+        cap,
+      );
+      const whole = bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength,
+      ) as ArrayBuffer;
+      wholePacks.set(path, whole, whole.byteLength);
+      packModes.set(path, "whole");
+      return whole;
+    },
+    signal,
+  );
+  // 同一时刻另一个大包可能触发 LRU；调用方仍可安全回退 Range。
+  if (!wholePacks.get(path))
+    wholePacks.set(path, buffer, buffer.byteLength);
+  packModes.set(path, "whole");
+}
 
 async function packSlice(
   path: string,
@@ -664,10 +774,11 @@ async function packSlice(
   signal?: AbortSignal,
 ): Promise<ArrayBuffer> {
   signal?.throwIfAborted();
+  const prefetched = wholePacks.get(path);
+  if (prefetched) return prefetched.slice(off, off + len);
   const mode = packModes.get(path);
   if (mode === "whole") {
-    const whole = wholePacks.get(path);
-    if (whole) return whole.slice(off, off + len);
+    // 整包被 LRU 淘汰后重新探测，兼容 Range 与无 Range 服务器。
   }
   if (mode === "range") {
     const direct = await rangeFetch(path, off, len, signal, false);
@@ -857,6 +968,66 @@ function loadIdx(
     validate?.(index);
     return index;
   });
+}
+
+/** rank 有序的稳定 EntityKey；查询 Worker 按搜索候选批量回到权威实体。 */
+export function loadEntityKeys(signal?: AbortSignal): Promise<Uint32Array> {
+  const pending = idxCache.get("key.bin", async () => {
+    const bytes = await loadPublishedBytes("key.bin");
+    const expected = manifestRef?.n_nodes ?? 0;
+    if (bytes.byteLength !== expected * 4)
+      throw new SiteDataContractError("key.bin 与 n_nodes 不一致");
+    const keys = new Uint32Array(expected);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    for (let offset = 0; offset < bytes.byteLength; offset += 4)
+      keys[offset / 4] = view.getUint32(offset, true);
+    return keys;
+  });
+  return waitForSignal(pending, signal);
+}
+
+/** EpisodeId -> Subject 源 id；Range 服务器只读取一个 u32。 */
+export async function subjectForEpisode(
+  episodeId: number,
+  signal?: AbortSignal,
+): Promise<number | null> {
+  const index = manifestRef?.episode_index;
+  if (
+    !index ||
+    !Number.isSafeInteger(episodeId) ||
+    episodeId < 0 ||
+    episodeId >= index.count
+  )
+    return null;
+  const bytes = await packSlice(
+    "episode-subject.bin",
+    episodeId * 4,
+    4,
+    signal,
+  );
+  const value = new DataView(bytes).getUint32(0, true);
+  return value === EPISODE_SUBJECT_SENTINEL ? null : value;
+}
+
+/** FactRef -> one canonical participant EntityKey; the incidence remains authoritative. */
+export async function anchorForFact(
+  factRef: number,
+  signal?: AbortSignal,
+): Promise<number | null> {
+  const index = manifestRef?.fact_index;
+  if (
+    !index ||
+    !Number.isSafeInteger(factRef) ||
+    factRef < 0 ||
+    factRef >= index.count
+  )
+    return null;
+  const bytes = await packSlice("fact-anchor.bin", factRef * 4, 4, signal);
+  const key = new DataView(bytes).getUint32(0, true);
+  const kind = key >>> 24;
+  if (kind < 1 || kind > 3)
+    throw new SiteDataContractError("fact-anchor.bin contains an invalid EntityKey");
+  return key;
 }
 
 // ---- rank-by-key:u24 反向索引(深链恢复与事实参与者定位) ----
@@ -1146,6 +1317,38 @@ export function fold(text: string): string {
   return foldWithCharmap(text, charmap ?? {});
 }
 
+/** Locate a normalized match in the authoritative source text. Offsets are
+ * UTF-8 byte offsets so they remain stable outside JavaScript strings. */
+export function foldedUtf8Range(
+  text: string,
+  normalizedQuery: string,
+): [number, number] | null {
+  const source = text.trim();
+  const prefix = text.slice(0, text.length - text.trimStart().length);
+  const encoder = new TextEncoder();
+  let byteOffset = encoder.encode(prefix).byteLength;
+  let normalized = "";
+  const starts: number[] = [];
+  const ends: number[] = [];
+  const map = charmap ?? {};
+  for (const character of source) {
+    const byteLength = encoder.encode(character).byteLength;
+    const code = character.codePointAt(0) ?? 0;
+    const part = map[character] ??
+      (code >= 65 && code <= 90 ? String.fromCodePoint(code + 32) : character);
+    normalized += part;
+    for (let index = 0; index < part.length; index++) {
+      starts.push(byteOffset);
+      ends.push(byteOffset + byteLength);
+    }
+    byteOffset += byteLength;
+  }
+  const start = normalized.indexOf(normalizedQuery);
+  if (start < 0) return null;
+  const end = start + normalizedQuery.length - 1;
+  return [starts[start] ?? byteOffset, ends[end] ?? byteOffset];
+}
+
 export function foldWithCharmap(
   text: string,
   map: Record<string, string>,
@@ -1254,6 +1457,249 @@ export function searchGramBuckets(text: string): number[] {
 export interface SearchRankPage {
   ranks: number[];
   next: number | null;
+}
+
+export type TextSearchFamily =
+  | "episode-identity"
+  | "entity-summary"
+  | "entity-infobox"
+  | "episode-description"
+  | "fact-summary";
+
+export type TextSearchMember = [
+  family: TextSearchFamily,
+  entityKind: number,
+  fileIndex: number,
+  offset: number,
+  length: number,
+];
+
+interface TextSearchMembers {
+  schema: "text-search-members-v1";
+  members: TextSearchMember[];
+}
+
+function loadTextSearchMembers(): Promise<TextSearchMembers> {
+  return loadGzJson<TextSearchMembers>("text.search.members").then((value) => {
+    const families = new Set<TextSearchFamily>([
+      "episode-identity",
+      "entity-summary",
+      "entity-infobox",
+      "episode-description",
+      "fact-summary",
+    ]);
+    if (
+      value.schema !== "text-search-members-v1" ||
+      !Array.isArray(value.members) ||
+      value.members.some((row) =>
+        !Array.isArray(row) ||
+        row.length !== 5 ||
+        !families.has(row[0]) ||
+        !Number.isInteger(row[1]) ||
+        row[1] < 0 ||
+        row[1] > 3 ||
+        !Number.isInteger(row[2]) || row[2] < 0 ||
+        !Number.isInteger(row[3]) || row[3] < 0 ||
+        !Number.isInteger(row[4]) || row[4] < 0 ||
+        row[4] <= 0 ||
+        row[4] > MEMBER_CAP
+      )
+    )
+      throw new SiteDataContractError("text.search.members 无效");
+    return value;
+  });
+}
+
+function validateTextSearchIndex(index: Uint32Array): void {
+  const {
+    bucketMembers,
+    memberOffsets,
+    memberFirst,
+    memberLast,
+    counts,
+  } = searchNgramIndex(index);
+  const memberCount = memberFirst.length;
+  const [packBytes] = publishedMeta("text.search.ngram.pack");
+  if (bucketMembers[0] !== 0 || memberOffsets[0] !== 0)
+    throw new SiteDataContractError("text search index 必须从零开始");
+  for (let member = 0; member < memberCount; member++) {
+    const start = memberOffsets[member] ?? 0;
+    const end = memberOffsets[member + 1] ?? start;
+    if (end <= start || end - start > MEMBER_CAP)
+      throw new SiteDataContractError("text search posting 成员边界无效");
+  }
+  for (let bucket = 0; bucket < SEARCH_NGRAM_BUCKETS; bucket++) {
+    const start = bucketMembers[bucket] ?? 0;
+    const end = bucketMembers[bucket + 1] ?? start;
+    const count = counts[bucket] ?? 0;
+    if (
+      end < start ||
+      end > memberCount ||
+      end - start !== Math.ceil(count / SEARCH_NGRAM_MEMBER_RANKS)
+    )
+      throw new SiteDataContractError("text search bucket 边界无效");
+    for (let member = start + 1; member < end; member++)
+      if ((memberLast[member - 1] ?? 0) >= (memberFirst[member] ?? 0))
+        throw new SiteDataContractError("text search posting 不递增");
+  }
+  if ((memberOffsets[memberCount] ?? 0) !== packBytes)
+    throw new SiteDataContractError("text search posting 终点不匹配");
+}
+
+export interface TextSearchMemberPage {
+  members: TextSearchMember[];
+  next: number | null;
+  totalCandidates: number;
+}
+
+export function decodeDeltaPosting(
+  bytes: Uint8Array,
+  expectedCount: number,
+  exclusiveUpperBound: number,
+): number[] {
+  const ids: number[] = [];
+  let offset = 0;
+  let previous = -1;
+  while (ids.length < expectedCount) {
+    let delta = 0;
+    let shift = 0;
+    for (;;) {
+      const byte = bytes[offset++];
+      if (byte === undefined || shift > 28)
+        throw new SiteDataContractError("text search varint 截断或溢出");
+      delta += (byte & 0x7f) * 2 ** shift;
+      if (!(byte & 0x80)) {
+        if (shift && (byte & 0x7f) === 0)
+          throw new SiteDataContractError("text search varint 不是最短编码");
+        break;
+      }
+      shift += 7;
+    }
+    const id = previous < 0 ? delta : previous + delta;
+    if (
+      !Number.isSafeInteger(id) ||
+      id <= previous ||
+      id >= exclusiveUpperBound
+    )
+      throw new SiteDataContractError("text search member id 无效");
+    ids.push(id);
+    previous = id;
+  }
+  if (offset !== bytes.byteLength)
+    throw new SiteDataContractError("text search posting 含多余字节");
+  return ids;
+}
+
+export function intersectSortedPostings(postings: number[][]): number[] {
+  if (!postings.length) return [];
+  const ordered = [...postings].sort(
+    (left, right) => left.length - right.length,
+  );
+  let result = [...(ordered[0] ?? [])];
+  for (const posting of ordered.slice(1)) {
+    const intersection: number[] = [];
+    let left = 0;
+    let right = 0;
+    while (left < result.length && right < posting.length) {
+      const a = result[left] as number;
+      const b = posting[right] as number;
+      if (a === b) {
+        intersection.push(a);
+        left++;
+        right++;
+      } else if (a < b) left++;
+      else right++;
+    }
+    result = intersection;
+    if (!result.length) break;
+  }
+  return result;
+}
+
+async function textPosting(
+  bucket: number,
+  layout: ReturnType<typeof searchNgramIndex>,
+  directorySize: number,
+  signal?: AbortSignal,
+): Promise<number[]> {
+  const total = layout.counts[bucket] ?? 0;
+  const pages = (layout.bucketMembers[bucket + 1] ?? 0) -
+    (layout.bucketMembers[bucket] ?? 0);
+  const postings: number[][] = [];
+  for (let page = 0; page < pages; page++) {
+    signal?.throwIfAborted();
+    const postingMember = (layout.bucketMembers[bucket] ?? 0) + page;
+    const postingCount = Math.min(
+      SEARCH_NGRAM_MEMBER_RANKS,
+      total - page * SEARCH_NGRAM_MEMBER_RANKS,
+    );
+    const start = layout.memberOffsets[postingMember] ?? 0;
+    const end = layout.memberOffsets[postingMember + 1] ?? start;
+    const bytes = await binaryMember(
+      "search",
+      "text.search.ngram.pack",
+      start,
+      end - start,
+      (postingBytes) => {
+        const ids = decodeDeltaPosting(
+          postingBytes,
+          postingCount,
+          directorySize,
+        );
+        if (
+          ids.at(-1) !== layout.memberLast[postingMember] ||
+          ids[0] !== layout.memberFirst[postingMember]
+        )
+          throw new SiteDataContractError("text search posting 与索引不匹配");
+      },
+      signal,
+    );
+    postings.push(decodeDeltaPosting(bytes, postingCount, directorySize));
+  }
+  return postings.flat();
+}
+
+/** Intersect every query bigram posting before reading authoritative text. */
+export async function textSearchMemberPage(
+  normalized: string,
+  cursor: number,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<TextSearchMemberPage> {
+  if (!Number.isSafeInteger(cursor) || cursor < 0 || !Number.isSafeInteger(limit) || limit <= 0)
+    throw new RangeError("text search page is invalid");
+  const buckets = [...new Set(searchGramBuckets(normalized))];
+  if (!buckets.length) return { members: [], next: null, totalCandidates: 0 };
+  const [directory, index] = await Promise.all([
+    waitForSignal(loadTextSearchMembers(), signal),
+    waitForSignal(loadIdx("text.search.ngram.idx", validateTextSearchIndex), signal),
+  ]);
+  const layout = searchNgramIndex(index);
+  buckets.sort((left, right) =>
+    (layout.counts[left] ?? 0) - (layout.counts[right] ?? 0) || left - right,
+  );
+  const postings: number[][] = [];
+  for (const bucket of buckets) {
+    postings.push(await textPosting(bucket, layout, directory.members.length, signal));
+    if (!(postings.at(-1)?.length)) break;
+  }
+  const candidates = intersectSortedPostings(postings);
+  const total = candidates.length;
+  if (cursor >= total) return { members: [], next: null, totalCandidates: total };
+  const members: TextSearchMember[] = [];
+  const count = Math.min(limit, total - cursor);
+  for (let item = cursor; item < cursor + count; item++) {
+    const id = candidates[item];
+    const descriptor = id === undefined ? undefined : directory.members[id];
+    if (!descriptor) throw new SiteDataContractError("text search member missing");
+    members.push(descriptor);
+  }
+  const consumed = cursor + count;
+  return {
+    members,
+    next: consumed < total ? consumed : null,
+    totalCandidates: total,
+  };
 }
 
 /** 从查询的最稀疏二元字符桶按全局热度分页取候选。最终包含判断

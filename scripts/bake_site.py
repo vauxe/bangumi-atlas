@@ -31,7 +31,13 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import site_release as sr
 from community_labels import build_community_labels
+from enum_mappings import load_mappings
 from layout import shape_digest
+from query_contracts import (
+    load_query_contract,
+    query_schema_digest,
+    validate_query_contract,
+)
 from site_contracts import (
     read_dump_version,
     require_parquet_matches_dump,
@@ -53,6 +59,7 @@ LAYOUT_REPORT = ROOT / "data" / "layout" / "report.json"
 DUMP_VERSION = ROOT / "data" / "dump" / "VERSION"
 DUMP_ZIP = ROOT / "data" / "dump.zip"
 SITE = ROOT / "site" / "data"
+MAPPING_SNAPSHOT = ROOT / "data" / "mappings"
 
 SKELETON_TARGET = 500_000  # 传输目标;连通节点覆盖优先,超限显式报出
 LABELS_TOP = 20_000
@@ -66,6 +73,16 @@ INCIDENCE_SHARDS = 64
 # 参与 mappings.json 摘要。未覆盖的原始码由客户端按数值显示。
 PERSON_TYPE_NAMES = {1: "个人", 2: "公司", 3: "组合"}
 CHARACTER_ROLE_NAMES = {1: "角色", 2: "机体", 3: "舰船", 4: "组织"}
+# Bangumi API EpType: MainStory, SP, OP, ED, PV, MAD, Other.
+EPISODE_TYPE_NAMES = {
+    0: "本篇",
+    1: "特别篇",
+    2: "OP",
+    3: "ED",
+    4: "预告/宣传/广告",
+    5: "MAD",
+    6: "其他",
+}
 
 failures: list[str] = []
 
@@ -119,6 +136,33 @@ def quantiles(sizes: list[int]) -> dict[str, int]:
         "max": int(arr[-1]),
         "members": len(arr),
     }
+
+
+def build_episode_subject_index(
+    episode_ids: Sequence[Any], subject_ids: Sequence[Any]
+) -> np.ndarray:
+    """Build the dense EpisodeId -> Subject source-id point index."""
+    if len(episode_ids) != len(subject_ids):
+        raise ValueError("episode and subject columns have different lengths")
+    if not episode_ids:
+        return np.empty(0, dtype="<u4")
+    maximum = max(int(value) for value in episode_ids)
+    if maximum < 0 or maximum >= sr.EPISODE_SUBJECT_SENTINEL:
+        raise ValueError("episode id exceeds u32 index capacity")
+    result = np.full(
+        maximum + 1,
+        sr.EPISODE_SUBJECT_SENTINEL,
+        dtype="<u4",
+    )
+    for episode_id, subject_id in zip(episode_ids, subject_ids, strict=True):
+        eid = int(episode_id)
+        sid = int(subject_id)
+        if eid < 0 or sid < 0 or sid > sr.MAX_SOURCE_ID:
+            raise ValueError("episode index contains an out-of-range identity")
+        if result[eid] != sr.EPISODE_SUBJECT_SENTINEL:
+            raise ValueError(f"duplicate episode id {eid}")
+        result[eid] = sid
+    return result
 
 
 class PackFile:
@@ -208,6 +252,9 @@ def emit_ranged(
     width: int,
     level: int,
     encode: Callable[[list[tuple[int, Any]]], Any],
+    on_member: (
+        Callable[[list[int], list[tuple[int, Any]]], None] | None
+    ) = None,
 ) -> list[list[int]]:
     """按身份窗口切成员;成员超 256,000 字节时按身份中点递归细分。
 
@@ -229,6 +276,8 @@ def emit_ranged(
             emit(chunk[mid:])
             return
         loc = pack.add(gz)
+        if on_member is not None:
+            on_member(loc, chunk)
         ranges.append([chunk[0][0], chunk[-1][0], *loc])
 
     start = 0
@@ -325,12 +374,17 @@ def subject_entity_row(
     meta_id: dict[str, int],
     tag_id: dict[str, int],
 ) -> list[Any]:
+    # Archive uses zero for an unrated/unranked Subject; SiteRelease uses null.
+    score = table["score"][i]
+    bgm_rank = table["rank"][i]
     return [
+        table["name"][i],
+        table["name_cn"][i] or None,
         table["type"][i],
-        table["platform_code"][i],
+        table["platform_code"][i] if table["platform"][i] else None,
         table["date"][i],
-        table["score"][i],
-        table["rank"][i],
+        score if score else None,
+        bgm_rank if bgm_rank else None,
         int(table["nsfw"][i]),
         table["wish"][i],
         table["done"][i],
@@ -355,6 +409,7 @@ def person_entity_row(
     career_id: dict[str, int],
 ) -> list[Any]:
     return [
+        table["name"][i],
         table["type"][i],
         [career_id[c] for c in table["career"][i]],
         table["comments"][i],
@@ -372,6 +427,7 @@ def character_entity_row(
     text_bits: dict[str, np.ndarray],
 ) -> list[Any]:
     return [
+        table["name"][i],
         table["role"][i],
         table["comments"][i],
         table["collects"][i],
@@ -408,6 +464,9 @@ def emit_sorted_parquet_text(
     width: int,
     level: int,
     batch_size: int = 65_536,
+    on_member: (
+        Callable[[list[int], list[tuple[int, Any]]], None] | None
+    ) = None,
 ) -> tuple[list[list[int]], dict[str, int]]:
     """Stream an ID-sorted text column, retaining only one ID window."""
     ranges: list[list[int]] = []
@@ -427,7 +486,16 @@ def emit_sorted_parquet_text(
     def flush() -> None:
         nonlocal items
         if items:
-            ranges.extend(emit_ranged(pack, items, width, level, encode_text))
+            ranges.extend(
+                emit_ranged(
+                    pack,
+                    items,
+                    width,
+                    level,
+                    encode_text,
+                    on_member,
+                )
+            )
             items = []
 
     parquet_file = pq.ParquetFile(parquet)
@@ -465,6 +533,9 @@ def emit_fact_summary(
     *,
     empty_count: int,
     raw_bytes: int,
+    on_member: (
+        Callable[[list[int], list[tuple[int, Any]]], None] | None
+    ) = None,
 ) -> tuple[dict[str, Any], dict[str, int], list[int]]:
     """Write non-empty VOICE_CREDIT summaries addressed by FactRef."""
     family = "fact-summary"
@@ -481,6 +552,7 @@ def emit_fact_summary(
             "i": [fact_ref for fact_ref, _text in chunk],
             "t": [text for _fact_ref, text in chunk],
         },
+        on_member,
     )
     pack.write()
     sizes = pack.sizes
@@ -499,6 +571,106 @@ def emit_fact_summary(
         },
         sizes,
     )
+
+
+def encode_delta_varints(values: Iterable[int]) -> bytes:
+    """Encode one sorted posting page without a fixed-width padding cost."""
+    encoded = bytearray()
+    previous = -1
+    for index, value in enumerate(values):
+        if value < 0 or (index and value <= previous):
+            raise ValueError(
+                "delta-varint postings must be non-negative and sorted"
+            )
+        delta = value if index == 0 else value - previous
+        while delta >= 0x80:
+            encoded.append((delta & 0x7F) | 0x80)
+            delta >>= 7
+        encoded.append(delta)
+        previous = value
+    return bytes(encoded)
+
+
+class TextSearchBuilder:
+    """Hashed bigram postings over text members; source text verifies hits."""
+
+    def __init__(self) -> None:
+        self.members: list[list[Any]] = []
+        self.postings = [array("I") for _ in range(sr.SEARCH_NGRAM_BUCKETS)]
+
+    def add(
+        self,
+        family: str,
+        entity_kind: int,
+        loc: list[int],
+        texts: Iterable[str],
+    ) -> None:
+        if len(loc) != 3:
+            raise ValueError("text search requires a rollover-pack locator")
+        member_id = len(self.members)
+        if member_id >= sr.RANK_SENTINEL:
+            raise ValueError("text search member id exceeds u24")
+        self.members.append([family, entity_kind, *loc])
+        buckets: set[int] = set()
+        for text in texts:
+            folded = sr.search_fold(text)
+            buckets.update(
+                sr.search_gram_bucket(
+                    folded[start : start + sr.SEARCH_NGRAM_WIDTH]
+                )
+                for start in range(len(folded) - sr.SEARCH_NGRAM_WIDTH + 1)
+            )
+        for bucket in buckets:
+            self.postings[bucket].append(member_id)
+
+    def write(self) -> None:
+        write_gzip_json(
+            "text.search.members",
+            {"schema": "text-search-members-v1", "members": self.members},
+            9,
+        )
+        pack = PackFile("text.search.ngram.pack")
+        bucket_members = np.empty(sr.SEARCH_NGRAM_BUCKETS + 1, dtype="<u4")
+        counts = np.empty(sr.SEARCH_NGRAM_BUCKETS, dtype="<u4")
+        first: list[int] = []
+        last: list[int] = []
+        for bucket, member_ids in enumerate(self.postings):
+            bucket_members[bucket] = len(pack.sizes)
+            counts[bucket] = len(member_ids)
+            for start in range(
+                0, len(member_ids), sr.SEARCH_NGRAM_MEMBER_RANKS
+            ):
+                values = np.asarray(
+                    member_ids[start : start + sr.SEARCH_NGRAM_MEMBER_RANKS],
+                    dtype="<u4",
+                )
+                encoded = encode_delta_varints(int(value) for value in values)
+                pack.add(
+                    gzip.compress(
+                        encoded,
+                        compresslevel=sr.GZIP_LEVELS["search"],
+                        mtime=0,
+                    )
+                )
+                first.append(int(values[0]))
+                last.append(int(values[-1]))
+        bucket_members[-1] = len(pack.sizes)
+        pack.write()
+        offsets = np.empty(len(pack.sizes) + 1, dtype="<u4")
+        offsets[0] = 0
+        np.cumsum(pack.sizes, dtype=np.uint32, out=offsets[1:])
+        (SITE / "text.search.ngram.idx").write_bytes(
+            bucket_members.tobytes()
+            + offsets.tobytes()
+            + np.asarray(first, dtype="<u4").tobytes()
+            + np.asarray(last, dtype="<u4").tobytes()
+            + counts.tobytes()
+        )
+        log(
+            f"文本候选索引:{len(self.members):,} 成员,"
+            f"{sum(len(posting) for posting in self.postings):,} postings,"
+            f"{pack.size / 1e6:,.1f}MB"
+        )
 
 
 def collect_fact_encodings(
@@ -949,6 +1121,12 @@ def collect_mappings() -> tuple[dict[str, Any], dict[str, int]]:
                     "no longer sufficient — extend the mapping schema"
                 )
         fact_labels[kind] = {str(c): n for c, n in sorted(seen.items()) if n}
+    *_, voice_roles = load_mappings(MAPPING_SNAPSHOT)
+    fact_labels["VOICE_CREDIT"] = {
+        str(code): str(definition["cn"])
+        for code, definition in sorted(voice_roles.items())
+        if isinstance(definition, dict) and definition.get("cn")
+    }
     sub = pq.read_table(
         PARQUET / "subject.parquet",
         columns=["type", "type_name", "platform_code", "platform"],
@@ -971,14 +1149,29 @@ def collect_mappings() -> tuple[dict[str, Any], dict[str, int]]:
         "platform": dict(sorted(platform.items())),
         "person_type": {str(k): v for k, v in PERSON_TYPE_NAMES.items()},
         "character_role": {str(k): v for k, v in CHARACTER_ROLE_NAMES.items()},
+        "episode_type": {str(k): v for k, v in EPISODE_TYPE_NAMES.items()},
     }
     return mappings, unresolved
 
 
 def main() -> None:  # noqa: PLR0915
-    argparse.ArgumentParser().parse_args()
+    global SITE  # noqa: PLW0603
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=SITE,
+        help="staging data directory (default: site/data)",
+    )
+    args = parser.parse_args()
+    SITE = args.output.resolve()
+    if Path(SITE.anchor) == SITE or SITE == ROOT:
+        sys.exit("FAILED: refusing a broad output directory")
     t_start = time.time()
     dump_version = read_dump_version(DUMP_VERSION)
+    validate_query_contract(
+        load_query_contract(), sr.FACT_ROLES, sr.FACT_ATTRS
+    )
     # 烘焙读 Parquet,版本号却取自 dump:落后的 Parquet 会被贴上
     # 当前 dump 的版本号发布出去(只重跑烘焙时尤其容易发生)
     require_parquet_matches_dump(
@@ -1291,8 +1484,11 @@ def main() -> None:  # noqa: PLR0915
         subject_path,
         [
             "id",
+            "name",
+            "name_cn",
             "type",
             "platform_code",
+            "platform",
             "date",
             "score",
             "rank",
@@ -1331,7 +1527,7 @@ def main() -> None:  # noqa: PLR0915
     person_ranges, person_rows = emit_sorted_entity_parquet(
         entities_pack,
         person_path,
-        ["id", "type", "career", "comments", "collects"],
+        ["id", "name", "type", "career", "comments", "collects"],
         width=sr.ENTITY_BLOCK_IDS,
         level=ent_level,
         row_for_index=person_row,
@@ -1351,7 +1547,7 @@ def main() -> None:  # noqa: PLR0915
     character_ranges, character_rows = emit_sorted_entity_parquet(
         entities_pack,
         character_path,
-        ["id", "role", "comments", "collects"],
+        ["id", "name", "role", "comments", "collects"],
         width=sr.ENTITY_BLOCK_IDS,
         level=ent_level,
         row_for_index=character_row,
@@ -1538,6 +1734,7 @@ def main() -> None:  # noqa: PLR0915
         fs_items: list[tuple[int, Any]] = []
         fs_empty = 0
         fs_raw = 0
+        fact_anchors = array("I")
         try:
             for ref, (encoded, mult) in enumerate(
                 merge_fact_runs(runs_by_kind)
@@ -1547,6 +1744,9 @@ def main() -> None:  # noqa: PLR0915
                 inc_kind = cast("str", decoded[0])
                 inc_parts = tuple(cast("list[int]", decoded[1]))
                 inc_attrs = tuple(cast("list[Any]", decoded[2]))
+                if not inc_parts:
+                    raise ValueError("canonical fact has no participant")
+                fact_anchors.append(inc_parts[0])
                 if inc_kind == "VOICE_CREDIT":
                     disk_attrs: tuple[Any, ...] = (
                         inc_attrs[0],
@@ -1584,6 +1784,8 @@ def main() -> None:  # noqa: PLR0915
             f"multiplicity 保留;去重敏感对账 {n_facts:,})"
         )
         log(f"incidence {n_incidence:,} 条,覆盖实体 {len(incid):,}")
+        np.asarray(fact_anchors, dtype="<u4").tofile(SITE / "fact-anchor.bin")
+        del fact_anchors
 
         pages_pack = PackFile("pages.pack")
         pages_level = sr.GZIP_LEVELS["pages"]
@@ -1730,6 +1932,10 @@ def main() -> None:  # noqa: PLR0915
         skel,
     )
 
+    # 名称与正文共用同一个成员级候选索引。Episode 名称先注册，正文
+    # 成员随后注册；候选只定位权威成员，不复制名称负载。
+    text_search = TextSearchBuilder()
+
     # ---- Episode 从属集合(结构记录;description 只留存在位)----
     eps_t = pq.read_table(
         PARQUET / "episode.parquet",
@@ -1754,6 +1960,12 @@ def main() -> None:  # noqa: PLR0915
     eps = eps_t.to_pydict()
     del eps_t
     n_eps = len(eps["id"])
+    episode_subject_index = build_episode_subject_index(
+        eps["id"], eps["subject_id"]
+    )
+    episode_subject_index.tofile(SITE / "episode-subject.bin")
+    episode_subject_count = len(episode_subject_index)
+    del episode_subject_index
     eps_by_subject: dict[int, list[list[Any]]] = defaultdict(list)
     for i in range(n_eps):
         eps_by_subject[eps["subject_id"][i]].append(
@@ -1825,13 +2037,33 @@ def main() -> None:  # noqa: PLR0915
             "g": [item[1] for item in chunk],
         }
 
+    def index_episode_identities(
+        loc: list[int],
+        chunk: list[tuple[int, Any]],
+        episode_rows: dict[int, list[list[Any]]] = eps_by_subject,
+    ) -> None:
+        text_search.add(
+            "episode-identity",
+            0,
+            [0, *loc],
+            (
+                str(name)
+                for subject_id, _entry in chunk
+                for episode in episode_rows[subject_id]
+                for name in episode[1:3]
+                if name
+            ),
+        )
+
     eps_ranges = emit_ranged(
         episodes_pack,
         eps_items,
         sr.EPISODE_BLOCK_SUBJECTS,
         eps_level,
         encode_eps,
+        index_episode_identities,
     )
+    del index_episode_identities
     episodes_pack.write()
     write_gzip_json(
         "episodes.idx",
@@ -1882,12 +2114,31 @@ def main() -> None:  # noqa: PLR0915
             (sr.KIND_PERSON, "person"),
             (sr.KIND_CHARACTER, "character"),
         ):
+
+            def add_entity_text_member(
+                loc: list[int],
+                chunk: list[tuple[int, Any]],
+                selected_family: str = family,
+                selected_kind: int = kind,
+            ) -> None:
+                text_search.add(
+                    selected_family,
+                    selected_kind,
+                    loc,
+                    (str(item[1]) for item in chunk),
+                )
+
             kind_ranges, kind_stats = emit_sorted_parquet_text(
                 pack,
                 PARQUET / f"{table}.parquet",
                 columns,
                 width=width,
                 level=level,
+                on_member=(
+                    add_entity_text_member
+                    if family == "entity-summary"
+                    else None
+                ),
             )
             ranges[str(kind)] = kind_ranges
             non_empty += kind_stats["non_empty"]
@@ -1954,6 +2205,16 @@ def main() -> None:  # noqa: PLR0915
         )
         if sr.member_fits(gz):
             loc = desc_pack.add(gz)
+            text_search.add(
+                family,
+                0,
+                loc,
+                (
+                    str(text)
+                    for _sid, pairs in chunk
+                    for _episode, text in pairs
+                ),
+            )
             desc_ranges.append([chunk[0][0], chunk[-1][0], *loc])
             return
         if len(chunk) > 1:
@@ -1974,6 +2235,12 @@ def main() -> None:  # noqa: PLR0915
                 emit_desc([(sid, part)])
                 continue
             loc = desc_pack.add(part_gz)
+            text_search.add(
+                family,
+                0,
+                loc,
+                (str(text) for _episode, text in part),
+            )
             desc_ranges.append([sid, sid, *loc, part[0][0], part[-1][0]])
 
     desc_items = sorted(desc_by_subject.items())
@@ -2014,12 +2281,19 @@ def main() -> None:  # noqa: PLR0915
             fs_items,
             empty_count=fs_empty,
             raw_bytes=fs_raw,
+            on_member=lambda loc, chunk: text_search.add(
+                "fact-summary",
+                0,
+                loc,
+                (str(item[1]) for item in chunk),
+            ),
         )
     )
     text_dir[family] = fact_summary_dir
     text_stats[family] = fact_summary_stats
     text_quantile_gate(family, fact_summary_sizes)
     write_gzip_json("text.idx", {"families": text_dir}, 6)
+    text_search.write()
     del fs_items
 
     # ---- 显示映射 ----
@@ -2117,6 +2391,15 @@ def main() -> None:  # noqa: PLR0915
         "owned_collections": {
             "episode": {"parent": "subject", "via": "subject_id"}
         },
+        "query": {
+            "schema": "atlas-release-query-v2",
+            "capabilities": [
+                "atlas-query-v2",
+                "fact-ref-v1",
+                "full-text-v1",
+            ],
+            "contractDigest": query_schema_digest(),
+        },
         "counts": counts,
         "text_bytes": {
             fam: {
@@ -2140,6 +2423,15 @@ def main() -> None:  # noqa: PLR0915
             "encoding": sr.RANK_ENCODING,
             "sentinel": sr.RANK_SENTINEL,
             "segments": rank_segments,
+        },
+        "episode_index": {
+            "encoding": "u32le-subject-id",
+            "sentinel": sr.EPISODE_SUBJECT_SENTINEL,
+            "count": episode_subject_count,
+        },
+        "fact_index": {
+            "encoding": "u32le-anchor-entity-key",
+            "count": n_facts,
         },
         "n_nodes": n,
         "n_edges_skeleton": n_edges_skeleton,

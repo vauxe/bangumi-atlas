@@ -1,0 +1,161 @@
+{
+  "schema": "atlas-query-v2",
+  "capabilities": [
+    "lookup",
+    "fullText",
+    "project",
+    "filter",
+    "sort",
+    "group",
+    "aggregate",
+    "traverse",
+    "evidence"
+  ],
+  "operatorSets": {
+    "identity": ["eq", "ne", "in", "isNull"],
+    "ordered": ["eq", "ne", "lt", "lte", "gt", "gte", "in", "isNull"],
+    "text": ["eq", "ne", "in", "isNull"],
+    "list": ["contains", "isNull"],
+    "tagList": ["contains", "isNull"],
+    "boolean": ["eq", "ne", "isNull"]
+  },
+  "search": {
+    "lookup": { "minNormalizedCharacters": 2 },
+    "fullText": { "minNormalizedCharacters": 2 }
+  },
+  "owners": {
+    "subject": {
+      "fields": {
+        "ref": { "type": "entity:subject", "operators": "identity", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group"] },
+        "id": { "type": "integer", "operators": "ordered", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "name": { "type": "string", "operators": "text", "source": "name", "exposure": "query", "capabilities": ["lookup", "project", "filter", "sort", "group", "evidence"] },
+        "nameCn": { "type": "string", "operators": "text", "source": "name", "exposure": "query", "capabilities": ["lookup", "project", "filter", "sort", "group", "evidence"] },
+        "nameVariant": { "type": "string[]", "source": "derived:scriptVariant", "exposure": "query", "capabilities": ["lookup", "evidence"] },
+        "type": { "type": "integer", "operators": "identity", "enum": "subject_type", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group"] },
+        "platform": { "type": "string", "operators": "text", "source": "derived:type+platformCode", "nullable": true, "exposure": "query", "capabilities": ["project", "filter", "sort", "group"] },
+        "date": { "type": "string", "operators": "ordered", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group"] },
+        "year": { "type": "integer", "operators": "ordered", "source": "derived:date", "nullable": true, "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "score": { "type": "number", "operators": "ordered", "source": "core", "nullable": true, "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "rank": { "type": "integer", "operators": "ordered", "source": "core", "nullable": true, "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "nsfw": { "type": "boolean", "operators": "boolean", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "group"] },
+        "wish": { "type": "integer", "operators": "ordered", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "done": { "type": "integer", "operators": "ordered", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "doing": { "type": "integer", "operators": "ordered", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "onHold": { "type": "integer", "operators": "ordered", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "dropped": { "type": "integer", "operators": "ordered", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "series": { "type": "boolean", "operators": "boolean", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "group"] },
+        "scoreDetails": { "type": "number[]", "source": "core", "exposure": "evidence", "capabilities": ["evidence"] },
+        "metaTags": { "type": "string[]", "operators": "list", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "evidence"] },
+        "tags": { "type": "tag[]", "operators": "tagList", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "evidence"] },
+        "hasSummary": { "type": "boolean", "source": "core", "exposure": "private", "capabilities": [] },
+        "summaryState": { "type": "string", "operators": "identity", "source": "derived:hasSummary", "exposure": "query", "capabilities": ["project", "filter", "group"] },
+        "hasInfobox": { "type": "boolean", "source": "core", "exposure": "private", "capabilities": [] },
+        "summary": { "type": "string", "source": "summary", "exposure": "query", "capabilities": ["fullText", "evidence"] },
+        "infobox": { "type": "string", "source": "infobox", "exposure": "evidence", "capabilities": ["evidence"] }
+      }
+    },
+    "person": {
+      "fields": {
+        "ref": { "type": "entity:person", "operators": "identity", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group"] },
+        "id": { "type": "integer", "operators": "ordered", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "name": { "type": "string", "operators": "text", "source": "name", "exposure": "query", "capabilities": ["lookup", "project", "filter", "sort", "group", "evidence"] },
+        "nameVariant": { "type": "string[]", "source": "derived:scriptVariant", "exposure": "query", "capabilities": ["lookup", "evidence"] },
+        "type": { "type": "integer", "operators": "identity", "enum": "person_type", "source": "derived:officialPersonType", "nullable": true, "exposure": "query", "capabilities": ["project", "filter", "sort", "group"] },
+        "career": { "type": "string[]", "operators": "list", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "evidence"] },
+        "comments": { "type": "integer", "operators": "ordered", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "collects": { "type": "integer", "operators": "ordered", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "hasSummary": { "type": "boolean", "source": "core", "exposure": "private", "capabilities": [] },
+        "summaryState": { "type": "string", "operators": "identity", "source": "derived:hasSummary", "exposure": "query", "capabilities": ["project", "filter", "group"] },
+        "hasInfobox": { "type": "boolean", "source": "core", "exposure": "private", "capabilities": [] },
+        "summary": { "type": "string", "source": "summary", "exposure": "query", "capabilities": ["fullText", "evidence"] },
+        "infobox": { "type": "string", "source": "infobox", "exposure": "evidence", "capabilities": ["evidence"] }
+      }
+    },
+    "character": {
+      "fields": {
+        "ref": { "type": "entity:character", "operators": "identity", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group"] },
+        "id": { "type": "integer", "operators": "ordered", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "name": { "type": "string", "operators": "text", "source": "name", "exposure": "query", "capabilities": ["lookup", "project", "filter", "sort", "group", "evidence"] },
+        "nameVariant": { "type": "string[]", "source": "derived:scriptVariant", "exposure": "query", "capabilities": ["lookup", "evidence"] },
+        "role": { "type": "integer", "operators": "identity", "enum": "character_role", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group"] },
+        "comments": { "type": "integer", "operators": "ordered", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "collects": { "type": "integer", "operators": "ordered", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "hasSummary": { "type": "boolean", "source": "core", "exposure": "private", "capabilities": [] },
+        "summaryState": { "type": "string", "operators": "identity", "source": "derived:hasSummary", "exposure": "query", "capabilities": ["project", "filter", "group"] },
+        "hasInfobox": { "type": "boolean", "source": "core", "exposure": "private", "capabilities": [] },
+        "summary": { "type": "string", "source": "summary", "exposure": "query", "capabilities": ["fullText", "evidence"] },
+        "infobox": { "type": "string", "source": "infobox", "exposure": "evidence", "capabilities": ["evidence"] }
+      }
+    },
+    "episode": {
+      "fields": {
+        "ref": { "type": "entity:episode", "operators": "identity", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group"] },
+        "id": { "type": "integer", "operators": "ordered", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "subjectRef": { "type": "entity:subject", "operators": "identity", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "group", "traverse"] },
+        "name": { "type": "string", "operators": "text", "source": "core", "exposure": "query", "capabilities": ["lookup", "project", "filter", "sort", "group", "evidence"] },
+        "nameCn": { "type": "string", "operators": "text", "source": "core", "exposure": "query", "capabilities": ["lookup", "project", "filter", "sort", "group", "evidence"] },
+        "description": { "type": "string", "source": "episodeDescription", "exposure": "query", "capabilities": ["fullText", "evidence"] },
+        "hasDescription": { "type": "boolean", "source": "core", "exposure": "private", "capabilities": [] },
+        "descriptionState": { "type": "string", "operators": "identity", "source": "derived:hasDescription", "exposure": "query", "capabilities": ["project", "filter", "group"] },
+        "airdate": { "type": "string", "operators": "ordered", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group"] },
+        "year": { "type": "integer", "operators": "ordered", "source": "derived:airdate", "nullable": true, "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "disc": { "type": "integer", "operators": "ordered", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "duration": { "type": "string", "operators": "text", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "evidence"] },
+        "sort": { "type": "number", "operators": "ordered", "source": "core", "nullable": true, "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "aggregate"] },
+        "type": { "type": "integer", "operators": "identity", "enum": "episode_type", "source": "core", "exposure": "query", "capabilities": ["project", "filter", "sort", "group"] }
+      }
+    }
+  },
+  "factFields": {
+    "ref": { "type": "fact-ref", "source": "core", "exposure": "query", "capabilities": ["project", "evidence"] },
+    "multiplicity": { "type": "integer", "source": "core", "exposure": "evidence", "capabilities": ["evidence"] }
+  },
+  "facts": {
+    "RELATES_TO": {
+      "roles": { "source": "subject", "target": "subject" },
+      "fields": {
+        "relationType": { "type": "integer", "operators": "identity", "enum": "fact_labels.RELATES_TO", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "evidence"] },
+        "sortOrder": { "type": "integer", "exposure": "evidence", "capabilities": ["evidence"] }
+      }
+    },
+    "WORKED_ON": {
+      "roles": { "person": "person", "subject": "subject" },
+      "fields": {
+        "position": { "type": "integer", "operators": "identity", "enum": "fact_labels.WORKED_ON", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "evidence"] },
+        "appearEps": { "type": "string", "exposure": "evidence", "capabilities": ["evidence"] }
+      }
+    },
+    "APPEARS_IN": {
+      "roles": { "character": "character", "subject": "subject" },
+      "fields": {
+        "type": { "type": "integer", "operators": "identity", "enum": "fact_labels.APPEARS_IN", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "evidence"] },
+        "sortOrder": { "type": "integer", "exposure": "evidence", "capabilities": ["evidence"] }
+      }
+    },
+    "VOICE_CREDIT": {
+      "roles": { "person": "person", "character": "character", "subjectContext": "subject" },
+      "fields": {
+        "type": { "type": "integer", "operators": "identity", "enum": "fact_labels.VOICE_CREDIT", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "evidence"] },
+        "hasSummary": { "type": "boolean", "exposure": "private", "capabilities": [] },
+        "summaryState": { "type": "string", "operators": "identity", "exposure": "query", "capabilities": ["project", "filter", "group"] },
+        "summary": { "type": "string", "exposure": "query", "capabilities": ["fullText", "evidence"] }
+      }
+    },
+    "PERSON_REL": {
+      "roles": { "source": "person", "target": "person" },
+      "fields": {
+        "relationType": { "type": "integer", "operators": "identity", "enum": "fact_labels.PERSON_REL", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "evidence"] },
+        "spoiler": { "type": "boolean", "operators": "boolean", "exposure": "query", "capabilities": ["project", "filter", "group", "evidence"] },
+        "ended": { "type": "boolean", "operators": "boolean", "exposure": "query", "capabilities": ["project", "filter", "group", "evidence"] }
+      }
+    },
+    "CHARACTER_REL": {
+      "roles": { "source": "character", "target": "character" },
+      "fields": {
+        "relationType": { "type": "integer", "operators": "identity", "enum": "fact_labels.CHARACTER_REL", "exposure": "query", "capabilities": ["project", "filter", "sort", "group", "evidence"] },
+        "spoiler": { "type": "boolean", "operators": "boolean", "exposure": "query", "capabilities": ["project", "filter", "group", "evidence"] },
+        "ended": { "type": "boolean", "operators": "boolean", "exposure": "query", "capabilities": ["project", "filter", "group", "evidence"] }
+      }
+    }
+  }
+}

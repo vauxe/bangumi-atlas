@@ -1,7 +1,7 @@
 {
   "schema": "structural-site-v1",
   "profile": "explorer-v1",
-  "schema_digest": "4f13c29184622c1b94f7ad2b4766115477ff98a92190535a596ba033a12a084a",
+  "schema_digest": "f9adc895eceba2fba97806ffe89ab962f5d7681bab759199a6ce8398015a531d",
   "rank": {
     "encoding": "u24le",
     "sentinel": 16777215

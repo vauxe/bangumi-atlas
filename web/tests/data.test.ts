@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
 import { Data, requireLongTextValue } from "../src/data";
-import type { Manifest, Names } from "../src/types";
 
 const originalFetch = globalThis.fetch;
 
@@ -16,12 +15,7 @@ test("returns an absent long text without loading the text index", async () => {
     requests++;
     throw new Error("unexpected request");
   }) as typeof fetch;
-  const names: Names = {
-    get: () => null,
-    row: () => null,
-    load: async () => undefined,
-  };
-  const data = new Data({} as Manifest, names);
+  const data = new Data();
 
   const result = await data.longText({
     kind: "entity-summary",

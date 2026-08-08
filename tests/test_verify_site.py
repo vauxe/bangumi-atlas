@@ -91,6 +91,20 @@ class ExpectedFactStoreTests(unittest.TestCase):
 
 
 class RoutingContractTests(unittest.TestCase):
+    def test_text_posting_decoder_rejects_noncanonical_values(self) -> None:
+        self.assertEqual(
+            verify_site.decode_delta_posting(
+                bytes([0, 1, 126, 1, 128, 124]), 5, 20_000
+            ),
+            [0, 1, 127, 128, 16_000],
+        )
+        for malformed in (bytes([128]), bytes([129, 0])):
+            with (
+                self.subTest(malformed=malformed),
+                self.assertRaises(ValueError),
+            ):
+                verify_site.decode_delta_posting(malformed, 1, 10)
+
     def test_binary_array_loader_rejects_trailing_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "index.bin"

@@ -190,6 +190,17 @@ class SiteReleaseContractTests(unittest.TestCase):
             ["norm", "matched", "rank", "display", "entity_kind"],
         )
 
+    def test_stable_identity_entity_blocks_are_self_naming(self) -> None:
+        self.assertEqual(sr.ENTITY_BLOCK_IDS, 4096)
+        self.assertEqual(
+            sr.TUPLE_SCHEMAS["entity"]["subject"][:2],
+            ["name", "name_cn|null"],
+        )
+        self.assertEqual(sr.TUPLE_SCHEMAS["entity"]["person"][0], "name")
+        self.assertEqual(sr.TUPLE_SCHEMAS["entity"]["person"][1], "type")
+        self.assertEqual(sr.TUPLE_SCHEMAS["entity"]["character"][0], "name")
+        self.assertEqual(sr.TUPLE_SCHEMAS["entity"]["character"][1], "role")
+
     def test_search_bigram_hash_is_stable_across_unicode_codepoints(
         self,
     ) -> None:
