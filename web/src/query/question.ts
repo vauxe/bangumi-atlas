@@ -226,10 +226,10 @@ function baseOperators(
 }
 
 function limit(value: number | null | undefined): number | null {
-  if (value === undefined) return 200;
+  if (value === undefined) return null;
   if (value === null) return null;
-  if (!Number.isSafeInteger(value) || value < 0 || value > 10_000)
-    throw new TypeError("question limit must be between 0 and 10000");
+  if (!Number.isSafeInteger(value) || value < 0)
+    throw new TypeError("question limit must be a non-negative integer");
   return value;
 }
 
@@ -375,7 +375,7 @@ function understandBundle(question: UnderstandQuestion): QueryBundle {
             roles,
           },
         },
-        limit: 200,
+        limit: null,
       },
       answer: {
         shape: "relation-group",

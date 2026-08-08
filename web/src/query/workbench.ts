@@ -79,6 +79,8 @@ export class QueryWorkbench {
   private readonly runButton = action("查询", "query-run");
   private readonly editor: QueryDocumentEditor;
   private controller: AbortController | null = null;
+  private running = false;
+  private runnable = true;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private pending: LoweredQueryEditorDocument | null = null;
   private lastBundle = "";
@@ -153,7 +155,9 @@ export class QueryWorkbench {
     );
     close.addEventListener("click", () => this.close());
     reset.addEventListener("click", () => this.newQuery());
-    this.runButton.addEventListener("click", () => this.runCurrent());
+    this.runButton.addEventListener("click", () =>
+      this.running ? this.cancelCurrent() : this.runCurrent()
+    );
     addList.addEventListener("click", (event) => {
       const button = (event.target as HTMLElement)
         .closest<HTMLButtonElement>("[data-clause]");
@@ -258,7 +262,7 @@ export class QueryWorkbench {
   sync(bundle: QueryBundle | null): void {
     if (!bundle) {
       if (!this.lastBundle) return;
-      this.controller?.abort(new DOMException("query navigation", "AbortError"));
+      this.abortCurrent(new DOMException("query navigation", "AbortError"));
       this.lastBundle = "";
       this.pushNextUrl = false;
       this.answers.replaceChildren();
@@ -299,7 +303,7 @@ export class QueryWorkbench {
   }
 
   private newQuery(): void {
-    this.controller?.abort(new DOMException("new query", "AbortError"));
+    this.abortCurrent(new DOMException("new query", "AbortError"));
     this.lastBundle = "";
     this.pushNextUrl = false;
     state.queryBundle = null;
@@ -328,12 +332,13 @@ export class QueryWorkbench {
     if (this.refreshTimer !== null) clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
     if (result.diagnostics.length) {
-      this.controller?.abort(new DOMException("incomplete query", "AbortError"));
-      this.runButton.disabled = true;
+      this.runnable = false;
+      this.abortCurrent(new DOMException("incomplete query", "AbortError"));
       this.setStatus(result.diagnostics[0]?.message ?? "当前查询不完整");
       return;
     }
-    this.runButton.disabled = false;
+    this.runnable = true;
+    this.updateRunButton();
     this.setStatus("");
     if (!this.ready || this.panel.hidden) return;
     this.refreshTimer = setTimeout(() => {
@@ -378,9 +383,10 @@ export class QueryWorkbench {
     if (this.refreshTimer !== null) clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
     const normalized = normalizeBundle(bundle);
-    this.controller?.abort(new DOMException("superseded query", "AbortError"));
+    this.abortCurrent(new DOMException("superseded query", "AbortError"));
     const controller = new AbortController();
     this.controller = controller;
+    this.setRunning(true);
     this.lastBundle = canonicalJson(normalized);
     const currentRelease = this.dependencies.releaseId();
     if (
@@ -389,6 +395,8 @@ export class QueryWorkbench {
     ) {
       this.answers.setAttribute("aria-busy", "false");
       this.setStatus("此查询使用的数据版本不在当前站点中");
+      this.controller = null;
+      this.setRunning(false);
       return;
     }
     if (persist) {
@@ -410,19 +418,23 @@ export class QueryWorkbench {
     });
     this.answers.setAttribute("aria-busy", "true");
     this.setStatus("查询中…");
-    const results = await commitRenderedResults(
-      controller.signal,
-      cards.map(({ card, section }) =>
-        this.loadSection(card, section, currentRelease, controller.signal)
-      ),
-      () => {
-        this.answers.replaceChildren(...cards.map(({ card }) => card));
-        this.answers.setAttribute("aria-busy", "false");
-      },
-    );
-    if (results) {
-      const failed = results.filter((ok) => !ok).length;
-      this.setStatus(failed ? `${failed} 组结果加载失败` : "");
+    try {
+      const results = await commitRenderedResults(
+        controller.signal,
+        cards.map(({ card, section }) =>
+          this.loadSection(card, section, currentRelease, controller.signal)
+        ),
+        () => {
+          this.answers.replaceChildren(...cards.map(({ card }) => card));
+          this.answers.setAttribute("aria-busy", "false");
+        },
+      );
+      if (results) {
+        const failed = results.filter((ok) => !ok).length;
+        this.setStatus(failed ? `${failed} 组结果加载失败` : "");
+      }
+    } finally {
+      if (this.controller === controller) this.setRunning(false);
     }
   }
 
@@ -459,6 +471,7 @@ export class QueryWorkbench {
         }
         if (!result.hasMore) return;
         loadingMore = true;
+        if (this.controller?.signal === signal) this.setRunning(true);
         try {
           const next = await this.dependencies.execute(section, {
             offset: result.rows.length,
@@ -472,6 +485,7 @@ export class QueryWorkbench {
           this.showError(error);
         } finally {
           loadingMore = false;
+          if (this.controller?.signal === signal) this.setRunning(false);
         }
       };
       const render = (): void => {
@@ -502,6 +516,30 @@ export class QueryWorkbench {
 
   private showError(error: unknown): void {
     this.setStatus(error instanceof Error ? error.message : "查询无效");
+  }
+
+  private cancelCurrent(): void {
+    if (!this.controller) return;
+    this.abortCurrent(new DOMException("用户取消查询", "AbortError"));
+    this.setStatus("已取消");
+  }
+
+  private abortCurrent(reason: DOMException): void {
+    const controller = this.controller;
+    this.controller = null;
+    controller?.abort(reason);
+    this.answers.setAttribute("aria-busy", "false");
+    this.setRunning(false);
+  }
+
+  private setRunning(running: boolean): void {
+    this.running = running;
+    this.updateRunButton();
+  }
+
+  private updateRunButton(): void {
+    this.runButton.textContent = this.running ? "取消" : "查询";
+    this.runButton.disabled = !this.running && !this.runnable;
   }
 
   private resultField(

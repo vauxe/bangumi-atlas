@@ -173,6 +173,42 @@ test("client correlates results and forwards cancellation", async () => {
   client.dispose();
 });
 
+test("hard cancellation terminates a busy worker and recreates it", async () => {
+  const ports: Array<{
+    sent: unknown[];
+    terminated: boolean;
+    postMessage(message: unknown): void;
+    addEventListener(): void;
+    removeEventListener(): void;
+    terminate(): void;
+  }> = [];
+  const client = new QueryWorkerClient(() => {
+    const port = {
+      sent: [] as unknown[],
+      terminated: false,
+      postMessage(message: unknown) { this.sent.push(message); },
+      addEventListener() {},
+      removeEventListener() {},
+      terminate() { this.terminated = true; },
+    };
+    ports.push(port);
+    return port;
+  });
+  const controller = new AbortController();
+  const pending = client.execute(query, {}, { pageSize: 20, signal: controller.signal });
+
+  controller.abort(new DOMException("stop now", "AbortError"));
+
+  await assert.rejects(pending, /stop now/);
+  assert.equal(ports[0]?.terminated, true);
+  assert.equal(ports.length, 2);
+  assert.equal((ports[0]?.sent.at(-1) as { type?: string })?.type, "execute");
+  const replacement = client.execute(query, {}, { pageSize: 20 });
+  assert.equal((ports[1]?.sent.at(-1) as { type?: string })?.type, "execute");
+  client.dispose();
+  await assert.rejects(replacement, /disposed/);
+});
+
 test("sends Atlas Query source to the same cancellable worker boundary", async () => {
   const sent: unknown[] = [];
   const port = {

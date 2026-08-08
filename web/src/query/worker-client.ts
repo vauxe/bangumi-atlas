@@ -51,6 +51,8 @@ interface PendingRequest {
 export class QueryWorkerClient {
   private nextId = 1;
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly factory: (() => WorkerPort) | null;
+  private worker: WorkerPort;
   private readonly onMessage = (event: MessageEvent<unknown>): void => {
     const response = event.data as Partial<QueryWorkerResponse>;
     if (
@@ -72,8 +74,15 @@ export class QueryWorkerClient {
     else request.reject(new QueryClientError("QUERY_FAILED", "查询响应无效"));
   };
 
-  constructor(private readonly worker: WorkerPort) {
-    worker.addEventListener("message", this.onMessage);
+  constructor(worker: WorkerPort | (() => WorkerPort)) {
+    if (typeof worker === "function") {
+      this.factory = worker;
+      this.worker = worker();
+    } else {
+      this.factory = null;
+      this.worker = worker;
+    }
+    this.worker.addEventListener("message", this.onMessage);
   }
 
   execute(
@@ -125,6 +134,10 @@ export class QueryWorkerClient {
       if (options.signal) {
         pending.onAbort = () => {
           if (!this.pending.has(requestId)) return;
+          if (this.factory) {
+            this.restart(options.signal?.reason);
+            return;
+          }
           this.finish(requestId, pending);
           this.worker.postMessage({
             schema: QUERY_WIRE_SCHEMA,
@@ -159,5 +172,17 @@ export class QueryWorkerClient {
     this.pending.delete(requestId);
     if (request.signal && request.onAbort)
       request.signal.removeEventListener("abort", request.onAbort);
+  }
+
+  private restart(reason: unknown): void {
+    const failure = reason ?? new DOMException("query cancelled", "AbortError");
+    this.worker.removeEventListener("message", this.onMessage);
+    this.worker.terminate?.();
+    for (const [requestId, request] of this.pending) {
+      this.finish(requestId, request);
+      request.reject(failure);
+    }
+    this.worker = this.factory!();
+    this.worker.addEventListener("message", this.onMessage);
   }
 }

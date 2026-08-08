@@ -759,7 +759,6 @@ class LimitView extends ClauseView {
     super("limit", node, view, getPos);
     this.value.type = "number";
     this.value.min = "1";
-    this.value.max = "10000";
     this.value.step = "1";
     this.value.size = 5;
     this.value.value = String(node.attrs.raw);

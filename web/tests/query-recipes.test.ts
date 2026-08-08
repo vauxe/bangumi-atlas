@@ -40,6 +40,24 @@ test("context actions compile to exact set and path sections", () => {
   assert.doesNotThrow(() => encodeBundle(path));
 });
 
+test("recipes do not truncate result sets behind the user's back", () => {
+  const fullText = fullTextRecipe("星空");
+  const comparison = comparisonRecipe("subject:1", "subject:2");
+
+  assert.equal(
+    Object.values(fullText.sections).every((section) => section.query.limit === null),
+    true,
+  );
+  assert.equal(
+    Object.values(comparison.sections).every((section) => section.query.limit === null),
+    true,
+  );
+  assert.doesNotThrow(() => pathRecipe("subject:1", "subject:2", {
+    maxHops: 7,
+    maxPaths: 21,
+  }));
+});
+
 test("comparison recipes keep readable names beside stable references", () => {
   const comparison = comparisonRecipe("subject:1", "person:2");
 

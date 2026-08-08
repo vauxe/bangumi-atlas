@@ -4,7 +4,6 @@ import { test } from "node:test";
 import { normalizeQuery, queryDigest } from "../src/query/canonical";
 import type { QueryDocument } from "../src/query/document";
 import { executeQuery, type QueryDataSource } from "../src/query/engine";
-import { QUERY_SECURITY_PROFILE } from "../src/query/security";
 
 const empty: QueryDataSource = { scan: async function* () {} };
 
@@ -100,24 +99,12 @@ test("validates exists correlation columns and types", async () => {
   );
 });
 
-test("bounds all rows consumed by set branches", async () => {
-  const execution = QUERY_SECURITY_PROFILE.execution as { maxSetRows: number };
-  const previous = execution.maxSetRows;
-  execution.maxSetRows = 2;
-  try {
-    await assert.rejects(
-      executeQuery(setQuery("union"), {}, empty, { pageSize: 20 }),
-      /set row budget exceeded/,
-    );
-  } finally {
-    execution.maxSetRows = previous;
-  }
+test("does not impose a row quota on set branches", async () => {
+  const result = await executeQuery(setQuery("union"), {}, empty, { pageSize: 20 });
+  assert.deepEqual(result.rows, [{ value: 1 }, { value: 2 }, { value: 3 }]);
 });
 
-test("bounds duplicate rows consumed by Exists", async () => {
-  const execution = QUERY_SECURITY_PROFILE.execution as { maxSetRows: number };
-  const previous = execution.maxSetRows;
-  execution.maxSetRows = 2;
+test("does not impose a row quota on correlated existence", async () => {
   const query: QueryDocument = {
     schema: "atlas-query-document-v2",
     root: "exists",
@@ -133,12 +120,6 @@ test("bounds duplicate rows consumed by Exists", async () => {
       },
     },
   };
-  try {
-    await assert.rejects(
-      executeQuery(query, {}, empty, { pageSize: 20 }),
-      /exists match-row budget exceeded/,
-    );
-  } finally {
-    execution.maxSetRows = previous;
-  }
+  const result = await executeQuery(query, {}, empty, { pageSize: 20 });
+  assert.deepEqual(result.rows, [{ entity: 1 }]);
 });

@@ -19,7 +19,7 @@ import type {
   QueryDocument,
   QueryOperator,
 } from "./document";
-import { QUERY_SECURITY_PROFILE, QueryBudgetError } from "./security";
+import { QUERY_SECURITY_PROFILE } from "./security";
 import {
   queryResultColumns,
   type QueryResultColumn,
@@ -187,12 +187,6 @@ export type RowEvidence = Record<string, Evidence[]>;
 
 interface ExecutionContext {
   evidence: WeakMap<QueryRow, RowEvidence | (() => RowEvidence)>;
-  aggregateDistinctValues: number;
-  expandedFacts: number;
-  pathFactsRead: number;
-  pathStates: number;
-  scanRows: number;
-  setRows: number;
   scanFields: Map<string, readonly string[]>;
   scanAccess: ScanAccess;
 }
@@ -605,7 +599,6 @@ function addAggregateValue(
   operator: AggregateOperator,
   state: AggregateState,
   input: QueryRow,
-  context: ExecutionContext,
 ): void {
   operator.metrics.forEach((metric, index) => {
     const accumulator = state.metrics[index];
@@ -621,12 +614,6 @@ function addAggregateValue(
       const key = canonicalJson(jsonValue(value));
       if (!accumulator.distinct?.has(key)) {
         accumulator.distinct?.add(key);
-        context.aggregateDistinctValues++;
-        if (
-          context.aggregateDistinctValues >
-          QUERY_SECURITY_PROFILE.execution.maxAggregateDistinctValues
-        )
-          throw new QueryBudgetError("aggregate distinct-value budget exceeded");
       }
       return;
     }
@@ -747,7 +734,6 @@ async function findShortestPaths(
   operator: PathOperator,
   input: QueryRow,
   source: QueryDataSource,
-  context: ExecutionContext,
   signal?: AbortSignal,
 ): Promise<PathValue[]> {
   if (!source.entity || !source.facts)
@@ -781,9 +767,6 @@ async function findShortestPaths(
   const traversals = new Map(
     operator.traversals.map((traversal) => [traversal.factKind, traversal.rolePairs]),
   );
-  context.pathStates++;
-  if (context.pathStates > QUERY_SECURITY_PROFILE.path.maxStates)
-    throw new QueryBudgetError("path state budget exceeded");
   let frontier: PathCandidate[] = [{
     value: {
       kind: "path",
@@ -805,9 +788,6 @@ async function findShortestPaths(
       if (!current) throw new TypeError("path candidate has no current node");
       for await (const fact of source.facts(current.ref, signal)) {
         signal?.throwIfAborted();
-        context.pathFactsRead++;
-        if (context.pathFactsRead > QUERY_SECURITY_PROFILE.path.maxFactsRead)
-          throw new QueryBudgetError("path fact-read budget exceeded");
         const rolePairs = traversals.get(fact.factKind);
         if (!rolePairs || candidate.factRefs.has(fact.ref)) continue;
         validateFactRoles(fact);
@@ -832,9 +812,6 @@ async function findShortestPaths(
           if (destination.has(key)) continue;
           const entity = await loadEntity(toRef);
           if (!entity) continue;
-          context.pathStates++;
-          if (context.pathStates > QUERY_SECURITY_PROFILE.path.maxStates)
-            throw new QueryBudgetError("path state budget exceeded");
           destination.set(key, {
             value: {
               kind: "path",
@@ -884,9 +861,6 @@ async function* rowsFor(
         context.scanAccess,
       )) {
         signal?.throwIfAborted();
-        context.scanRows++;
-        if (context.scanRows > QUERY_SECURITY_PROFILE.execution.maxScanRows)
-          throw new QueryBudgetError("entity scan-row budget exceeded");
         if (entity.owner !== operator.owner)
           throw new TypeError("data source returned the wrong entity owner");
         yield { [operator.binding]: entity };
@@ -1099,12 +1073,6 @@ async function* rowsFor(
           throw new TypeError("fact-match anchor is not an entity");
         for await (const fact of source.facts(anchorEntity.ref, signal)) {
           signal?.throwIfAborted();
-          context.expandedFacts++;
-          if (
-            context.expandedFacts >
-              QUERY_SECURITY_PROFILE.execution.maxExpandedFacts
-          )
-            throw new QueryBudgetError("expanded fact-read budget exceeded");
           if (fact.factKind !== operator.factKind) continue;
           parseFactRef(fact.ref);
           const anchorRef = fact.roles[anchor[0]];
@@ -1204,12 +1172,8 @@ async function* rowsFor(
         if (!state) {
           state = createAggregateState(operator, groupRow, groupEvidence);
           groups.set(key, state);
-          if (
-            groups.size > QUERY_SECURITY_PROFILE.execution.maxAggregateGroups
-          )
-            throw new QueryBudgetError("aggregate group budget exceeded");
         }
-        addAggregateValue(operator, state, row, context);
+        addAggregateValue(operator, state, row);
       }
       if (!groups.size && !operator.groupBy.length) {
         const state = createAggregateState(operator, {}, {});
@@ -1223,7 +1187,7 @@ async function* rowsFor(
     }
     case "path":
       for await (const row of rowsFor(operator.input, operators, source, context, signal)) {
-        const paths = await findShortestPaths(operator, row, source, context, signal);
+        const paths = await findShortestPaths(operator, row, source, signal);
         for (const path of paths) {
           const expanded = { ...row, [operator.binding]: path };
           yield rememberEvidence(context, expanded, {
@@ -1241,9 +1205,6 @@ async function* rowsFor(
       const matches = new Map<string, RowEvidence>();
       for await (const row of rowsFor(operator.match, operators, source, context, signal)) {
         signal?.throwIfAborted();
-        context.setRows++;
-        if (context.setRows > QUERY_SECURITY_PROFILE.execution.maxSetRows)
-          throw new QueryBudgetError("exists match-row budget exceeded");
         const key = canonicalJson(operator.columns.map((column) =>
           jsonValue(own(row, column.inner)),
         ));
@@ -1273,9 +1234,6 @@ async function* rowsFor(
       ): Promise<Map<string, QueryRow>> => {
         const values = new Map<string, QueryRow>();
         for await (const row of rowsFor(branch.input, operators, source, context, signal)) {
-          context.setRows++;
-          if (context.setRows > QUERY_SECURITY_PROFILE.execution.maxSetRows)
-            throw new QueryBudgetError("set row budget exceeded");
           const mapped: QueryRow = {};
           const evidence: RowEvidence = {};
           for (const column of branch.columns) {
@@ -1288,8 +1246,6 @@ async function* rowsFor(
           const key = rowKey(mapped);
           const previous = values.get(key);
           if (!previous) values.set(key, rememberEvidence(context, mapped, evidence));
-          if (values.size > QUERY_SECURITY_PROFILE.execution.maxSetRows)
-            throw new QueryBudgetError("set row budget exceeded");
         }
         return values;
       };
@@ -1307,11 +1263,7 @@ async function* rowsFor(
                   rowEvidence(context, row),
                 ),
               );
-            else {
-              result.set(key, row);
-              if (result.size > QUERY_SECURITY_PROFILE.execution.maxSetRows)
-                throw new QueryBudgetError("set row budget exceeded");
-            }
+            else result.set(key, row);
           }
         } else if (operator.kind === "intersect") {
           for (const [key, row] of result)
@@ -1454,12 +1406,9 @@ export async function executeQuery(
   const offset = options.offset ?? 0;
   if (
     !Number.isSafeInteger(offset) ||
-    offset < 0 ||
-    offset > QUERY_SECURITY_PROFILE.execution.maxOffset
+    offset < 0
   )
-    throw new TypeError(
-      `offset must be between 0 and ${QUERY_SECURITY_PROFILE.execution.maxOffset}`,
-    );
+    throw new TypeError("offset must be a non-negative integer");
   const query = normalizeQuery(document, parameters);
   const columns = queryResultColumns(query);
   const limit = query.limit ?? Number.POSITIVE_INFINITY;
@@ -1469,12 +1418,6 @@ export async function executeQuery(
   const top: RankedRow[] = [];
   const context: ExecutionContext = {
     evidence: new WeakMap(),
-    aggregateDistinctValues: 0,
-    expandedFacts: 0,
-    pathFactsRead: 0,
-    pathStates: 0,
-    scanRows: 0,
-    setRows: 0,
     scanFields: scanFieldRequirements(query.operators, query.root, columns),
     scanAccess: canStopAtLimit ? "stream" : "whole",
   };
@@ -1494,11 +1437,6 @@ export async function executeQuery(
     const key = distinct ? rowKey(row) : null;
     if (key !== null && distinct?.has(key)) continue;
     if (key !== null) distinct?.add(key);
-    if (
-      distinct &&
-      distinct.size > QUERY_SECURITY_PROFILE.execution.maxDistinctRows
-    )
-      throw new QueryBudgetError("distinct row budget exceeded");
     totalMatches++;
     const ranked = { row, key, ordinal: ordinal++ };
     if (orderBy.length) insertTop(top, ranked, cap, orderBy);

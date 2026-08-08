@@ -1,6 +1,5 @@
 import type { QueryResult } from "./engine";
 import { SiteRuntimeError } from "../site-error";
-import { QueryBudgetError } from "./security";
 import {
   QUERY_WIRE_SCHEMA,
   encodeQueryResult,
@@ -24,8 +23,6 @@ function publicError(
 ): { code: QueryErrorCode; message: string } {
   if (aborted)
     return { code: "CANCELLED", message: "查询已取消" };
-  if (error instanceof QueryBudgetError)
-    return { code: "BUDGET_REQUIRED", message: "查询范围过大，请收紧条件" };
   if (error instanceof SiteRuntimeError)
     return { code: error.code, message: error.message };
   if (error instanceof TypeError)

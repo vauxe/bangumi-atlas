@@ -9,7 +9,6 @@ import {
   type PathValue,
   type QueryDataSource,
 } from "../src/query/engine";
-import { QUERY_SECURITY_PROFILE } from "../src/query/security";
 
 const entities: EntityValue[] = [
   { kind: "entity", owner: "person", ref: "person:1", fields: { name: "P" } },
@@ -172,10 +171,7 @@ test("ignores an unresolved archived role without aborting other path branches",
   assert.equal(result.rows.length, 2);
 });
 
-test("shares the path fact budget across every endpoint row", async () => {
-  const pathLimits = QUERY_SECURITY_PROFILE.path as { maxFactsRead: number };
-  const previous = pathLimits.maxFactsRead;
-  pathLimits.maxFactsRead = 1;
+test("does not impose a hidden fact-read quota on paths", async () => {
   const relation = facts[0] as FactValue;
   const boundedSource: QueryDataSource = {
     scan: async function* () {},
@@ -213,12 +209,6 @@ test("shares the path fact budget across every endpoint row", async () => {
       },
     },
   };
-  try {
-    await assert.rejects(
-      executeQuery(query, {}, boundedSource, { pageSize: 10 }),
-      /path fact-read budget exceeded/,
-    );
-  } finally {
-    pathLimits.maxFactsRead = previous;
-  }
+  const result = await executeQuery(query, {}, boundedSource, { pageSize: 10 });
+  assert.equal(result.rows.length, 2);
 });

@@ -56,12 +56,10 @@ export class RecipeView extends ClauseView {
       this.maxHops = literalInput("最大路径跳数");
       this.maxHops.type = "number";
       this.maxHops.min = "1";
-      this.maxHops.max = "6";
       this.maxHops.value = String(node.attrs.maxHops);
       this.maxPaths = literalInput("最多路径数");
       this.maxPaths.type = "number";
       this.maxPaths.min = "1";
-      this.maxPaths.max = "20";
       this.maxPaths.value = String(node.attrs.maxPaths);
       this.maxHops.addEventListener("input", () =>
         this.updateAttrs({ maxHops: Number(this.maxHops?.value) })

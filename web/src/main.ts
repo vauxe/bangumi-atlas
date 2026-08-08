@@ -432,7 +432,7 @@ async function boot(): Promise<void> {
   let queryClient: QueryWorkerClient | null = null;
   const client = (): QueryWorkerClient => {
     queryClient ??= new QueryWorkerClient(
-      new Worker(new URL("query-worker.js", document.baseURI)),
+      () => new Worker(new URL("query-worker.js", document.baseURI)),
     );
     return queryClient;
   };

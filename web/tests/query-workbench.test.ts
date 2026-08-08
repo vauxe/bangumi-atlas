@@ -36,6 +36,11 @@ test("offers one readable text-scope control for each entity type", () => {
   ]);
 });
 
+test("accepts a user-chosen result count without an arbitrary product maximum", () => {
+  assert.equal(parseExplorerLimit("1000000"), 1_000_000);
+  assert.throws(() => parseExplorerLimit("0"), /正整数/);
+});
+
 test("keeps internal identifiers out of user-facing sort options", () => {
   assert.equal(querySortFields("subject").includes("id"), false);
   assert.equal(querySortFields("subject").includes("ref"), false);
@@ -136,13 +141,13 @@ test("combines visible conditions with the conjunction the user selected", () =>
   assert.equal(combineExplorerConditions("all", []), undefined);
 });
 
-test("offers projectable result fields and validates a bounded result count", () => {
+test("offers projectable result fields and validates a positive result count", () => {
   assert.equal(queryProjectFields("episode").includes("subjectRef"), false);
   assert.equal(queryProjectFields("episode").includes("descriptionState"), true);
   assert.equal(queryProjectFields("subject").includes("scoreDetails"), false);
   assert.equal(parseExplorerLimit("50"), 50);
-  assert.throws(() => parseExplorerLimit("0"), /1 到 10000/);
-  assert.throws(() => parseExplorerLimit("10001"), /1 到 10000/);
+  assert.throws(() => parseExplorerLimit("0"), /正整数/);
+  assert.equal(parseExplorerLimit("10001"), 10_001);
 });
 
 test("resolves the related entity type from the fact role", () => {
