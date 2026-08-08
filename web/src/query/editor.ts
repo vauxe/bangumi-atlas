@@ -1,4 +1,4 @@
-import { history, redo, undo } from "prosemirror-history";
+import { closeHistory, history, redo, undo } from "prosemirror-history";
 import { keymap } from "prosemirror-keymap";
 import { Node as ProseMirrorNode, Schema, type NodeSpec } from "prosemirror-model";
 import {
@@ -209,6 +209,11 @@ export function deleteSelectedQueryNode(
     return false;
   dispatch?.(state.tr.delete(from, to).scrollIntoView());
   return true;
+}
+
+/** Keep one deliberate query command reversible without swallowing its neighbors. */
+export function queryCommandTransaction(transaction: Transaction): Transaction {
+  return closeHistory(transaction);
 }
 
 export interface QueryEditorDiagnostic {

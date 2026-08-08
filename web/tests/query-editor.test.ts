@@ -14,6 +14,7 @@ import {
   deleteSelectedQueryNode,
   lowerQueryEditorDocument,
   queryClauseInsertionPosition,
+  queryCommandTransaction,
   queryEditorSchema,
   readableQueryEditorDocument,
 } from "../src/query/editor";
@@ -59,6 +60,28 @@ test("deletes a selected semantic clause but preserves required document structu
 
   state = state.apply(state.tr.setSelection(NodeSelection.create(state.doc, 0)));
   assert.equal(deleteSelectedQueryNode(state), false);
+});
+
+test("keeps explicit semantic commands as separate undo steps", () => {
+  let state = createQueryEditorState(createQueryEditorDocument({ owner: "subject" }));
+  state = state.apply(queryCommandTransaction(state.tr.insert(
+    1,
+    queryEditorSchema.node("condition", {
+      field: "score", operator: "gte", raw: "8",
+    }),
+  )));
+  state = state.apply(queryCommandTransaction(state.tr.insert(
+    2,
+    queryEditorSchema.node("limit", { raw: "50" }),
+  )));
+
+  let restored = state;
+  assert.equal(undo(state, (transaction) => {
+    restored = state.apply(transaction);
+  }), true);
+  assert.deepEqual(restored.doc.toJSON().content?.map(
+    (node: { type: string }) => node.type,
+  ), ["find", "condition"]);
 });
 
 test("round-trips the ordinary query through one structural document", () => {
