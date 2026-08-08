@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  queryMatchSnippet,
+  queryRowMatchSnippet,
   queryValueText,
   renderAnswer,
 } from "../src/query/answer-view";
@@ -26,6 +28,10 @@ class FakeElement {
   className = "";
   textContent = "";
   type = "";
+  title = "";
+  scope = "";
+  colSpan = 1;
+  private listeners = new Map<string, () => void>();
 
   append(...children: FakeElement[]): void {
     this.children.push(...children);
@@ -35,7 +41,39 @@ class FakeElement {
     this.children = children;
   }
 
-  addEventListener(): void {}
+  addEventListener(type: string, listener: () => void): void {
+    this.listeners.set(type, listener);
+  }
+
+  setAttribute(): void {}
+
+  createTHead(): FakeElement {
+    const head = new FakeElement();
+    this.append(head);
+    return head;
+  }
+
+  createTBody(): FakeElement {
+    const body = new FakeElement();
+    this.append(body);
+    return body;
+  }
+
+  insertRow(): FakeElement {
+    const row = new FakeElement();
+    this.append(row);
+    return row;
+  }
+
+  insertCell(): FakeElement {
+    const cell = new FakeElement();
+    this.append(cell);
+    return cell;
+  }
+
+  click(): void {
+    this.listeners.get("click")?.();
+  }
 }
 
 function visibleText(element: FakeElement): string {
@@ -59,6 +97,42 @@ test("uses an entity's readable name while retaining its stable ref elsewhere", 
     ref: "subject:42",
     fields: { name: "Original", nameCn: "中文名" },
   }), "中文名");
+});
+
+test("shows context only for full-text matches, not duplicate name matches", () => {
+  assert.equal(queryMatchSnippet({ result: [{
+    kind: "text-range",
+    ref: "subject:42",
+    field: "nameCn",
+    utf8Range: [0, 6],
+    text: "机器人",
+    snippet: "机器人总动员",
+  }] }), undefined);
+  assert.equal(queryMatchSnippet({ result: [{
+    kind: "text-range",
+    ref: "subject:42",
+    field: "summary",
+    utf8Range: [3, 9],
+    text: "机器人",
+    snippet: "这是一个机器人的故事",
+  }] }), "这是一个机器人的故事");
+});
+
+test("does not present one member snippet as context for an aggregate row", () => {
+  const evidence = { result: [{
+    kind: "text-range" as const,
+    ref: "person:1" as const,
+    field: "summary",
+    utf8Range: [0, 6] as [number, number],
+    text: "动画",
+    snippet: "一条成员简介",
+  }] };
+
+  assert.equal(queryRowMatchSnippet({ count: 2885 }, evidence), undefined);
+  assert.equal(
+    queryRowMatchSnippet({ ref: "person:1" }, evidence),
+    "一条成员简介",
+  );
 });
 
 test("renders common entity codes as user-facing labels", () => {
@@ -108,6 +182,62 @@ test("uses the contract enum namespace for Episode types", () => {
     semantic: "episode.type",
     mappings,
   }), "特别篇");
+});
+
+test("renders union entity types as readable labels", () => {
+  assert.equal(queryValueText("subject", {
+    column: "entityType",
+    row: {},
+  }), "作品");
+  assert.equal(queryValueText("episode", {
+    column: "entityType",
+    row: {},
+  }), "分集");
+});
+
+test("lets users open an Episode result like every other entity", () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    createElement: () => new FakeElement(),
+  } as unknown as Document;
+  try {
+    const opened: string[] = [];
+    const container = new FakeElement();
+    renderAnswer(
+      container as unknown as HTMLElement,
+      { shape: "table", title: "查询结果" },
+      {
+        rows: [{ ref: "episode:7", name: "第 7 话" }],
+        evidence: [],
+        columns: { ref: { type: "entity-ref", semantic: "episode.ref" } },
+        totalMatches: 1,
+        visibleMatches: 1,
+        hasMore: false,
+        stability: "exact",
+        queryDigest: "a".repeat(64),
+        releaseId: "b".repeat(64),
+        coverage: {
+          schema: "atlas-coverage-v1",
+          atoms: ["owner:episode"],
+          digest: "c".repeat(64),
+        },
+        terminalEvidence: [{ kind: "completed-domain", coverage: "c".repeat(64) }],
+      },
+      { onEntity: (ref) => opened.push(ref) },
+    );
+
+    const resultButton = container.children[2]
+      ?.children[0]
+      ?.children[1]
+      ?.children[0]
+      ?.children[0]
+      ?.children[0];
+    assert.equal(resultButton?.textContent, "第 7 话");
+    resultButton?.click();
+    assert.deepEqual(opened, ["episode:7"]);
+  } finally {
+    globalThis.document = originalDocument;
+  }
 });
 
 test("keeps result UI focused on the answer instead of export internals", () => {

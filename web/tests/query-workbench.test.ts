@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { semanticValueLabel } from "../src/query/editor-controls";
-
 import {
   combineExplorerConditions,
   conditionEditorOperator,
@@ -26,11 +24,31 @@ import {
   queryStatisticColumns,
   queryTextScopes,
 } from "../src/query/workbench-model";
+import { queryNeedsWorkspace } from "../src/query/workbench";
 
-test("renders literal slots as readable query text instead of empty form fields", () => {
-  assert.equal(semanticValueLabel("机器人", "输入关键词", true), "“机器人”");
-  assert.equal(semanticValueLabel("", "输入关键词", true), "输入关键词");
-  assert.equal(semanticValueLabel("8", "输入数值"), "8");
+test("keeps plain name location compact and expands for structured answers", () => {
+  assert.equal(queryNeedsWorkspace({
+    kind: "list",
+    query: {
+      scope: ["subject", "person", "character"],
+      text: { value: "机器人", capability: "lookup" },
+    },
+  }), false);
+  assert.equal(queryNeedsWorkspace({
+    kind: "list",
+    query: {
+      scope: ["subject"],
+      condition: { kind: "compare", field: "score", operator: "gte", value: 8 },
+    },
+  }), true);
+  assert.equal(queryNeedsWorkspace({ kind: "list", allText: "时间旅行" }), true);
+  assert.equal(queryNeedsWorkspace({
+    kind: "aggregate",
+    query: {
+      owner: "subject",
+      aggregate: { groupBy: ["year"], metrics: [{ function: "count" }] },
+    },
+  }), true);
 });
 
 test("offers one readable text-scope control for each entity type", () => {

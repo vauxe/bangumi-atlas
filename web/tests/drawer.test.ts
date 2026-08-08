@@ -25,8 +25,10 @@ class FakeDrawerElement {
   innerHTML = "";
   inert = false;
   scrollTop = 0;
+  focusCount = 0;
   classList = new FakeClassList();
   focusedChild: object | null = null;
+  focusedEpisode = "";
   private attributes = new Map<string, string>();
   private clickListener: ((event: { target: object }) => void) | null = null;
 
@@ -72,8 +74,34 @@ class FakeDrawerElement {
     return node !== null && node === this.focusedChild;
   }
 
-  querySelector(): null {
-    return null;
+  querySelector(selector: string): { focus(): void; scrollIntoView(): void } | null {
+    if (!selector.includes("data-episode-row")) return null;
+    return {
+      focus: () => this.focusedEpisode = selector,
+      scrollIntoView: () => undefined,
+    };
+  }
+
+  focus(): void {
+    this.focusCount++;
+  }
+}
+
+class FakeButton {
+  hidden = true;
+  focusCount = 0;
+  private clickListener: (() => void) | null = null;
+
+  addEventListener(type: string, listener: () => void): void {
+    if (type === "click") this.clickListener = listener;
+  }
+
+  click(): void {
+    this.clickListener?.();
+  }
+
+  focus(): void {
+    this.focusCount++;
   }
 }
 
@@ -105,7 +133,11 @@ function makeDrawer(
     reportError: () => undefined,
     ...overrides,
   } as unknown as DrawerDeps;
-  return new Drawer(element as unknown as HTMLElement, deps);
+  return new Drawer(
+    element as unknown as HTMLElement,
+    new FakeButton() as unknown as HTMLButtonElement,
+    deps,
+  );
 }
 
 test("renders the Bangumi link as an accessible top action", () => {
@@ -175,6 +207,46 @@ test("hides the drawer without clearing the selected node", () => {
     assert.equal(element.classList.contains("open"), false);
     assert.equal(element.getAttribute("aria-hidden"), "true");
     assert.equal(state.selection, 42);
+  } finally {
+    state.selection = previousSelection;
+    if (originalDocument === undefined)
+      Reflect.deleteProperty(globalThis, "document");
+    else
+      Object.defineProperty(globalThis, "document", {
+        configurable: true,
+        value: originalDocument,
+      });
+  }
+});
+
+test("offers an explicit way to reopen the selected node after closing", () => {
+  const originalDocument = globalThis.document;
+  const previousSelection = state.selection;
+  const element = new FakeDrawerElement();
+  const reopen = new FakeButton();
+  let walked: number | null = null;
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: { activeElement: null, querySelector: () => null },
+  });
+
+  try {
+    new Drawer(
+      element as unknown as HTMLElement,
+      reopen as unknown as HTMLButtonElement,
+      { walk: (rank: number) => { walked = rank; } } as DrawerDeps,
+    );
+    state.selection = 42;
+    element.classList.add("open");
+    element.setAttribute("aria-hidden", "false");
+
+    element.clickClose();
+
+    assert.equal(reopen.hidden, false);
+    reopen.click();
+    assert.equal(walked, 42);
+    assert.equal(element.classList.contains("open"), true);
+    assert.equal(element.getAttribute("aria-hidden"), "false");
   } finally {
     state.selection = previousSelection;
     if (originalDocument === undefined)
@@ -502,6 +574,50 @@ test("loads summary eagerly but defers episodes and reference by tab", async () 
     assert.deepEqual(reads, [
       "entity-summary", "episodes", "entity-infobox",
     ]);
+  } finally {
+    state.selection = originalSelection;
+  }
+});
+
+test("opens the owning subject directly on a requested episode", async () => {
+  const originalSelection = state.selection;
+  const element = new FakeDrawerElement();
+  const key = (1 << 24) | 1;
+  const drawer = makeDrawer(element, {
+    data: {
+      entity: async () => ({
+        kind: "subject", key, name: "Work", nameCn: "作品", type: 2,
+        platformCode: null, date: "", score: null, bgmRank: null,
+        nsfw: false, favorite: [0, 0, 0, 0, 0], series: false,
+        scoreDetails: [], metaTags: [], tags: [], hasSummary: false,
+        hasInfobox: false,
+      }),
+      factsFor: async () => ({ items: [], total: 0, next: null }),
+      mappings: async () => ({
+        fact_labels: {}, subject_type: {}, platform: {}, person_type: {},
+        character_role: {}, episode_type: {},
+      }),
+      episodesFor: async () => ({
+        items: [{
+          id: 42, subject: key, name: "Episode", nameCn: "目标分集",
+          airdate: "", disc: 0, duration: "", sort: 3, type: 0,
+          hasDescription: false,
+        }],
+        total: 1,
+        next: null,
+      }),
+      rankOf: () => null,
+    },
+  } as unknown as Partial<DrawerDeps>);
+
+  try {
+    state.selection = 0;
+    await drawer.show(0, key, 42);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    assert.match(element.innerHTML, /dossier-tab-episodes/);
+    assert.match(element.innerHTML, /data-episode-row="42"/);
+    assert.match(element.focusedEpisode, /42/);
   } finally {
     state.selection = originalSelection;
   }

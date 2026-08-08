@@ -17,13 +17,9 @@ import type { AggregateFunction } from "./document";
 import type { CompareOperator } from "./value";
 import { MEDIA_NAMES } from "../types";
 import type { Mappings } from "../types";
+import { FACT_LABEL, OWNER_LABEL } from "./vocabulary";
 
-export const OWNER_LABEL: Record<Owner, string> = {
-  subject: "作品",
-  person: "人物",
-  character: "角色",
-  episode: "分集",
-};
+export { FACT_LABEL, OWNER_LABEL } from "./vocabulary";
 
 export const FIELD_LABEL: Record<string, string> = {
   name: "原名",
@@ -118,15 +114,6 @@ export const COMPARE = new Set<CompareOperator>([
   "gte",
   "contains",
 ]);
-
-export const FACT_LABEL: Record<string, string> = {
-  RELATES_TO: "作品关系",
-  WORKED_ON: "人物参与",
-  APPEARS_IN: "角色登场",
-  VOICE_CREDIT: "配音",
-  PERSON_REL: "人物关系",
-  CHARACTER_REL: "角色关系",
-};
 
 const DESCENDING_SORT_FIELDS = new Set([
   "date",
@@ -382,7 +369,7 @@ export function queryRelationOptions(owner: Owner): Array<{
           : "";
         options.push({
           value: `${factKind}|${candidateRole}|${relatedRole}`,
-          label: `${FACT_LABEL[factKind] ?? factKind} · ${direction}${OWNER_LABEL[relatedOwner]}`,
+          label: `${FACT_LABEL[factKind as QueryFactKind]} · ${direction}${OWNER_LABEL[relatedOwner]}`,
         });
       }
     }

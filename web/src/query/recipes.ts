@@ -8,13 +8,7 @@ import {
   type QueryFactKind,
 } from "./contract";
 import type { QueryOperator } from "./document";
-
-const OWNER_LABEL: Record<Owner, string> = {
-  subject: "作品",
-  person: "人物",
-  character: "角色",
-  episode: "分集",
-};
+import { FACT_LABEL, OWNER_LABEL } from "./vocabulary";
 
 export type QueryRecipe =
   | { kind: "fullText"; text: string }
@@ -194,7 +188,7 @@ export function fullTextRecipe(text: string): QueryBundle {
           operators,
           limit: null,
         },
-        answer: { shape: "fact-list", title: `${factKind} 备注` },
+        answer: { shape: "fact-list", title: `${FACT_LABEL[factKind]}备注` },
       };
     }
   }

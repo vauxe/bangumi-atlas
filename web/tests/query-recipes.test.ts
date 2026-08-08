@@ -21,6 +21,7 @@ test("one full-text action covers every published long-text family", () => {
   ]);
   assert.equal(bundle.sections["episode-description"]?.query.operators.op0?.kind, "fullText");
   assert.equal(bundle.sections["VOICE_CREDIT-summary"]?.answer.shape, "fact-list");
+  assert.equal(bundle.sections["VOICE_CREDIT-summary"]?.answer.title, "配音备注");
 });
 
 test("context actions compile to exact set and path sections", () => {
