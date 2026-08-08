@@ -1,4 +1,5 @@
 import { normalizeBundle, type QueryBundle, type QuerySection } from "./bundle";
+import { canonicalJson } from "./canonical";
 import {
   QUERY_CONTRACT,
   fieldsWithCapability,
@@ -15,6 +16,99 @@ const OWNER_LABEL: Record<Owner, string> = {
   character: "角色",
   episode: "分集",
 };
+
+export type QueryRecipe =
+  | { kind: "fullText"; text: string }
+  | { kind: "common"; from: string; to: string }
+  | {
+      kind: "path";
+      from: string;
+      to: string;
+      maxHops: number;
+      maxPaths: number;
+    };
+
+function sameBundle(left: QueryBundle, right: QueryBundle): boolean {
+  return canonicalJson(normalizeBundle(left)) === canonicalJson(normalizeBundle(right));
+}
+
+/** Recover a built-in semantic recipe only when it reproduces the bundle exactly. */
+export function decompileQueryRecipe(bundle: QueryBundle): QueryRecipe | null {
+  const normalized = normalizeBundle(bundle);
+  const entityRefs = new Set<string>();
+  let text: string | null = null;
+  let path: Extract<QueryOperator, { kind: "path" }> | null = null;
+  let pathInput: Extract<QueryOperator, { kind: "values" }> | null = null;
+
+  for (const section of Object.values(normalized.sections)) {
+    for (const operator of Object.values(section.query.operators)) {
+      if (
+        operator.kind === "fullText" && operator.text.kind === "literal" &&
+        typeof operator.text.value === "string"
+      ) text ??= operator.text.value;
+      if (operator.kind === "values") {
+        for (const row of operator.rows)
+          for (const value of row)
+            if (typeof value === "string" && /^(?:subject|person|character|episode):(?:0|[1-9][0-9]*)$/.test(value))
+              entityRefs.add(value);
+      }
+      if (operator.kind === "path") {
+        path = operator;
+        const input = section.query.operators[operator.input];
+        if (input?.kind === "values") pathInput = input;
+      }
+    }
+  }
+
+  if (path && pathInput && path.start.kind === "column" && path.target.kind === "column") {
+    const startIndex = pathInput.columns.indexOf(path.start.name);
+    const targetIndex = pathInput.columns.indexOf(path.target.name);
+    const from = pathInput.rows[0]?.[startIndex];
+    const to = pathInput.rows[0]?.[targetIndex];
+    if (typeof from === "string" && typeof to === "string") {
+      try {
+        const candidate = pathRecipe(
+          from as `${Owner}:${number}`,
+          to as `${Owner}:${number}`,
+          { maxHops: path.maxHops, maxPaths: path.maxPaths },
+        );
+        if (sameBundle(candidate, normalized)) return {
+          kind: "path",
+          from,
+          to,
+          maxHops: path.maxHops,
+          maxPaths: path.maxPaths,
+        };
+      } catch {
+        // A non-recipe plan remains available through the structural bundle view.
+      }
+    }
+  }
+
+  if (text !== null) {
+    try {
+      if (sameBundle(fullTextRecipe(text), normalized))
+        return { kind: "fullText", text };
+    } catch {
+      // A partial or customized full-text bundle is not the built-in recipe.
+    }
+  }
+
+  if (entityRefs.size === 2) {
+    const [from, to] = [...entityRefs];
+    for (const [left, right] of from && to ? [[from, to], [to, from]] as const : []) {
+      try {
+        if (sameBundle(
+          comparisonRecipe(left as `${Owner}:${number}`, right as `${Owner}:${number}`),
+          normalized,
+        )) return { kind: "common", from: left, to: right };
+      } catch {
+        // Invalid references cannot form a comparison recipe.
+      }
+    }
+  }
+  return null;
+}
 
 /** Search every published long-text family without merging unlike result rows. */
 export function fullTextRecipe(text: string): QueryBundle {
@@ -122,6 +216,7 @@ export function comparisonRecipe(
     schema: "atlas-query-bundle-v2",
     release: { policy: "latest" },
     sections: {
+      all: comparisonSection("全部关联", "union", left, right),
       common: comparisonSection("共同关联", "intersect", left, right),
       leftOnly: comparisonSection("仅左侧关联", "except", left, right),
       rightOnly: comparisonSection("仅右侧关联", "except", right, left),
@@ -247,14 +342,23 @@ function neighborSet(
       operators[projectId] = {
         kind: "project",
         input: expandId,
-        columns: [{
-          name: "neighbor",
-          value: { kind: "field", binding: neighborBinding, field: "ref" },
-        }],
+        columns: [
+          {
+            name: "ref",
+            value: { kind: "field", binding: neighborBinding, field: "ref" },
+          },
+          {
+            name: "name",
+            value: { kind: "field", binding: neighborBinding, field: "name" },
+          },
+        ],
       };
       branches.push({
         input: projectId,
-        columns: [{ output: "neighbor", input: "neighbor" }],
+        columns: [
+          { output: "ref", input: "ref" },
+          { output: "name", input: "name" },
+        ],
       });
       index++;
     }
@@ -265,7 +369,7 @@ function neighborSet(
 
 function comparisonSection(
   title: string,
-  kind: "intersect" | "except",
+  kind: "union" | "intersect" | "except",
   left: `${Owner}:${number}`,
   right: `${Owner}:${number}`,
 ): QuerySection {
@@ -276,7 +380,10 @@ function comparisonSection(
     kind,
     branches: [leftRoot, rightRoot].map((input) => ({
       input,
-      columns: [{ output: "neighbor", input: "neighbor" }],
+      columns: [
+        { output: "ref", input: "ref" },
+        { output: "name", input: "name" },
+      ],
     })),
   };
   return {

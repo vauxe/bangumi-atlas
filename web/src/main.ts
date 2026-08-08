@@ -490,6 +490,7 @@ async function boot(): Promise<void> {
       })(), "查询结果定位");
     },
     updateUrl: replaceUrl,
+    pushUrl,
   });
   subscribe(() => {
     queryWorkbench?.sync(state.queryBundle);

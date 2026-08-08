@@ -91,6 +91,8 @@
   color: var(--ink);
   font-size: 13px;
 }
+.query-advanced-parameters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 7px; }
+.query-advanced-parameter { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 12px; }
 .query-advanced-operators { display: flex; flex-wrap: wrap; gap: 6px; }
 .query-clause {
   display: inline-flex;
@@ -107,7 +109,28 @@
   white-space: nowrap;
 }
 .query-clause.ProseMirror-selectednode { border-color: var(--miku); }
+.query-clause-invalid,
+.query-advanced-bundle.query-clause-invalid {
+  position: relative;
+  border-color: var(--pink);
+}
+.query-clause-invalid::after {
+  content: "!";
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--pink);
+  color: #26101d;
+  font-size: 11px;
+  font-weight: 700;
+}
 .query-clause-relation { position: relative; }
+.query-clause-recipe { width: 100%; flex-wrap: wrap; }
+.query-recipe-line { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.query-word { white-space: nowrap; }
 .query-relation-details > summary {
   min-height: 30px;
   padding: 5px 8px;
@@ -192,6 +215,20 @@ select.query-slot { cursor: pointer; }
 .query-value-slot[type="number"] { width: 8ch; }
 .query-readonly-slot { display: inline-flex; align-items: center; color: var(--miku); }
 .query-entity-slot { color: var(--miku); cursor: pointer; }
+.query-parameter-slot { display: inline-flex; align-items: center; gap: 4px; color: var(--ink-2); }
+.query-parameter-name { min-width: 8ch; max-width: 15ch; }
+.query-parameter-toggle {
+  min-height: 28px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--miku);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+.query-parameter-toggle:hover { background: var(--line); }
 .query-clause-remove {
   flex: none;
   width: 28px;
@@ -206,7 +243,13 @@ select.query-slot { cursor: pointer; }
 .query-clause-remove:hover { background: var(--line); color: var(--ink); }
 
 .query-slot-menu { position: relative; }
-.query-slot-menu > summary { list-style: none; cursor: pointer; }
+.query-slot-menu > summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  list-style: none;
+  cursor: pointer;
+}
 .query-slot-menu > summary::-webkit-details-marker { display: none; }
 .query-slot-menu > span {
   position: absolute;
@@ -226,6 +269,37 @@ select.query-slot { cursor: pointer; }
 }
 .query-slot-menu label { display: flex; align-items: center; gap: 6px; color: var(--ink); }
 .query-slot-menu input { accent-color: var(--miku); }
+
+.query-aggregate-menu { position: relative; }
+.query-aggregate-menu > summary { list-style: none; cursor: pointer; }
+.query-aggregate-menu > summary::-webkit-details-marker { display: none; }
+.query-aggregate-menu > div {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 6px);
+  left: 0;
+  display: grid;
+  gap: 7px;
+  width: max-content;
+  max-width: min(460px, calc(100vw - 48px));
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .38);
+}
+.query-aggregate-row { display: flex; align-items: center; gap: 6px; }
+.query-aggregate-add {
+  justify-self: start;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--miku);
+  cursor: pointer;
+  font: inherit;
+}
+.query-aggregate-add:hover { background: var(--line); }
 
 .query-compose-actions {
   display: flex;
@@ -306,6 +380,41 @@ select.query-slot { cursor: pointer; }
   white-space: nowrap;
 }
 .query-table th { position: sticky; top: 0; background: var(--panel); color: var(--ink-2); }
+.query-column-action, .query-result-action { position: relative; }
+.query-column-action > summary, .query-result-action > summary {
+  color: inherit;
+  cursor: pointer;
+  list-style: none;
+}
+.query-column-action > summary::-webkit-details-marker,
+.query-result-action > summary::-webkit-details-marker { display: none; }
+.query-column-action > summary::after { content: " ▾"; color: var(--miku); }
+.query-column-action > div, .query-result-action > div {
+  position: absolute;
+  z-index: 6;
+  top: calc(100% + 4px);
+  left: 0;
+  display: grid;
+  min-width: 112px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .4);
+}
+.query-result-action > div { top: calc(100% + 2px); }
+.query-column-action button, .query-result-action > div button {
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  font: inherit;
+}
+.query-column-action button:hover, .query-result-action > div button:hover { background: var(--line); }
 .query-table .query-match-row td { padding-top: 0; white-space: normal; color: var(--ink-2); font-size: 11px; line-height: 1.5; }
 .query-entity-link { border: 0; padding: 0; background: none; color: var(--miku); cursor: pointer; font: inherit; }
 .query-entity-link:hover { text-decoration: underline; }
@@ -322,6 +431,33 @@ select.query-slot { cursor: pointer; }
 #query-workbench summary:focus-visible {
   outline: 2px solid var(--pink);
   outline-offset: 2px;
+}
+
+@media (min-width: 960px) {
+  #query-workbench {
+    width: min(960px, calc(100vw - 28px));
+    grid-template-columns: minmax(350px, 410px) minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) 28px;
+  }
+  #query-workbench > header { grid-column: 1 / -1; }
+  .query-compose {
+    grid-column: 1;
+    grid-row: 2;
+    overflow: auto;
+    border-right: 1px solid var(--line);
+    border-bottom: 0;
+  }
+  .query-editor-host { max-height: none; overflow: visible; }
+  .query-status {
+    grid-column: 1;
+    grid-row: 3;
+    border-right: 1px solid var(--line);
+  }
+  .query-answers {
+    grid-column: 2;
+    grid-row: 2 / 4;
+    padding-top: 4px;
+  }
 }
 
 @media (max-width: 720px) {

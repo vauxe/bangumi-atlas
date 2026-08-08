@@ -6,17 +6,22 @@ import {
   conditionEditorOperator,
   defaultSortDirection,
   describeExplorerQuery,
+  enumValuesFor,
   isExplorerConditionComplete,
   parseExplorerLimit,
   factEnumValues,
   parseFactValue,
+  describeAggregateMetric,
+  queryAggregateFields,
   queryConditionOperators,
   queryFactConditionOperators,
   queryFactFields,
+  queryGroupFields,
   queryProjectFields,
   queryRelationOptions,
   queryRelationTargetOwner,
   querySortFields,
+  queryStatisticColumns,
   queryTextScopes,
 } from "../src/query/workbench-model";
 
@@ -60,6 +65,23 @@ test("derives friendly condition operators from the field contract", () => {
     "contains",
     "notContains",
   ]);
+});
+
+test("uses release enum names in entity condition controls", () => {
+  const mappings = {
+    fact_labels: {},
+    subject_type: { "2": "动画" },
+    platform: {},
+    person_type: { "1": "个人" },
+    character_role: { "1": "角色" },
+    episode_type: { "0": "本篇", "1": "特别篇" },
+  };
+
+  assert.deepEqual(enumValuesFor("episode", "type", mappings), {
+    "0": "本篇",
+    "1": "特别篇",
+  });
+  assert.deepEqual(enumValuesFor("subject", "type", mappings), { "2": "动画" });
 });
 
 test("derives relationship attribute controls from the same query contract", () => {
@@ -155,6 +177,21 @@ test("uses the direction users expect for common result sorts", () => {
   assert.equal(defaultSortDirection("year"), "desc");
   assert.equal(defaultSortDirection("rank"), "asc");
   assert.equal(defaultSortDirection("name"), "asc");
+});
+
+test("derives readable statistic choices and output columns", () => {
+  assert.equal(queryGroupFields("subject").includes("type"), true);
+  assert.equal(queryAggregateFields("subject").includes("score"), true);
+  assert.equal(queryAggregateFields("subject").includes("name"), false);
+  assert.equal(describeAggregateMetric({ function: "avg", field: "score" }), "平均评分");
+  assert.deepEqual(queryStatisticColumns({
+    groupBy: ["type"],
+    metrics: [{ function: "count" }, { function: "avg", field: "score" }],
+  }), [
+    { value: "type", label: "类型" },
+    { value: "count", label: "条数" },
+    { value: "avg_score", label: "平均评分" },
+  ]);
 });
 
 test("waits for a visible condition value before refreshing live results", () => {

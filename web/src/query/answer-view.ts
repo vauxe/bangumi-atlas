@@ -16,28 +16,26 @@ import {
   type Owner,
   type QueryFactKind,
 } from "./contract";
+import {
+  AGGREGATE_FUNCTION_LABEL,
+  FACT_FIELD_LABEL,
+  FACT_LABEL,
+  FIELD_LABEL,
+  OWNER_LABEL,
+  factEnumValues,
+} from "./workbench-model";
 
 export interface AnswerViewOptions {
   onEntity?(ref: string): void;
   onMore?(): void;
+  onSort?(semantic: string, direction: "asc" | "desc"): void;
+  onGroup?(semantic: string): void;
+  onFilter?(semantic: string, value: RuntimeValue, exclude: boolean): void;
+  canSort?(semantic: string): boolean;
+  canGroup?(semantic: string): boolean;
+  canFilter?(semantic: string): boolean;
   mappings?: Mappings;
 }
-
-const OWNER_NAMES = {
-  subject: "作品",
-  person: "人物",
-  character: "角色",
-  episode: "分集",
-} as const;
-
-const FACT_NAMES: Record<QueryFactKind, string> = {
-  RELATES_TO: "作品关系",
-  WORKED_ON: "人物参与",
-  APPEARS_IN: "角色登场",
-  VOICE_CREDIT: "配音",
-  PERSON_REL: "人物关系",
-  CHARACTER_REL: "角色关系",
-};
 
 const COLUMN_LABEL: Record<string, string> = {
   ref: "条目",
@@ -59,7 +57,23 @@ const COLUMN_LABEL: Record<string, string> = {
   subject: "作品",
   subjectContext: "作品",
   neighbor: "关联条目",
+  count: "条数",
 };
+
+function columnLabel(column: string): string {
+  const exact = COLUMN_LABEL[column] ?? FIELD_LABEL[column];
+  if (exact) return exact;
+  const separator = column.indexOf("_");
+  if (separator > 0) {
+    const operation = column.slice(0, separator);
+    const field = column.slice(separator + 1);
+    const prefix = AGGREGATE_FUNCTION_LABEL[
+      operation as keyof typeof AGGREGATE_FUNCTION_LABEL
+    ];
+    if (prefix) return `${prefix}${COLUMN_LABEL[field] ?? FIELD_LABEL[field] ?? field}`;
+  }
+  return column;
+}
 
 const PERSON_TYPE_NAMES: Record<number, string> = {
   1: "个人",
@@ -128,7 +142,7 @@ export function queryValueText(
     return value.map((item) => queryValueText(item)).join("、");
   if (entity(value))
     return String(value.fields.nameCn || value.fields.name || value.ref);
-  if (fact(value)) return FACT_NAMES[value.factKind];
+  if (fact(value)) return FACT_LABEL[value.factKind] ?? value.factKind;
   if (path(value)) return `${value.cost} 跳路径`;
   if (typeof value === "boolean") return value ? "是" : "否";
   if (typeof value === "number" && context) {
@@ -174,6 +188,88 @@ function valueNode(
   return span;
 }
 
+function resultValueNode(
+  value: RuntimeValue,
+  options: AnswerViewOptions,
+  semantic: string | undefined,
+  label: string,
+): HTMLElement {
+  const rendered = valueNode(value, options, label);
+  const filterable = semantic && options.onFilter &&
+    (options.canFilter?.(semantic) ?? true) && value !== "" && (
+    isMissing(value) || value === null ||
+    typeof value === "string" || typeof value === "number" ||
+    typeof value === "boolean"
+  );
+  if (!filterable) return rendered;
+  const details = document.createElement("details");
+  details.className = "query-result-action";
+  const summary = document.createElement("summary");
+  summary.setAttribute("aria-label", `${label}：筛选操作`);
+  summary.append(rendered);
+  const menu = document.createElement("div");
+  for (const [text, exclude] of [["只看此值", false], ["排除此值", true]] as const) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = text;
+    button.addEventListener("click", () => {
+      details.open = false;
+      options.onFilter?.(semantic, value, exclude);
+    });
+    menu.append(button);
+  }
+  details.append(summary, menu);
+  return details;
+}
+
+function columnHeading(
+  column: string,
+  semantic: string | undefined,
+  options: AnswerViewOptions,
+): HTMLElement {
+  const label = columnLabel(column);
+  const sortable = Boolean(
+    semantic && options.onSort && (options.canSort?.(semantic) ?? true),
+  );
+  const groupable = Boolean(
+    semantic && options.onGroup && (options.canGroup?.(semantic) ?? true),
+  );
+  if (!semantic || (!sortable && !groupable)) {
+    const text = document.createElement("span");
+    text.textContent = label;
+    return text;
+  }
+  const details = document.createElement("details");
+  details.className = "query-column-action";
+  const summary = document.createElement("summary");
+  summary.textContent = label;
+  summary.setAttribute("aria-label", `${label}：列操作`);
+  const menu = document.createElement("div");
+  for (const [text, direction] of [["从低到高", "asc"], ["从高到低", "desc"]] as const) {
+    if (!sortable) break;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = text;
+    button.addEventListener("click", () => {
+      details.open = false;
+      options.onSort?.(semantic, direction);
+    });
+    menu.append(button);
+  }
+  if (groupable) {
+    const group = document.createElement("button");
+    group.type = "button";
+    group.textContent = "按此分组";
+    group.addEventListener("click", () => {
+      details.open = false;
+      options.onGroup?.(semantic);
+    });
+    menu.append(group);
+  }
+  details.append(summary, menu);
+  return details;
+}
+
 function renderTable(
   result: QueryResult,
   options: AnswerViewOptions,
@@ -190,7 +286,7 @@ function renderTable(
   for (const column of displayColumns) {
     const cell = document.createElement("th");
     cell.scope = "col";
-    cell.textContent = COLUMN_LABEL[column] ?? column;
+    cell.append(columnHeading(column, result.columns[column]?.semantic, options));
     head.append(cell);
   }
   const body = table.createTBody();
@@ -205,15 +301,17 @@ function renderTable(
         : undefined;
       const rendered = value === undefined ? null : value;
       const semantic = result.columns[column]?.semantic;
-      cell.append(valueNode(
+      const label = displayName || queryValueText(rendered, {
+        column,
+        row,
+        semantic,
+        mappings: options.mappings,
+      });
+      cell.append(resultValueNode(
         rendered,
         options,
-        displayName || queryValueText(rendered, {
-          column,
-          row,
-          semantic,
-          mappings: options.mappings,
-        }),
+        semantic,
+        label,
       ));
     }
     const snippet = Object.values(result.evidence[rowIndex] ?? {})
@@ -254,7 +352,26 @@ function renderPaths(
         const roles = QUERY_CONTRACT.facts[step.fact.factKind].roles;
         const from = roles[step.fromRole];
         const to = roles[step.toRole];
-        relation.textContent = ` — ${FACT_NAMES[step.fact.factKind]} (${from ? OWNER_NAMES[from] : step.fromRole} → ${to ? OWNER_NAMES[to] : step.toRole}) → `;
+        const details = Object.entries(step.fact.fields).flatMap(([field, value]) => {
+          const definition = factFieldDefinition(step.fact.factKind, field);
+          if (
+            definition.exposure !== "query" ||
+            !definition.capabilities.includes("project") ||
+            isMissing(value) || value === null || value === ""
+          ) return [];
+          const label = factEnumValues(
+            step.fact.factKind,
+            field,
+            options.mappings,
+          )?.[String(value)] ?? queryValueText(value, {
+            column: field,
+            row: {},
+            semantic: `${step.fact.factKind}.${field}`,
+            mappings: options.mappings,
+          });
+          return [`${FACT_FIELD_LABEL[field] ?? field}：${label}`];
+        });
+        relation.textContent = ` — ${FACT_LABEL[step.fact.factKind] ?? step.fact.factKind}${details.length ? ` · ${details.join(" · ")}` : ""} (${from ? OWNER_LABEL[from] : step.fromRole} → ${to ? OWNER_LABEL[to] : step.toRole}) → `;
         relation.title = step.fact.ref;
         chain.append(relation);
       }
