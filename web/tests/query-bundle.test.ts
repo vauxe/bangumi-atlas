@@ -67,6 +67,12 @@ test("keeps typed parameter values with the section they execute", async () => {
 
   const normalized = normalizeBundle(bundle);
   assert.deepEqual(normalized.sections.results?.parameterValues, { minimum: 8 });
+  assert.deepEqual(normalized.sections.results?.query.parameters, { minimum: "number" });
+  assert.deepEqual(
+    normalizeBundle(normalized),
+    normalized,
+    "a normalized parameterized bundle must remain valid and stable",
+  );
   assert.throws(
     () => normalizeBundle({
       ...bundle,

@@ -106,6 +106,7 @@ function normalizeExpression(
   expression: Expression,
   declarations: Record<string, ParameterType>,
   values: ParameterValues,
+  preserveParameters = false,
 ): Expression {
   switch (expression.kind) {
     case "literal":
@@ -120,7 +121,9 @@ function normalizeExpression(
       if (value === undefined)
         throw new TypeError(`parameter ${expression.name} is missing`);
       validateParameter(expression.name, type, value);
-      return { kind: "literal", value };
+      return preserveParameters
+        ? { kind: "parameter", name: expression.name }
+        : { kind: "literal", value };
     }
     case "column":
       return { kind: "column", name: safeRecordKey(expression.name) };
@@ -134,13 +137,13 @@ function normalizeExpression(
       return {
         kind: "compare",
         operator: expression.operator,
-        left: normalizeExpression(expression.left, declarations, values),
-        right: normalizeExpression(expression.right, declarations, values),
+        left: normalizeExpression(expression.left, declarations, values, preserveParameters),
+        right: normalizeExpression(expression.right, declarations, values, preserveParameters),
       };
     case "and":
     case "or": {
       const terms = expression.terms.map((term) =>
-        normalizeExpression(term, declarations, values),
+        normalizeExpression(term, declarations, values, preserveParameters),
       );
       terms.sort((left, right) => {
         const a = canonicalJson(left);
@@ -152,13 +155,13 @@ function normalizeExpression(
     case "not":
       return {
         kind: "not",
-        term: normalizeExpression(expression.term, declarations, values),
+        term: normalizeExpression(expression.term, declarations, values, preserveParameters),
       };
     case "isNull":
     case "isMissing":
       return {
         kind: expression.kind,
-        term: normalizeExpression(expression.term, declarations, values),
+        term: normalizeExpression(expression.term, declarations, values, preserveParameters),
       };
   }
 }
@@ -643,7 +646,10 @@ function normalizeValues(operator: ValuesOperator): ValuesOperator {
 export function normalizeQuery(
   document: QueryDocument,
   values: ParameterValues,
+  options: { preserveParameters?: boolean } = {},
 ): QueryDocument {
+  const preserveParameters = options.preserveParameters === true;
+  if (preserveParameters) normalizeQuery(document, values);
   if (document.schema !== "atlas-query-document-v2")
     throw new TypeError("unsupported query document schema");
   if (
@@ -723,6 +729,7 @@ export function normalizeQuery(
             operator.text,
             document.parameters,
             values,
+            preserveParameters,
           ),
         };
         break;
@@ -743,6 +750,7 @@ export function normalizeQuery(
               operator.text,
               document.parameters,
               values,
+              preserveParameters,
             ),
           } satisfies EntityFullTextOperator;
         } else {
@@ -775,6 +783,7 @@ export function normalizeQuery(
               operator.text,
               document.parameters,
               values,
+              preserveParameters,
             ),
           } satisfies FactFullTextOperator;
         }
@@ -796,6 +805,7 @@ export function normalizeQuery(
           operator.ref,
           document.parameters,
           values,
+          preserveParameters,
         );
         if (
           ref.kind !== "literal" ||
@@ -831,6 +841,7 @@ export function normalizeQuery(
             operator.predicate,
             document.parameters,
             values,
+            preserveParameters,
           ),
         } satisfies FilterOperator;
         break;
@@ -851,6 +862,7 @@ export function normalizeQuery(
               column.value,
               document.parameters,
               values,
+              preserveParameters,
             ),
           })),
         } satisfies ProjectOperator;
@@ -911,6 +923,7 @@ export function normalizeQuery(
               group.value,
               document.parameters,
               values,
+              preserveParameters,
             ),
           })),
           metrics: operator.metrics.map((metric) => {
@@ -936,6 +949,7 @@ export function normalizeQuery(
                       metric.value,
                       document.parameters,
                       values,
+                      preserveParameters,
                     ),
                   }
                 : {}),
@@ -1011,11 +1025,13 @@ export function normalizeQuery(
             operator.start,
             document.parameters,
             values,
+            preserveParameters,
           ),
           target: normalizeExpression(
             operator.target,
             document.parameters,
             values,
+            preserveParameters,
           ),
           binding: safeRecordKey(operator.binding),
           policy: "fewest-hops",
@@ -1089,13 +1105,17 @@ export function normalizeQuery(
   const normalized: QueryDocument = {
     schema: "atlas-query-document-v2",
     root: stable.root,
-    parameters: {},
+    parameters: preserveParameters
+      ? Object.fromEntries(Object.entries(document.parameters).sort(([left], [right]) =>
+          left < right ? -1 : left > right ? 1 : 0
+        ))
+      : {},
     operators: stable.operators,
     distinct: document.distinct === true,
     orderBy,
     limit: document.limit ?? null,
   };
-  validateQuery(normalized);
+  if (!preserveParameters) validateQuery(normalized);
   return normalized;
 }
 

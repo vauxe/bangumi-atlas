@@ -72,7 +72,9 @@ export function normalizeBundle(bundle: QueryBundle): QueryBundle {
       ),
     );
     sections[name] = {
-      query: normalizeQuery(section.query, parameterValues),
+      query: normalizeQuery(section.query, parameterValues, {
+        preserveParameters: true,
+      }),
       ...(Object.keys(parameterValues).length ? { parameterValues } : {}),
       answer: { ...section.answer },
     };
