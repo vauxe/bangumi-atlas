@@ -183,7 +183,7 @@ export class QueryWorkbench {
       if (!inserted) this.setStatus("这项已经在查询中");
     });
     this.panel.addEventListener("keydown", (event) => {
-      if (event.isComposing) return;
+      if (event.isComposing || event.defaultPrevented) return;
       if (event.key === "Escape") {
         const opened = [...this.panel.querySelectorAll<HTMLDetailsElement>("details[open]")];
         const current = opened.at(-1);

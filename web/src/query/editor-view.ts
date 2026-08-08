@@ -30,6 +30,7 @@ import type { ExplorerAggregate, ExplorerAggregateMetric } from "./explorer";
 import {
   createQueryEditorState,
   queryClauseInsertionPosition,
+  queryCommandTransaction,
   lowerQueryEditorDocument,
   QUERY_OPERATOR_NODE,
   queryEditorSchema,
@@ -898,13 +899,13 @@ export class QueryDocumentEditor {
   }
 
   replaceTransaction(doc: ProseMirrorNode): void {
-    this.view.dispatch(
+    this.view.dispatch(queryCommandTransaction(
       this.view.state.tr.replaceWith(
         0,
         this.view.state.doc.content.size,
         doc.content,
       ).scrollIntoView(),
-    );
+    ));
   }
 
   has(name: ClauseName): boolean {
@@ -1016,6 +1017,7 @@ export class QueryDocumentEditor {
     node: ProseMirrorNode,
     transaction: Transaction,
   ): void {
+    queryCommandTransaction(transaction);
     const position = queryClauseInsertionPosition(
       transaction.doc,
       name,

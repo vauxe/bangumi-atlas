@@ -250,13 +250,18 @@ select.query-slot-control { cursor: pointer; }
 }
 
 .query-condition-group {
+  position: relative;
   display: grid;
   gap: 4px;
   margin: 3px 0;
-  padding: 5px 5px 5px 10px;
+  padding: 5px 38px 5px 10px;
   border-left: 2px solid rgba(57, 197, 187, .45);
 }
 .query-condition-group.ProseMirror-selectednode { border-left-color: var(--pink); }
+.query-condition-group:hover > .query-condition-group-head > .query-clause-remove,
+.query-condition-group:focus-within > .query-condition-group-head > .query-clause-remove {
+  opacity: 1;
+}
 .query-condition-group-head, .query-condition-terms {
   display: flex;
   align-items: center;
