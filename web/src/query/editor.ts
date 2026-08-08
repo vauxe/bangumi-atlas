@@ -1,7 +1,11 @@
 import { history, redo, undo } from "prosemirror-history";
 import { keymap } from "prosemirror-keymap";
 import { Node as ProseMirrorNode, Schema, type NodeSpec } from "prosemirror-model";
-import { EditorState } from "prosemirror-state";
+import {
+  EditorState,
+  NodeSelection,
+  type Transaction,
+} from "prosemirror-state";
 
 import type {
   ExplorerAggregate,
@@ -59,6 +63,18 @@ export const QUERY_OPERATOR_NODE: Record<QueryOperator["kind"], string> = {
   except: "op_except",
   exists: "op_exists",
   notExists: "op_not_exists",
+};
+
+export const QUERY_CLAUSE_RANK: Readonly<Record<string, number>> = {
+  find: 0,
+  search: 1,
+  condition: 2,
+  condition_group: 2,
+  relation: 3,
+  projection: 4,
+  aggregate: 4,
+  sort: 5,
+  limit: 6,
 };
 
 const queryOperatorNodes = Object.fromEntries(
@@ -158,6 +174,42 @@ export const queryEditorSchema = new Schema({
     text: {},
   },
 });
+
+/** Keep semantic order while placing repeatable clauses next to the selected peer. */
+export function queryClauseInsertionPosition(
+  doc: ProseMirrorNode,
+  name: string,
+  anchor = doc.content.size,
+): number {
+  const targetRank = QUERY_CLAUSE_RANK[name] ?? 99;
+  let selectedPeer: number | null = null;
+  let firstGreater = doc.content.size;
+  doc.forEach((child, offset) => {
+    const rank = QUERY_CLAUSE_RANK[child.type.name] ?? 99;
+    if (
+      rank === targetRank &&
+      anchor >= offset && anchor < offset + child.nodeSize
+    ) selectedPeer = offset + child.nodeSize;
+    if (firstGreater === doc.content.size && rank > targetRank)
+      firstGreater = offset;
+  });
+  return selectedPeer ?? firstGreater;
+}
+
+/** Delete the selected semantic node without making the editor document invalid. */
+export function deleteSelectedQueryNode(
+  state: EditorState,
+  dispatch?: (transaction: Transaction) => void,
+): boolean {
+  if (!(state.selection instanceof NodeSelection)) return false;
+  const { node, $from, from, to } = state.selection;
+  if (["find", "recipe", "query_bundle", "query_section"].includes(node.type.name))
+    return false;
+  if ($from.parent.type.name === "condition_group" && $from.parent.childCount <= 1)
+    return false;
+  dispatch?.(state.tr.delete(from, to).scrollIntoView());
+  return true;
+}
 
 export interface QueryEditorDiagnostic {
   /** Zero-based top-level clause index. */
@@ -391,6 +443,8 @@ export function createQueryEditorState(doc: ProseMirrorNode): EditorState {
         "Mod-z": undo,
         "Mod-Shift-z": redo,
         "Mod-y": redo,
+        Backspace: deleteSelectedQueryNode,
+        Delete: deleteSelectedQueryNode,
       }),
     ],
   });
