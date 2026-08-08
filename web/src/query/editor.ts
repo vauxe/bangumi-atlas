@@ -6,6 +6,7 @@ import { EditorState } from "prosemirror-state";
 import type { ExplorerCondition, ExplorerQuery } from "./explorer";
 import type { QueryBundle } from "./bundle";
 import type { Owner, QueryFactKind } from "./contract";
+import type { QueryDocument, QueryOperator } from "./document";
 import {
   FIELD_LABEL,
   OPERATOR_LABEL,
@@ -27,10 +28,39 @@ const clause = (name: string, attrs: NodeSpec["attrs"]): NodeSpec => ({
   toDOM: () => ["div", { "data-query-clause": name }],
 });
 
+export const QUERY_OPERATOR_NODE: Record<QueryOperator["kind"], string> = {
+  scan: "op_scan",
+  lookup: "op_lookup",
+  fullText: "op_full_text",
+  factLookup: "op_fact_lookup",
+  values: "op_values",
+  filter: "op_filter",
+  project: "op_project",
+  matchFact: "op_match_fact",
+  followRef: "op_follow_ref",
+  aggregate: "op_aggregate",
+  path: "op_path",
+  union: "op_union",
+  intersect: "op_intersect",
+  except: "op_except",
+  exists: "op_exists",
+  notExists: "op_not_exists",
+};
+
+const queryOperatorNodes = Object.fromEntries(
+  Object.values(QUERY_OPERATOR_NODE).map((name) => [name, {
+    group: "query_operator",
+    atom: true,
+    selectable: true,
+    attrs: { id: { default: "" }, value: { default: null } },
+    toDOM: () => ["div", { "data-query-operator": name }],
+  } satisfies NodeSpec]),
+);
+
 /** The editor schema stores query meaning, never source text or form state. */
 export const queryEditorSchema = new Schema({
   nodes: {
-    doc: { content: "(find query_clause*) | recipe | bundle" },
+    doc: { content: "(find query_clause*) | recipe | query_bundle" },
     find: {
       atom: true,
       selectable: true,
@@ -41,12 +71,21 @@ export const queryEditorSchema = new Schema({
       scope: { default: "lookup" },
       raw: { default: "" },
     }),
-    condition: clause("condition", {
-      field: { default: "" },
-      operator: { default: "" },
-      raw: { default: "" },
-      expression: { default: null },
-    }),
+    condition: {
+      ...clause("condition", {
+        field: { default: "" },
+        operator: { default: "" },
+        raw: { default: "" },
+      }),
+      group: "query_clause condition_term",
+    },
+    condition_group: {
+      group: "query_clause condition_term",
+      content: "condition_term+",
+      selectable: true,
+      attrs: { mode: { default: "all" } },
+      toDOM: () => ["div", { "data-query-clause": "condition-group" }, 0],
+    },
     relation: clause("relation", {
       selection: { default: "" },
       exists: { default: true },
@@ -73,15 +112,24 @@ export const queryEditorSchema = new Schema({
       },
       toDOM: () => ["div", { "data-query-clause": "recipe" }],
     },
-    bundle: {
-      atom: true,
+    query_bundle: {
+      content: "query_section+",
+      selectable: true,
+      attrs: { release: { default: { policy: "latest" } } },
+      toDOM: () => ["div", { "data-query-bundle": "" }, 0],
+    },
+    query_section: {
+      content: "query_operator+",
       selectable: true,
       attrs: {
-        value: { default: null },
-        titles: { default: [] },
+        name: { default: "results" },
+        query: { default: null },
+        parameterValues: { default: null },
+        answer: { default: null },
       },
-      toDOM: () => ["div", { "data-query-clause": "bundle" }],
+      toDOM: () => ["section", { "data-query-section": "" }, 0],
     },
+    ...queryOperatorNodes,
     text: {},
   },
 });
@@ -105,7 +153,7 @@ export type QueryEditorRecipe =
 
 function editableCondition(
   condition: ExplorerCondition,
-): { field: string; operator: string; raw: string; expression: null } | null {
+): { field: string; operator: string; raw: string } | null {
   if (
     condition.kind !== "compare" &&
     condition.kind !== "in" &&
@@ -119,7 +167,40 @@ function editableCondition(
     : condition.kind === "in"
       ? condition.values.map(String).join("、")
       : "";
-  return { field: condition.field, operator, raw, expression: null };
+  return { field: condition.field, operator, raw };
+}
+
+function conditionEditorNode(condition: ExplorerCondition): ProseMirrorNode {
+  if (condition.kind === "all" || condition.kind === "any") {
+    return queryEditorSchema.node(
+      "condition_group",
+      { mode: condition.kind },
+      condition.terms.map(conditionEditorNode),
+    );
+  }
+  if (condition.kind === "not") {
+    return queryEditorSchema.node(
+      "condition_group",
+      { mode: "not" },
+      [conditionEditorNode(condition.term)],
+    );
+  }
+  const editable = editableCondition(condition);
+  if (editable) return queryEditorSchema.node("condition", editable);
+  if (condition.kind === "compare" && condition.negated) {
+    const positive: ExplorerCondition = {
+      kind: "compare",
+      field: condition.field,
+      operator: condition.operator,
+      value: condition.value,
+    };
+    return queryEditorSchema.node(
+      "condition_group",
+      { mode: "not" },
+      [conditionEditorNode(positive)],
+    );
+  }
+  throw new TypeError("当前条件无法转换为结构化编辑节点");
 }
 
 export function createQueryEditorDocument(draft: ExplorerQuery): ProseMirrorNode {
@@ -135,15 +216,7 @@ export function createQueryEditorDocument(draft: ExplorerQuery): ProseMirrorNode
     }));
   }
   if (draft.condition) {
-    children.push(queryEditorSchema.node(
-      "condition",
-      editableCondition(draft.condition) ?? {
-        field: "",
-        operator: "",
-        raw: "",
-        expression: draft.condition,
-      },
-    ));
+    children.push(conditionEditorNode(draft.condition));
   }
   for (const relation of draft.relations ?? []) {
     children.push(queryEditorSchema.node("relation", {
@@ -189,12 +262,53 @@ export function createQueryRecipeDocument(
 }
 
 export function createQueryBundleDocument(bundle: QueryBundle): ProseMirrorNode {
+  const sections = Object.entries(bundle.sections).map(([name, section]) => {
+    const { operators, ...query } = section.query;
+    const operatorNodes = Object.entries(operators).map(([id, value]) =>
+      queryEditorSchema.node(QUERY_OPERATOR_NODE[value.kind], { id, value })
+    );
+    return queryEditorSchema.node("query_section", {
+      name,
+      query,
+      parameterValues: section.parameterValues ?? null,
+      answer: section.answer,
+    }, operatorNodes);
+  });
   return queryEditorSchema.node("doc", null, [
-    queryEditorSchema.node("bundle", {
-      value: bundle,
-      titles: Object.values(bundle.sections).map((section) => section.answer.title),
-    }),
+    queryEditorSchema.node("query_bundle", { release: bundle.release }, sections),
   ]);
+}
+
+function bundleFromEditorNode(node: ProseMirrorNode): QueryBundle | null {
+  const sections: QueryBundle["sections"] = {};
+  for (let index = 0; index < node.childCount; index++) {
+    const section = node.child(index);
+    const query = section.attrs.query as Omit<QueryDocument, "operators"> | null;
+    const answer = section.attrs.answer as QueryBundle["sections"][string]["answer"] | null;
+    if (!query || !answer) return null;
+    const operators: Record<string, QueryOperator> = {};
+    for (let operatorIndex = 0; operatorIndex < section.childCount; operatorIndex++) {
+      const operator = section.child(operatorIndex);
+      const id = String(operator.attrs.id ?? "");
+      const value = operator.attrs.value as QueryOperator | null;
+      if (!id || !value || QUERY_OPERATOR_NODE[value.kind] !== operator.type.name)
+        return null;
+      operators[id] = value;
+    }
+    const parameterValues = section.attrs.parameterValues as QueryBundle["sections"][string]["parameterValues"] | null;
+    sections[String(section.attrs.name)] = {
+      query: { ...query, operators },
+      ...(parameterValues ? { parameterValues } : {}),
+      answer,
+    };
+  }
+  return Object.keys(sections).length
+    ? {
+        schema: "atlas-query-bundle-v2",
+        release: node.attrs.release as QueryBundle["release"],
+        sections,
+      }
+    : null;
 }
 
 export function createQueryEditorState(doc: ProseMirrorNode): EditorState {
@@ -215,8 +329,6 @@ function conditionFromAttrs(
   owner: Owner,
   attrs: Record<string, unknown>,
 ): ExplorerCondition {
-  const expression = attrs.expression;
-  if (expression) return expression as ExplorerCondition;
   const field = String(attrs.field ?? "");
   const operator = String(attrs.operator ?? "");
   const raw = String(attrs.raw ?? "");
@@ -260,12 +372,29 @@ function conditionFromAttrs(
   };
 }
 
+function conditionFromNode(owner: Owner, node: ProseMirrorNode): ExplorerCondition {
+  if (node.type.name === "condition") return conditionFromAttrs(owner, node.attrs);
+  if (node.type.name !== "condition_group")
+    throw new TypeError("条件节点无效");
+  const mode = String(node.attrs.mode);
+  const terms: ExplorerCondition[] = [];
+  node.forEach((child) => terms.push(conditionFromNode(owner, child)));
+  if (!terms.length) throw new TypeError("条件组不能为空");
+  if (mode === "not") {
+    if (terms.length !== 1) throw new TypeError("排除条件只能包含一个条件");
+    return { kind: "not", term: terms[0]! };
+  }
+  if (mode !== "all" && mode !== "any")
+    throw new TypeError("请选择条件组的匹配方式");
+  return { kind: mode, terms };
+}
+
 export function lowerQueryEditorDocument(
   doc: ProseMirrorNode,
 ): LoweredQueryEditorDocument {
   const diagnostics: QueryEditorDiagnostic[] = [];
-  if (doc.firstChild?.type.name === "bundle") {
-    const bundle = doc.firstChild.attrs.value as QueryBundle | null;
+  if (doc.firstChild?.type.name === "query_bundle") {
+    const bundle = bundleFromEditorNode(doc.firstChild);
     return bundle
       ? { draft: null, bundle, diagnostics }
       : {
@@ -326,7 +455,8 @@ export function lowerQueryEditorDocument(
           break;
         }
         case "condition":
-          conditions.push(conditionFromAttrs(owner, node.attrs));
+        case "condition_group":
+          conditions.push(conditionFromNode(owner, node));
           break;
         case "relation": {
           const [factKind, candidateRole, relatedRole] = String(
@@ -389,13 +519,31 @@ function displayValue(owner: Owner, field: string, raw: string): string {
   return raw;
 }
 
+function readableConditionNode(owner: Owner, node: ProseMirrorNode): string {
+  if (node.type.name === "condition") {
+    const field = String(node.attrs.field ?? "");
+    const operator = String(node.attrs.operator ?? "");
+    const raw = String(node.attrs.raw ?? "");
+    return `${FIELD_LABEL[field] ?? field} ${OPERATOR_LABEL[operator] ?? operator}${raw ? ` ${displayValue(owner, field, raw)}` : ""}`;
+  }
+  const terms: string[] = [];
+  node.forEach((child) => terms.push(readableConditionNode(owner, child)));
+  const mode = String(node.attrs.mode);
+  const label = mode === "all" ? "全部满足" : mode === "any" ? "任一满足" : "排除";
+  return `${label}（${terms.join("、")}）`;
+}
+
 export function readableQueryEditorDocument(
   doc: ProseMirrorNode,
   entityLabel: (ref: string) => string = (ref) => ref,
 ): string {
-  if (doc.firstChild?.type.name === "bundle") {
-    const titles = doc.firstChild.attrs.titles as string[];
-    return `已保存查询：${titles.join("、") || "查询结果"}`;
+  if (doc.firstChild?.type.name === "query_bundle") {
+    const lines: string[] = [];
+    doc.firstChild.forEach((section) => {
+      const title = String(section.attrs.answer?.title ?? "查询结果");
+      lines.push(`${title}：${section.childCount} 个查询步骤`);
+    });
+    return lines.join("\n");
   }
   if (doc.firstChild?.type.name === "recipe") {
     const kind = String(doc.firstChild.attrs.kind);
@@ -414,16 +562,8 @@ export function readableQueryEditorDocument(
     if (node.type.name === "search") {
       const scope = String(node.attrs.scope ?? "lookup");
       lines.push(`${scope === "lookup" ? "名称" : scope.endsWith("description") ? "分集介绍" : "简介"} 包含 ${String(node.attrs.raw ?? "")}`);
-    } else if (node.type.name === "condition") {
-      const expression = node.attrs.expression as ExplorerCondition | null;
-      if (expression) {
-        lines.push("其中包含一组复合条件");
-      } else {
-        const field = String(node.attrs.field ?? "");
-        const operator = String(node.attrs.operator ?? "");
-        const raw = String(node.attrs.raw ?? "");
-        lines.push(`${FIELD_LABEL[field] ?? field} ${OPERATOR_LABEL[operator] ?? operator}${raw ? ` ${displayValue(owner, field, raw)}` : ""}`);
-      }
+    } else if (node.type.name === "condition" || node.type.name === "condition_group") {
+      lines.push(readableConditionNode(owner, node));
     } else if (node.type.name === "relation") {
       const selection = String(node.attrs.selection ?? "");
       const relation = queryRelationOptions(owner).find((item) =>
