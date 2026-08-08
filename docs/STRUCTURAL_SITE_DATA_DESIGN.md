@@ -7,6 +7,9 @@
 > [数据管道与图模型](DATA_ARCHITECTURE.md) 与
 > [探索应用架构](EXPLORER_ARCHITECTURE.md)。
 
+本文是当前 `structural-site-v1/explorer-v1` 底层格式合同。其上的字段注册、正文索引和
+统一执行语义由已实现的 [`atlas-query-v2`](QUERY_CAPABILITY_DESIGN.md) 查询合同定义。
+
 本设计把静态探索器的数据分成同一 SiteRelease 内的两层：结构核心保存可查询的实体、
 事实和分集语义；长文本侧车保存简介、分集介绍、事实备注和原始 `infobox` Wiki 源码。
 两层来自同一份类型化 Parquet、共享同一内容版本，但只有结构核心参与首屏、关系查询
@@ -27,9 +30,9 @@
 不在范围内：
 
 - 还原上游 JSONL 的原始字节、字段顺序、空值写法或来源记录位置。
-- 在构建阶段解析 `infobox`，或把解释结果写入 SiteRelease；发布数据只保存并提供原始
-  字符串，浏览器可以从原文生成非权威的只读展示投影。
-- 在浏览器中提供任意 Cypher、全图无界遍历或 LadybugDB 的执行能力。
+- 在 `explorer-v1` 构建阶段解析 `infobox`，或把解释结果写入 SiteRelease；发布数据
+  只保存并提供原始字符串，浏览器可以从原文生成非权威的只读展示投影。
+- 在浏览器中提供完整 openCypher、全图无界遍历或 LadybugDB 的执行能力。
 - 把 Episode 加入全局星图；Episode 仍是作品详情中的结构化从属记录。
 - 通过截断文本、按长度删记录或构建时临时取消字段来通过门禁。
 
@@ -61,11 +64,11 @@ flowchart LR
 | LadybugDB | Parquet 的图查询投影 | 受图端点约束 |
 | SiteRelease 结构核心 | 字段策略中的结构实体、事实和分集 | 文本侧车字段、来源字节和数据库执行能力 |
 | SiteRelease 文本侧车 | 字段策略声明的完整原始字符串值 | 字段值无损；不保留上游 JSON 编码和 Wiki 解释结果 |
-| Scene Model | 当前交互所需的有限节点和边 | 查询预算之外的数据 |
+| Scene Model | 当前交互所需的有限节点和边 | 未进入当前视觉工作集的数据 |
 | Canvas | 几何、颜色、拾取和当前可绘制场景 | 所有文本及不参与当前画面的语义 |
 
-结构核心和文本侧车合起来才是本设计的 SiteRelease。二者必须来自同一 dump 并受同一
-manifest 约束，不能混用不同发布版本。LadybugDB 与 SiteRelease 是 Parquet 的并列产物；
+结构核心、文本侧车和由它们派生的查询索引合起来才是本设计的 SiteRelease。它们必须来自同一
+dump 并受同一 manifest 约束，不能混用不同发布版本。LadybugDB 与 SiteRelease 是 Parquet 的并列产物；
 站点构建不读取数据库文件，原始快照仍是重新解释数据的唯一依据。
 
 ## 3. 字段策略
@@ -211,8 +214,10 @@ JSON 使用无额外空白的 UTF-8 编码；gzip 固定 `mtime=0`。相同 sche
 | `manifest.json` | schema、字段策略、来源、计数、限制和所有文件摘要 |
 | 现有几何 SoA | `positions`、`year`、`key`、`size`、`flags`、`score`、`tags` |
 | `rank-by-key.bin` | 稳定键到 Canvas VisualRank 的紧凑反向索引 |
+| `episode-subject.bin` | EpisodeId 到 Subject 源 ID 的定长反向索引 |
+| `fact-anchor.bin` | FactRef 到一个规范参与实体的定长索引，用于精确取回事实 |
 | `names.idx` / `names.pack` | 核心实体 `name`、`name_cn` 与实体种类的规范副本，每 2,048 个 VisualRank 一个初始成员 |
-| `entities.idx` / `entities.pack` | 核心实体除 `name`、`name_cn` 和长文本外的字段 |
+| `entities.idx` / `entities.pack` | 按稳定身份查询的核心实体名称、结构字段和文本存在位 |
 | `facts.idx` / `facts.pack` | 按参与实体查询的完整类型化事实结构 |
 | `episodes.idx` / `episodes.pack` | 按 SubjectKey 分组的 Episode 结构记录，包括孤儿分组 |
 | `text.idx` | 四类文本的字段目录、身份范围、成员偏移和长度 |
@@ -227,6 +232,7 @@ JSON 使用无额外空白的 UTF-8 编码；gzip 固定 `mtime=0`。相同 sche
 | `search.alias.idx` / `search.alias.pack` | 按 rank 保存构建期派生的完整搜索别名，供子串候选最终确认 |
 | `search.idx.json` / `search.pack` | 自适应前缀目录、完整叶和内部节点的有界建议投影 |
 | `search.ngram.idx` / `search.ngram.pack` | 二元字符散列桶到严格递增 VisualRank posting 的有界成员 |
+| `text.search.members` / `text.search.ngram.*` | 正文二元字符候选到权威文本成员；命中仍须读取原文复核 |
 | `edges.bin` | 仅用于全局语境的抽样骨架，不是事实权威 |
 
 `explorer-v1` 使用下列初始分块；范围边界和 gzip 参数都写入 manifest，客户端不能猜测：
@@ -234,7 +240,7 @@ JSON 使用无额外空白的 UTF-8 编码；gzip 固定 `mtime=0`。相同 sche
 | 数据 | 初始分块 | gzip |
 |---|---:|---:|
 | 名称 | 2,048 个连续 VisualRank | 6 |
-| 实体结构 | 每种实体 256 个连续源 ID | 9 |
+| 实体结构 | 每种实体 4,096 个连续源 ID | 9 |
 | Episode 结构 | 128 个连续 Subject ID；每 Subject 内联 200 条，溢出每页 500 条 | 9 |
 | 事实 incidence | 8,192 个稳定键桶；每实体内联 200 条，溢出每页 500 条 | 6 |
 | Entity `summary` | 每种实体 128 个连续源 ID | 9 |
@@ -267,13 +273,15 @@ DOM 始终保持固定上限。
 实际块宽写入 manifest，客户端只固定兼容上限。Episode 范围优先保持
 同一 Subject 的描述在一起；若单个 Subject 仍超限，再按 EpisodeId 拆分，保证读取一条
 描述仍只需一个成员。单个文本值本身无法满足上限时构建失败并升级 profile，不能截断。
-不同字段族不共享 gzip 成员；结构记录保存存在位，空值不触发文本请求。物理 pack 只在
+不同字段族不共享 gzip 成员；结构记录保存存在位，空值不触发文本请求。实体初始窗口较大，
+任一窗口超过成员上限时同样递归二分，因此点查仍受统一硬门禁约束。物理 pack 只在
 gzip 成员边界拆分，每个文件不超过 80,000,000 字节。拆分边界使用稳定身份范围，不能按
-当次压缩量从头动态填充，避免一条记录变化使后续所有 pack 改名。不支持 Range 的环境
-最多回退下载一个受限 pack，而不是整个文本集合。
+当次压缩量从头动态填充，避免一条记录变化使后续所有 pack 改名。不支持 Range 的环境只把
+完整 pack 放入受总预算约束的 LRU，而不是下载整个文本集合。
 
-`Data.entity` 将 `names.pack` 与 `entities.pack` 组合成完整结构实体，避免名称在详情包中
-再次保存。搜索结果中的显示名称是有意的读取副本，不是第二份实体权威。
+`names.pack` 为地图按 VisualRank 读取，`entities.pack` 为查询按稳定身份读取；两者都保存
+名称以避免全量查询穿过视觉排名缓存。它们是同源、逐行对账的读取投影，不是两份数据权威。
+实体扫描一次预取并校验 `entities.pack`，点查仍只读取一个成员。
 
 实体桶以 EntityKey 为键，因此实体元组不重复保存 `id` 或 `kind`。事实先按种类分组，
 incidence 元组再保存 FactRef、multiplicity、本地角色、其他参与者和结构属性。Episode
@@ -381,6 +389,7 @@ type LongTextResult =
 
 interface Data {
   entity(key: EntityKey): Promise<StructuralEntity | null>;
+  fact(ref: FactRef): Promise<Fact | null>;
   factsFor(key: EntityKey, cursor?: string): Promise<Page<Fact>>;
   episodesFor(
     subject: SubjectKey,
@@ -396,13 +405,13 @@ interface Data {
 错误必须抛出，不能伪装成空值；`present === true` 却找不到侧车值同样是发布损坏。
 `next === null` 才表示当前字段策略下已经读完全部分页。
 
-`episodesFor` 只接受 SubjectKey。Episode 没有独立实体入口，文本引用同时携带 SubjectKey
-以定位 ID 范围成员中的作品分组。词表 ID、成员号、偏移和磁盘元组都不能越过 Data
-边界。
+`episodesFor` 只接受 SubjectKey；Episode 点查先用 `episode-subject.bin` 读取一个 u32，
+再定位作品分组。FactRef 点查经 `fact-anchor.bin` 找到一个参与实体，再从该实体的规范事实中
+核对 FactRef。文本引用仍同时携带 SubjectKey，以定位 ID 范围成员。词表 ID、成员号、偏移和
+磁盘元组都不能越过 Data 边界。
 
-Explorer State 是唯一应用状态权威。异步查询使用
-`Pending | Complete(result) | Incomplete(result, reason) | Failed(code)`；工作集或路径预算
-用尽时是 `Incomplete`，不能显示成“完整图中不存在”。
+Explorer State 只保留一个 `QueryBundle`。查询在 Worker 中完整执行后才返回
+`exact` 结果；取消、数据不兼容、数据损坏和网络失败都是独立状态，不能显示成“没有结果”。
 
 Scene Model 从事实生成当前可绘制节点、边和样式，再把纯场景交给 Canvas。Canvas 不读取
 pack、不解释事实、不请求文本。DOM 先展示结构结果，只有用户展开简介、`infobox` 源码、
@@ -411,7 +420,7 @@ pack、不解释事实、不请求文本。DOM 先展示结构结果，只有用
 浏览器按以下优先级加载：
 
 1. manifest 后立即启动几何流，场景收到第一批完整记录即可绘制。
-2. 第一批节点已经绘制后，再低优先级读取骨架边和结构索引。
+2. 第一批节点已经绘制后，再低优先级读取稳定键反向索引。
 3. 搜索框获得焦点时读取搜索目录；输入后立即显示前缀建议，短暂防抖后按需读取二元
    字符候选桶和搜索别名块；新输入取消旧查询的全部成员请求。启动时不预取搜索成员。
 4. 首次结构画面完成后可以低优先级读取 `text.idx`，使冷文本展开不形成“先取索引、再取
@@ -419,9 +428,9 @@ pack、不解释事实、不请求文本。DOM 先展示结构结果，只有用
 
 悬停立即按需读取名称；只有指针在同一节点停留至少 150 ms，才低优先级预取该节点的
 实体和事实结构。指针离开后，尚未开始的预取取消；悬停不预取 Episode 或任何文本。
-实体 `summary`、`infobox`、Episode `description` 和事实备注一律只在用户明确展开时
-读取，不做内容预取。浏览器检测到节省流量模式时还会跳过结构数据的推测预取；不支持
-该能力的浏览器保持既定结构预取策略。
+实体 `summary` 在结构档案首次绘制后读取；`infobox`、Episode 列表与介绍只在
+对应视图或条目被打开时读取。事实备注只由查询命中触发。节省流量模式会跳过
+结构数据的推测预取。
 
 Data 用 Promise memo 合并进行中的相同请求；请求完成后只进入按解码负载计权的 LRU，
 不能由 Promise Map 永久持有。`explorer-v1` 的总缓存权重上限为 64,000,000 字节，并对
@@ -432,9 +441,9 @@ Data 用 Promise memo 合并进行中的相同请求；请求完成后只进入�
 时，完整 pack 只进入另一个以 `limits.pack_cap` 为总预算的 LRU，不能随访问过的文件数
 永久增长。manifest 只能降低缓存与成员预算，不能把它们提高到客户端编译上限之外。
 
-长文本以及从 Wiki AST 得到的字段值都按普通文本转义，不能作为 HTML 或 Wiki 标记
-执行。存储值始终完整；DOM 对超长内容分段渲染，避免当前快照中极端简介一次生成巨型
-DOM。
+长文本以及从 Wiki AST 得到的展示值都按普通文本转义，不能作为 HTML 或 Wiki 标记
+执行。存储值始终完整；浏览器只把 summary、Episode description 和事实备注纳入
+`atlas-query-v2` 全文索引，`infobox` 仅在资料视图中按需解释。DOM 对超长内容分段渲染。
 
 ## 8. 构建与验证
 
@@ -446,10 +455,10 @@ DOM。
 4. 生成并冻结词表，再编码结构元组、事实 incidence 和存在位。
 5. 按声明的身份范围和 gzip 级别生成四类文本侧车；空值只计数，不写负载，超大成员按
    稳定身份继续细分。
-6. 生成几何、自适应前缀搜索、二元字符候选索引和派生骨架；按稳定身份范围拆分物理
+6. 生成几何、名称/别名索引、正文候选索引和派生骨架；按稳定身份范围拆分物理
    pack，再写覆盖全部数据产物的 manifest。
-7. CI 在全新 checkout 的 `site/` 中构建客户端并验证全部文件及总字节数；全部门禁通过后
-   才上传发布制品。本地 `site/data/` 是可重建 staging，中断后必须重新烘焙。
+7. CI 在 runner 临时目录构建数据和客户端，验证全部文件及总字节数；全部门禁通过后才上传
+   该目录。仓库中的 `site/` 不作为中间构建目录。
 
 验证器必须独立证明：
 
@@ -595,7 +604,7 @@ Subject ID 还会增加约 0.62 MB，并把 P99 从 47,523 B 降到 26,301 B。�
 
 1. 当前类型化 Parquet 的核心实体、事实、分集和全部字段值都能从 SiteRelease 精确恢复；
    Episode 归属、未解析引用、重复次数和原始 `infobox` 字符串仍然存在。
-2. 读完分页即可得到配置内完整结果；任何预算截断和失败都对用户可见。
+2. 分页只控制传输，读完即可得到完整结果；执行没有隐藏的预算截断，取消和失败都对用户可见。
 3. manifest 省略策略、空文本和加载失败具有不同语义；超长文本完整存储并安全、分段
    显示。
 4. Canvas 与 DOM 使用同一个 Data / Explorer State / Fact 模型，Canvas 从不读取文本。
