@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { encodeBundle } from "../src/query/bundle-url";
-import { comparisonRecipe, fullTextRecipe, pathRecipe } from "../src/query/recipes";
+import {
+  comparisonRecipe,
+  decompileQueryRecipe,
+  fullTextRecipe,
+  pathRecipe,
+} from "../src/query/recipes";
 
 test("one full-text action covers every published long-text family", () => {
   const bundle = fullTextRecipe("星空");
@@ -20,7 +25,9 @@ test("one full-text action covers every published long-text family", () => {
 
 test("context actions compile to exact set and path sections", () => {
   const comparison = comparisonRecipe("subject:1", "person:2");
-  assert.deepEqual(Object.keys(comparison.sections), ["common", "leftOnly", "rightOnly"]);
+  assert.deepEqual(Object.keys(comparison.sections), ["all", "common", "leftOnly", "rightOnly"]);
+  assert.ok(Object.values(comparison.sections.all!.query.operators)
+    .some((operator) => operator.kind === "union"));
   assert.ok(Object.values(comparison.sections.common!.query.operators)
     .some((operator) => operator.kind === "intersect"));
 
@@ -31,4 +38,48 @@ test("context actions compile to exact set and path sections", () => {
 
   assert.doesNotThrow(() => encodeBundle(comparison));
   assert.doesNotThrow(() => encodeBundle(path));
+});
+
+test("comparison recipes keep readable names beside stable references", () => {
+  const comparison = comparisonRecipe("subject:1", "person:2");
+
+  for (const section of Object.values(comparison.sections)) {
+    for (const operator of Object.values(section.query.operators)) {
+      if (operator.kind === "project")
+        assert.deepEqual(operator.columns.map((column) => column.name), ["ref", "name"]);
+      if (
+        operator.kind === "union" ||
+        operator.kind === "intersect" ||
+        operator.kind === "except"
+      )
+        for (const branch of operator.branches)
+          assert.deepEqual(branch.columns.map((column) => column.output), ["ref", "name"]);
+    }
+  }
+});
+
+test("restores every built-in recipe as the same editable meaning", () => {
+  assert.deepEqual(decompileQueryRecipe(fullTextRecipe("星空")), {
+    kind: "fullText",
+    text: "星空",
+  });
+  assert.deepEqual(decompileQueryRecipe(comparisonRecipe("subject:1", "person:2")), {
+    kind: "common",
+    from: "subject:1",
+    to: "person:2",
+  });
+  assert.deepEqual(decompileQueryRecipe(pathRecipe("subject:1", "person:2", {
+    maxHops: 4,
+    maxPaths: 5,
+  })), {
+    kind: "path",
+    from: "subject:1",
+    to: "person:2",
+    maxHops: 4,
+    maxPaths: 5,
+  });
+
+  const customized = pathRecipe("subject:1", "person:2");
+  customized.sections.paths!.answer.title = "自定义路径";
+  assert.equal(decompileQueryRecipe(customized), null);
 });

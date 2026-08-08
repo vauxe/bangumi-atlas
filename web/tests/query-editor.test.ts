@@ -140,6 +140,53 @@ test("round-trips nested all, any, and excluded condition groups structurally", 
   assert.match(readableQueryEditorDocument(doc), /排除/);
 });
 
+test("round-trips grouped statistics and statistic-result conditions", () => {
+  const draft = {
+    owner: "subject" as const,
+    condition: { kind: "compare" as const, field: "year", operator: "gte" as const, value: 2000 },
+    aggregate: {
+      groupBy: ["type"],
+      metrics: [
+        { function: "count" as const },
+        { function: "avg" as const, field: "score" },
+      ],
+      having: { kind: "compare" as const, field: "count", operator: "gte" as const, value: 10 },
+    },
+    orderBy: [{ column: "count", direction: "desc" as const, nulls: "last" as const }],
+    limit: 20,
+  };
+  const doc = createQueryEditorDocument(draft);
+
+  assert.equal(doc.child(2).type.name, "aggregate");
+  assert.deepEqual(lowerQueryEditorDocument(doc), { draft, diagnostics: [] });
+  assert.match(readableQueryEditorDocument(doc), /按类型分组/);
+  assert.match(readableQueryEditorDocument(doc), /平均评分/);
+});
+
+test("stores reusable values in semantic nodes without side state", () => {
+  const draft = {
+    owner: "subject" as const,
+    text: {
+      value: "机器人",
+      capability: "fullText" as const,
+      field: "summary" as const,
+      parameter: "keyword",
+    },
+    condition: {
+      kind: "compare" as const,
+      field: "score",
+      operator: "gte" as const,
+      value: 8,
+      parameter: "minimumScore",
+    },
+  };
+  const doc = createQueryEditorDocument(draft);
+
+  assert.equal(doc.child(1).attrs.parameter, "keyword");
+  assert.equal(doc.child(2).attrs.parameter, "minimumScore");
+  assert.deepEqual(lowerQueryEditorDocument(doc), { draft, diagnostics: [] });
+});
+
 test("serializes readable domain language without exposing stored identities", () => {
   const doc = createQueryEditorDocument({
     owner: "subject",
@@ -209,17 +256,25 @@ test("represents context recipes in the same editor document", () => {
     kind: "path",
     from: "subject:1",
     to: "person:2",
+    maxHops: 4,
+    maxPaths: 5,
   });
 
   assert.deepEqual(lowerQueryEditorDocument(doc), {
     draft: null,
-    recipe: { kind: "path", from: "subject:1", to: "person:2" },
+    recipe: {
+      kind: "path",
+      from: "subject:1",
+      to: "person:2",
+      maxHops: 4,
+      maxPaths: 5,
+    },
     diagnostics: [],
   });
   assert.equal(readableQueryEditorDocument(doc, (ref) => ({
     "subject:1": "千与千寻",
     "person:2": "宫崎骏",
-  })[ref] ?? ref), "查找 千与千寻 到 宫崎骏 的关系路径");
+  })[ref] ?? ref), "查找 千与千寻 到 宫崎骏 的关系路径（最多 4 跳，5 条）");
 });
 
 test("represents every executable operator as a structural editor node", () => {

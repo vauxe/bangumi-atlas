@@ -3,16 +3,24 @@ import { keymap } from "prosemirror-keymap";
 import { Node as ProseMirrorNode, Schema, type NodeSpec } from "prosemirror-model";
 import { EditorState } from "prosemirror-state";
 
-import type { ExplorerCondition, ExplorerQuery } from "./explorer";
-import type { QueryBundle } from "./bundle";
+import type {
+  ExplorerAggregate,
+  ExplorerAggregateMetric,
+  ExplorerCondition,
+  ExplorerQuery,
+} from "./explorer";
+import { normalizeBundle, type QueryBundle } from "./bundle";
 import type { Owner, QueryFactKind } from "./contract";
 import type { QueryDocument, QueryOperator } from "./document";
+import type { QueryRecipe } from "./recipes";
+import { QUERY_SECURITY_PROFILE } from "./security";
 import {
   FACT_FIELD_LABEL,
   FIELD_LABEL,
   OPERATOR_LABEL,
   OWNER_LABEL,
   conditionEditorOperator,
+  describeAggregateMetric,
   enumValuesFor,
   parseExplorerLimit,
   parseFactValue,
@@ -21,7 +29,10 @@ import {
   parseValues,
   queryConditionOperators,
   queryFactConditionOperators,
+  queryAggregateFields,
+  queryGroupFields,
   queryRelationOptions,
+  queryStatisticColumns,
 } from "./workbench-model";
 
 const clause = (name: string, attrs: NodeSpec["attrs"]): NodeSpec => ({
@@ -74,12 +85,14 @@ export const queryEditorSchema = new Schema({
     search: clause("search", {
       scope: { default: "lookup" },
       raw: { default: "" },
+      parameter: { default: "" },
     }),
     condition: {
       ...clause("condition", {
         field: { default: "" },
         operator: { default: "" },
         raw: { default: "" },
+        parameter: { default: "" },
       }),
       group: "query_clause condition_term",
     },
@@ -99,6 +112,11 @@ export const queryEditorSchema = new Schema({
     projection: clause("projection", {
       columns: { default: [] },
     }),
+    aggregate: clause("aggregate", {
+      groupBy: { default: [] },
+      metrics: { default: [{ function: "count" }] },
+      having: { default: [] },
+    }),
     sort: clause("sort", {
       field: { default: "" },
       direction: { default: "asc" },
@@ -115,6 +133,8 @@ export const queryEditorSchema = new Schema({
         text: { default: "" },
         from: { default: "" },
         to: { default: "" },
+        maxHops: { default: 6 },
+        maxPaths: { default: 10 },
       },
       toDOM: () => ["div", { "data-query-clause": "recipe" }],
     },
@@ -153,13 +173,11 @@ export interface LoweredQueryEditorDocument {
   diagnostics: QueryEditorDiagnostic[];
 }
 
-export type QueryEditorRecipe =
-  | { kind: "fullText"; text: string }
-  | { kind: "common" | "path"; from: string; to: string };
+export type QueryEditorRecipe = QueryRecipe;
 
 function editableCondition(
   condition: ExplorerCondition,
-): { field: string; operator: string; raw: string } | null {
+): { field: string; operator: string; raw: string; parameter: string } | null {
   if (
     condition.kind !== "compare" &&
     condition.kind !== "in" &&
@@ -173,7 +191,12 @@ function editableCondition(
     : condition.kind === "in"
       ? condition.values.map(String).join("、")
       : "";
-  return { field: condition.field, operator, raw };
+  return {
+    field: condition.field,
+    operator,
+    raw,
+    parameter: condition.kind === "compare" ? condition.parameter ?? "" : "",
+  };
 }
 
 function conditionEditorNode(condition: ExplorerCondition): ProseMirrorNode {
@@ -213,7 +236,10 @@ export interface EditableFactCondition {
   field: string;
   operator: string;
   raw: string;
+  parameter?: string;
 }
+
+export type EditableStatisticCondition = EditableFactCondition;
 
 function editableFactConditions(
   condition: ExplorerCondition | undefined,
@@ -226,6 +252,17 @@ function editableFactConditions(
   return editable as EditableFactCondition[];
 }
 
+function editableStatisticConditions(
+  condition: ExplorerCondition | undefined,
+): EditableStatisticCondition[] {
+  if (!condition) return [];
+  const terms = condition.kind === "all" ? condition.terms : [condition];
+  const editable = terms.map(editableCondition);
+  if (editable.some((item) => item === null))
+    throw new TypeError("当前统计结果条件需要高级查询编辑器");
+  return editable as EditableStatisticCondition[];
+}
+
 export function createQueryEditorDocument(draft: ExplorerQuery): ProseMirrorNode {
   const children: ProseMirrorNode[] = [
     queryEditorSchema.node("find", { owner: draft.owner }),
@@ -236,6 +273,7 @@ export function createQueryEditorDocument(draft: ExplorerQuery): ProseMirrorNode
         ? "lookup"
         : `fullText:${draft.text.field ?? ""}`,
       raw: draft.text.value,
+      parameter: draft.text.parameter ?? "",
     }));
   }
   if (draft.condition) {
@@ -251,6 +289,13 @@ export function createQueryEditorDocument(draft: ExplorerQuery): ProseMirrorNode
       exists: relation.exists,
       related: relation.related,
       factConditions: editableFactConditions(relation.condition),
+    }));
+  }
+  if (draft.aggregate) {
+    children.push(queryEditorSchema.node("aggregate", {
+      groupBy: [...draft.aggregate.groupBy],
+      metrics: draft.aggregate.metrics.map((metric) => ({ ...metric })),
+      having: editableStatisticConditions(draft.aggregate.having),
     }));
   }
   if (draft.columns) {
@@ -282,6 +327,8 @@ export function createQueryRecipeDocument(
       text: recipe.kind === "fullText" ? recipe.text : "",
       from: recipe.kind === "fullText" ? "" : recipe.from,
       to: recipe.kind === "fullText" ? "" : recipe.to,
+      maxHops: recipe.kind === "path" ? recipe.maxHops : 6,
+      maxPaths: recipe.kind === "path" ? recipe.maxPaths : 10,
     }),
   ]);
 }
@@ -357,6 +404,7 @@ function conditionFromAttrs(
   const field = String(attrs.field ?? "");
   const operator = String(attrs.operator ?? "");
   const raw = String(attrs.raw ?? "");
+  const parameter = String(attrs.parameter ?? "").trim();
   const allowed = queryConditionOperators(owner, field);
   if (!field || !allowed.includes(operator))
     throw new TypeError("请选择有效的条件字段和比较方式");
@@ -365,6 +413,10 @@ function conditionFromAttrs(
     operator !== "isMissing" && operator !== "isPresent" &&
     !raw.trim()
   ) throw new TypeError(`请填写${FIELD_LABEL[field] ?? field}的值`);
+  if (parameter && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(parameter))
+    throw new TypeError("参数名只能使用英文字母、数字和下划线，且不能以数字开头");
+  if (parameter && ["in", "notIn", "isNull", "isNotNull", "isMissing", "isPresent"].includes(operator))
+    throw new TypeError("当前比较方式不能使用单值参数");
   if (operator === "in" || operator === "notIn") {
     return {
       kind: "in",
@@ -393,6 +445,7 @@ function conditionFromAttrs(
     operator: operator === "notContains" ? "contains" : operator as
       "eq" | "ne" | "lt" | "lte" | "gt" | "gte" | "contains",
     value: parseValue(owner, field, raw),
+    ...(parameter ? { parameter } : {}),
     ...(operator === "notContains" ? { negated: true } : {}),
   };
 }
@@ -421,6 +474,7 @@ function factConditionFromAttrs(
   const field = String(attrs.field ?? "");
   const operator = String(attrs.operator ?? "");
   const raw = String(attrs.raw ?? "");
+  const parameter = String(attrs.parameter ?? "").trim();
   if (!field || !queryFactConditionOperators(kind, field).includes(operator))
     throw new TypeError("请选择有效的关系属性和比较方式");
   if (
@@ -428,6 +482,10 @@ function factConditionFromAttrs(
     operator !== "isMissing" && operator !== "isPresent" &&
     !raw.trim()
   ) throw new TypeError("请填写关系属性的值");
+  if (parameter && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(parameter))
+    throw new TypeError("参数名只能使用英文字母、数字和下划线，且不能以数字开头");
+  if (parameter && ["in", "notIn", "isNull", "isNotNull", "isMissing", "isPresent"].includes(operator))
+    throw new TypeError("当前比较方式不能使用单值参数");
   if (operator === "in" || operator === "notIn") {
     return {
       kind: "in",
@@ -456,8 +514,115 @@ function factConditionFromAttrs(
     operator: operator === "notContains" ? "contains" : operator as
       "eq" | "ne" | "lt" | "lte" | "gt" | "gte" | "contains",
     value: parseFactValue(kind, field, raw),
+    ...(parameter ? { parameter } : {}),
     ...(operator === "notContains" ? { negated: true } : {}),
   };
+}
+
+const AGGREGATE_FUNCTIONS = new Set([
+  "count",
+  "countDistinct",
+  "sum",
+  "min",
+  "max",
+  "avg",
+]);
+
+function statisticConditionFromAttrs(
+  owner: Owner,
+  aggregate: ExplorerAggregate,
+  attrs: EditableStatisticCondition,
+): ExplorerCondition {
+  const output = queryStatisticColumns(aggregate).find((column) =>
+    column.value === attrs.field
+  );
+  if (!output) throw new TypeError("请选择有效的统计结果");
+  if (aggregate.groupBy.includes(attrs.field))
+    return conditionFromAttrs(owner, { ...attrs });
+  const operator = String(attrs.operator ?? "");
+  const raw = String(attrs.raw ?? "");
+  const parameter = String(attrs.parameter ?? "").trim();
+  if (parameter && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(parameter))
+    throw new TypeError("参数名只能使用英文字母、数字和下划线，且不能以数字开头");
+  const allowed = new Set([
+    "eq", "ne", "lt", "lte", "gt", "gte", "in", "notIn",
+    "isNull", "isNotNull",
+  ]);
+  if (!allowed.has(operator)) throw new TypeError("请选择有效的统计比较方式");
+  if (operator === "isNull" || operator === "isNotNull") {
+    if (parameter) throw new TypeError("空值判断不能使用参数");
+    return {
+      kind: "isNull",
+      field: attrs.field,
+      ...(operator === "isNotNull" ? { negated: true } : {}),
+    };
+  }
+  if (!raw.trim()) throw new TypeError("请填写统计结果条件的值");
+  if (operator === "in" || operator === "notIn") {
+    if (parameter) throw new TypeError("值集合不能使用单值参数");
+    const values = raw.split(/[,，、\n]+/).map((value) => Number(value.trim()));
+    if (!values.length || values.some((value) => !Number.isFinite(value)))
+      throw new TypeError("统计结果条件需要有效数字");
+    return {
+      kind: "in",
+      field: attrs.field,
+      values,
+      ...(operator === "notIn" ? { negated: true } : {}),
+    };
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value)) throw new TypeError("统计结果条件需要有效数字");
+  return {
+    kind: "compare",
+    field: attrs.field,
+    operator: operator as "eq" | "ne" | "lt" | "lte" | "gt" | "gte",
+    value,
+    ...(parameter ? { parameter } : {}),
+  };
+}
+
+function aggregateFromAttrs(
+  owner: Owner,
+  attrs: Record<string, unknown>,
+): ExplorerAggregate {
+  const rawGroups = attrs.groupBy;
+  const rawMetrics = attrs.metrics;
+  const rawHaving = attrs.having;
+  if (!Array.isArray(rawGroups) || !Array.isArray(rawMetrics) || !Array.isArray(rawHaving))
+    throw new TypeError("统计设置无效");
+  const allowedGroups = new Set(queryGroupFields(owner));
+  const groupBy = rawGroups.map(String);
+  if (
+    new Set(groupBy).size !== groupBy.length ||
+    groupBy.some((field) => !allowedGroups.has(field))
+  ) throw new TypeError("请选择有效且不重复的分组字段");
+  const allowedFields = new Set(queryAggregateFields(owner));
+  const metrics = rawMetrics.map((value) => {
+    const metric = value as Partial<ExplorerAggregateMetric>;
+    if (!metric || !AGGREGATE_FUNCTIONS.has(String(metric.function)))
+      throw new TypeError("请选择有效的统计指标");
+    const fn = metric.function as ExplorerAggregateMetric["function"];
+    const field = metric.field ? String(metric.field) : undefined;
+    if (fn !== "count" && (!field || !allowedFields.has(field)))
+      throw new TypeError("该统计指标必须选择有效字段");
+    if (field && !allowedFields.has(field))
+      throw new TypeError("请选择有效的统计字段");
+    return { function: fn, ...(field ? { field } : {}) };
+  });
+  if (!metrics.length) throw new TypeError("统计至少需要一个指标");
+  const aggregate: ExplorerAggregate = { groupBy, metrics };
+  const having = rawHaving.map((value) =>
+    statisticConditionFromAttrs(
+      owner,
+      aggregate,
+      value as EditableStatisticCondition,
+    )
+  );
+  if (having.length)
+    aggregate.having = having.length === 1
+      ? having[0]
+      : { kind: "all", terms: having };
+  return aggregate;
 }
 
 export function lowerQueryEditorDocument(
@@ -466,12 +631,23 @@ export function lowerQueryEditorDocument(
   const diagnostics: QueryEditorDiagnostic[] = [];
   if (doc.firstChild?.type.name === "query_bundle") {
     const bundle = bundleFromEditorNode(doc.firstChild);
-    return bundle
-      ? { draft: null, bundle, diagnostics }
-      : {
-          draft: null,
-          diagnostics: [{ clause: 0, message: "查询内容不完整" }],
-        };
+    if (!bundle)
+      return {
+        draft: null,
+        diagnostics: [{ clause: 0, message: "查询内容不完整" }],
+      };
+    try {
+      normalizeBundle(bundle);
+      return { draft: null, bundle, diagnostics };
+    } catch (error) {
+      return {
+        draft: null,
+        diagnostics: [{
+          clause: 0,
+          message: error instanceof Error ? error.message : "查询内容不完整",
+        }],
+      };
+    }
   }
   if (doc.firstChild?.type.name === "recipe") {
     const kind = String(doc.firstChild.attrs.kind);
@@ -486,8 +662,26 @@ export function lowerQueryEditorDocument(
     }
     const from = String(doc.firstChild.attrs.from);
     const to = String(doc.firstChild.attrs.to);
-    if ((kind === "common" || kind === "path") && from && to)
+    if (kind === "common" && from && to)
       return { draft: null, recipe: { kind, from, to }, diagnostics };
+    if (kind === "path" && from && to) {
+      const maxHops = Number(doc.firstChild.attrs.maxHops);
+      const maxPaths = Number(doc.firstChild.attrs.maxPaths);
+      if (
+        Number.isSafeInteger(maxHops) && maxHops >= 1 &&
+        maxHops <= QUERY_SECURITY_PROFILE.path.maxHops &&
+        Number.isSafeInteger(maxPaths) && maxPaths >= 1 &&
+        maxPaths <= QUERY_SECURITY_PROFILE.path.maxPaths
+      ) return {
+        draft: null,
+        recipe: { kind, from, to, maxHops, maxPaths },
+        diagnostics,
+      };
+      return {
+        draft: null,
+        diagnostics: [{ clause: 0, message: "请设置有效的路径范围" }],
+      };
+    }
     return {
       draft: null,
       diagnostics: [{ clause: 0, message: "请选择两个实体" }],
@@ -513,14 +707,22 @@ export function lowerQueryEditorDocument(
           if (draft.text) throw new TypeError("一个查询只能有一个搜索条件");
           const raw = String(node.attrs.raw ?? "").trim();
           if (!raw) throw new TypeError("请输入要搜索的文字");
+          const parameter = String(node.attrs.parameter ?? "").trim();
+          if (parameter && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(parameter))
+            throw new TypeError("参数名只能使用英文字母、数字和下划线，且不能以数字开头");
           const scope = String(node.attrs.scope ?? "");
           draft.text = scope === "lookup"
-            ? { value: raw, capability: "lookup" }
+            ? {
+                value: raw,
+                capability: "lookup",
+                ...(parameter ? { parameter } : {}),
+              }
             : scope.startsWith("fullText:") && scope.slice(9)
               ? {
                   value: raw,
                   capability: "fullText",
                   field: scope.slice(9) as "summary" | "description",
+                  ...(parameter ? { parameter } : {}),
                 }
               : (() => { throw new TypeError("请选择搜索范围"); })();
           break;
@@ -563,11 +765,18 @@ export function lowerQueryEditorDocument(
           break;
         }
         case "projection": {
+          if (draft.aggregate) throw new TypeError("统计查询不使用返回信息设置");
           if (draft.columns) throw new TypeError("一个查询只能有一个返回设置");
           const columns = node.attrs.columns;
           if (!Array.isArray(columns) || !columns.length)
             throw new TypeError("请至少返回一项信息");
           draft.columns = columns.map(String);
+          break;
+        }
+        case "aggregate": {
+          if (draft.aggregate) throw new TypeError("一个查询只能有一个统计设置");
+          if (draft.columns) throw new TypeError("统计查询不使用返回信息设置");
+          draft.aggregate = aggregateFromAttrs(owner, node.attrs);
           break;
         }
         case "sort": {
@@ -615,7 +824,9 @@ function readableConditionNode(owner: Owner, node: ProseMirrorNode): string {
     const field = String(node.attrs.field ?? "");
     const operator = String(node.attrs.operator ?? "");
     const raw = String(node.attrs.raw ?? "");
-    return `${FIELD_LABEL[field] ?? field} ${OPERATOR_LABEL[operator] ?? operator}${raw ? ` ${displayValue(owner, field, raw)}` : ""}`;
+    const parameter = String(node.attrs.parameter ?? "");
+    const value = raw ? displayValue(owner, field, raw) : "";
+    return `${FIELD_LABEL[field] ?? field} ${OPERATOR_LABEL[operator] ?? operator}${value ? ` ${parameter ? `参数 ${parameter}（${value}）` : value}` : ""}`;
   }
   const terms: string[] = [];
   node.forEach((child) => terms.push(readableConditionNode(owner, child)));
@@ -644,7 +855,7 @@ export function readableQueryEditorDocument(
     const to = entityLabel(String(doc.firstChild.attrs.to));
     return kind === "common"
       ? `查找 ${from} 与 ${to} 的共同关联`
-      : `查找 ${from} 到 ${to} 的关系路径`;
+      : `查找 ${from} 到 ${to} 的关系路径（最多 ${String(doc.firstChild.attrs.maxHops)} 跳，${String(doc.firstChild.attrs.maxPaths)} 条）`;
   }
   const owner = String(doc.firstChild?.attrs.owner ?? "subject") as Owner;
   const lines = [`查找${OWNER_LABEL[owner] ?? "条目"}`];
@@ -652,7 +863,9 @@ export function readableQueryEditorDocument(
     const node = doc.child(index);
     if (node.type.name === "search") {
       const scope = String(node.attrs.scope ?? "lookup");
-      lines.push(`${scope === "lookup" ? "名称" : scope.endsWith("description") ? "分集介绍" : "简介"} 包含 ${String(node.attrs.raw ?? "")}`);
+      const parameter = String(node.attrs.parameter ?? "");
+      const raw = String(node.attrs.raw ?? "");
+      lines.push(`${scope === "lookup" ? "名称" : scope.endsWith("description") ? "分集介绍" : "简介"} 包含 ${parameter ? `参数 ${parameter}（${raw}）` : raw}`);
     } else if (node.type.name === "condition" || node.type.name === "condition_group") {
       lines.push(readableConditionNode(owner, node));
     } else if (node.type.name === "relation") {
@@ -670,6 +883,14 @@ export function readableQueryEditorDocument(
       );
     } else if (node.type.name === "projection") {
       lines.push(`返回 ${(node.attrs.columns as string[]).map((field) => FIELD_LABEL[field] ?? field).join("、")}`);
+    } else if (node.type.name === "aggregate") {
+      const groups = (node.attrs.groupBy as string[])
+        .map((field) => FIELD_LABEL[field] ?? field);
+      const metrics = (node.attrs.metrics as ExplorerAggregateMetric[])
+        .map(describeAggregateMetric);
+      lines.push(
+        `统计${groups.length ? `，按${groups.join("、")}分组` : "全部结果"}：${metrics.join("、")}`,
+      );
     } else if (node.type.name === "sort") {
       const field = String(node.attrs.field ?? "");
       lines.push(`按 ${FIELD_LABEL[field] ?? field} ${node.attrs.direction === "desc" ? "从高到低" : "从低到高"}，空值${node.attrs.nulls === "first" ? "最前" : "最后"}`);

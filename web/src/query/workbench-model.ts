@@ -6,7 +6,14 @@ import {
   type Owner,
   type QueryFactKind,
 } from "./contract";
-import type { ExplorerCondition, ExplorerQuery } from "./explorer";
+import { explorerMetricName } from "./explorer";
+import type {
+  ExplorerAggregate,
+  ExplorerAggregateMetric,
+  ExplorerCondition,
+  ExplorerQuery,
+} from "./explorer";
+import type { AggregateFunction } from "./document";
 import type { CompareOperator } from "./value";
 import { MEDIA_NAMES } from "../types";
 import type { Mappings } from "../types";
@@ -77,6 +84,15 @@ export const OPERATOR_LABEL: Record<string, string> = {
   isPresent: "已提供",
 };
 
+export const AGGREGATE_FUNCTION_LABEL: Record<AggregateFunction, string> = {
+  count: "条数",
+  countDistinct: "去重计数",
+  sum: "合计",
+  min: "最低",
+  max: "最高",
+  avg: "平均",
+};
+
 export const COMMON_FIELDS: Record<Owner, Set<string>> = {
   subject: new Set(["type", "year", "score", "tags", "nsfw", "summaryState"]),
   person: new Set(["type", "career", "comments", "collects", "summaryState"]),
@@ -103,7 +119,7 @@ export const COMPARE = new Set<CompareOperator>([
   "contains",
 ]);
 
-const FACT_LABEL: Record<string, string> = {
+export const FACT_LABEL: Record<string, string> = {
   RELATES_TO: "作品关系",
   WORKED_ON: "人物参与",
   APPEARS_IN: "角色登场",
@@ -148,8 +164,16 @@ export function queryFieldsFor(
 export function enumValuesFor(
   owner: Owner,
   field: string,
+  mappings?: Mappings,
 ): Record<string, string> | null {
   const definition = QUERY_CONTRACT.owners[owner].fields[field];
+  const namespace = definition?.enum;
+  if (namespace && mappings && !namespace.startsWith("fact_labels.")) {
+    const values = mappings[
+      namespace as Exclude<keyof Mappings, "fact_labels">
+    ];
+    if (values) return values;
+  }
   return owner === "subject" && field === "type"
     ? Object.fromEntries(Object.entries(MEDIA_NAMES).map(([value, label]) => [value, label]))
     : owner === "person" && field === "type"
@@ -176,11 +200,14 @@ function summaryValue(owner: Owner, field: string, value: unknown): string {
 function describeCondition(owner: Owner, condition: ExplorerCondition): string {
   switch (condition.kind) {
     case "compare":
+      const input = condition.parameter
+        ? `参数 ${condition.parameter}（${summaryValue(owner, condition.field, condition.value)}）`
+        : summaryValue(owner, condition.field, condition.value);
       if (condition.negated && condition.operator === "contains")
-        return `${FIELD_LABEL[condition.field] ?? condition.field}不含${summaryValue(owner, condition.field, condition.value)}`;
+        return `${FIELD_LABEL[condition.field] ?? condition.field}不含${input}`;
       if (condition.negated)
-        return `排除（${FIELD_LABEL[condition.field] ?? condition.field} ${SUMMARY_OPERATOR[condition.operator]} ${summaryValue(owner, condition.field, condition.value)}）`;
-      return `${FIELD_LABEL[condition.field] ?? condition.field} ${SUMMARY_OPERATOR[condition.operator]} ${summaryValue(owner, condition.field, condition.value)}`;
+        return `排除（${FIELD_LABEL[condition.field] ?? condition.field} ${SUMMARY_OPERATOR[condition.operator]} ${input}）`;
+      return `${FIELD_LABEL[condition.field] ?? condition.field} ${SUMMARY_OPERATOR[condition.operator]} ${input}`;
     case "in":
       return `${FIELD_LABEL[condition.field] ?? condition.field}${condition.negated ? "不属于" : "属于"}（${condition.values.map((value) => summaryValue(owner, condition.field, value)).join("、")}）`;
     case "isNull":
@@ -379,6 +406,36 @@ export function queryTextScopes(owner: Owner): Array<{
 export function querySortFields(owner: Owner): string[] {
   return queryFieldsFor(owner, "sort")
     .filter((field) => !INTERNAL_FIELDS.has(field));
+}
+
+export function queryGroupFields(owner: Owner): string[] {
+  return queryFieldsFor(owner, "group")
+    .filter((field) => !INTERNAL_FIELDS.has(field));
+}
+
+export function queryAggregateFields(owner: Owner): string[] {
+  return queryFieldsFor(owner, "aggregate")
+    .filter((field) => !INTERNAL_FIELDS.has(field));
+}
+
+export function describeAggregateMetric(metric: ExplorerAggregateMetric): string {
+  const label = AGGREGATE_FUNCTION_LABEL[metric.function];
+  return metric.field ? `${label}${FIELD_LABEL[metric.field] ?? metric.field}` : label;
+}
+
+export function queryStatisticColumns(
+  aggregate: ExplorerAggregate,
+): Array<{ value: string; label: string }> {
+  return [
+    ...aggregate.groupBy.map((field) => ({
+      value: field,
+      label: FIELD_LABEL[field] ?? field,
+    })),
+    ...aggregate.metrics.map((metric) => ({
+      value: explorerMetricName(metric),
+      label: describeAggregateMetric(metric),
+    })),
+  ];
 }
 
 export function defaultSortDirection(field: string): "asc" | "desc" {

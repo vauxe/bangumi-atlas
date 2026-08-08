@@ -117,7 +117,9 @@ test("compiles comparison as exact intersection and both differences", () => {
     right: "subject:2",
   });
 
-  assert.deepEqual(Object.keys(bundle.sections), ["common", "leftOnly", "rightOnly"]);
+  assert.deepEqual(Object.keys(bundle.sections), ["all", "common", "leftOnly", "rightOnly"]);
+  assert.ok(Object.values(bundle.sections.all?.query.operators ?? {})
+    .some((operator) => operator.kind === "union"));
   assert.ok(Object.values(bundle.sections.common?.query.operators ?? {})
     .some((operator) => operator.kind === "intersect"));
   assert.ok(Object.values(bundle.sections.leftOnly?.query.operators ?? {})

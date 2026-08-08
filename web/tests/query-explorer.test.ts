@@ -228,6 +228,138 @@ test("filters attributes on the matched fact and round-trips them", () => {
   assert.deepEqual(decompileExplorerQuery(bundle), draft);
 });
 
+test("composes grouped statistics and post-statistic conditions", () => {
+  const draft: Parameters<typeof compileExplorerQuery>[0] = {
+    owner: "subject",
+    condition: { kind: "in", field: "type", values: [1, 2] },
+    aggregate: {
+      groupBy: ["type"],
+      metrics: [
+        { function: "count" },
+        { function: "avg", field: "score" },
+      ],
+      having: {
+        kind: "compare",
+        field: "count",
+        operator: "gte",
+        value: 2,
+      },
+    },
+    orderBy: [{ column: "count", direction: "desc", nulls: "last" }],
+    limit: 20,
+  };
+
+  const bundle = compileExplorerQuery(draft);
+  const query = bundle.sections.results!.query;
+  const aggregate = Object.values(query.operators).find(
+    (operator) => operator.kind === "aggregate",
+  );
+  const having = Object.values(query.operators).find((operator) =>
+    operator.kind === "filter" && operator.input === "aggregate"
+  );
+
+  assert.deepEqual(aggregate, {
+    kind: "aggregate",
+    input: "filter",
+    groupBy: [{
+      name: "type",
+      value: { kind: "field", binding: "entity", field: "type" },
+    }],
+    metrics: [
+      { name: "count", function: "count" },
+      {
+        name: "avg_score",
+        function: "avg",
+        value: { kind: "field", binding: "entity", field: "score" },
+      },
+    ],
+  });
+  assert.deepEqual(having, {
+    kind: "filter",
+    input: "aggregate",
+    predicate: {
+      kind: "compare",
+      operator: "gte",
+      left: { kind: "column", name: "count" },
+      right: { kind: "literal", value: 2 },
+    },
+  });
+  assert.equal(bundle.sections.results?.answer.shape, "aggregate-table");
+  assert.deepEqual(decompileExplorerQuery(bundle), draft);
+});
+
+test("keeps reusable values typed, editable, and shareable", () => {
+  const draft: Parameters<typeof compileExplorerQuery>[0] = {
+    owner: "subject",
+    text: {
+      value: "机器人",
+      capability: "fullText",
+      field: "summary",
+      parameter: "keyword",
+    },
+    condition: {
+      kind: "compare",
+      field: "score",
+      operator: "gte",
+      value: 8,
+      parameter: "minimumScore",
+    },
+    aggregate: {
+      groupBy: ["type"],
+      metrics: [{ function: "count" }],
+      having: {
+        kind: "compare",
+        field: "count",
+        operator: "gte",
+        value: 2,
+        parameter: "minimumCount",
+      },
+    },
+    orderBy: [],
+    limit: 20,
+  };
+
+  const bundle = compileExplorerQuery(draft);
+  const section = bundle.sections.results!;
+  assert.deepEqual(section.query.parameters, {
+    keyword: "string",
+    minimumScore: "number",
+    minimumCount: "integer",
+  });
+  assert.deepEqual(section.parameterValues, {
+    keyword: "机器人",
+    minimumScore: 8,
+    minimumCount: 2,
+  });
+  assert.match(formatExplorerQuery(draft), /\$minimumScore/);
+  assert.deepEqual(decompileExplorerQuery(bundle), draft);
+});
+
+test("rejects one reused parameter with conflicting values", () => {
+  assert.throws(() => compileExplorerQuery({
+    owner: "subject",
+    condition: {
+      kind: "all",
+      terms: [
+        {
+          kind: "compare",
+          field: "score",
+          operator: "gte",
+          value: 8,
+          parameter: "threshold",
+        },
+        {
+          kind: "compare",
+          field: "score",
+          operator: "lte",
+          value: 9,
+          parameter: "threshold",
+        },
+      ],
+    },
+  }), /值必须保持一致/);
+});
+
 test("keeps escaped text and negative numeric filters executable", () => {
   const source = formatExplorerQuery({
     owner: "subject",

@@ -1,15 +1,36 @@
-import type { Node as ProseMirrorNode } from "prosemirror-model";
+import {
+  Slice,
+  type Node as ProseMirrorNode,
+} from "prosemirror-model";
 import { redo, undo } from "prosemirror-history";
+import type { Transaction } from "prosemirror-state";
 import type { NodeView } from "prosemirror-view";
 import { EditorView } from "prosemirror-view";
 
+import {
+  ClauseView,
+  ParameterSlot,
+  literalInput,
+  option,
+  removeButton,
+  selectControl,
+  stopControlEvent,
+} from "./editor-controls";
+import {
+  AdvancedBundleView,
+  AdvancedOperatorView,
+  AdvancedSectionView,
+} from "./editor-advanced-view";
+import { AggregateView } from "./editor-aggregate-view";
+import { RecipeView } from "./editor-recipe-view";
 import type { Owner, QueryFactKind } from "./contract";
-import type { QueryOperator } from "./document";
+import type { ExplorerAggregate, ExplorerAggregateMetric } from "./explorer";
 import {
   createQueryEditorState,
   lowerQueryEditorDocument,
   QUERY_OPERATOR_NODE,
   queryEditorSchema,
+  readableQueryEditorDocument,
   type EditableFactCondition,
   type LoweredQueryEditorDocument,
 } from "./editor";
@@ -27,10 +48,12 @@ import {
   queryFactFields,
   queryConditionOperators,
   queryFieldsFor,
+  queryGroupFields,
   queryProjectFields,
   queryRelationOptions,
   queryRelationTargetOwner,
   querySortFields,
+  queryStatisticColumns,
   queryTextScopes,
 } from "./workbench-model";
 import type { Mappings } from "../types";
@@ -50,56 +73,21 @@ export interface QueryEditorViewOptions {
 }
 
 type ClauseName = "search" | "condition" | "condition_group" | "relation" |
-  "projection" | "sort" | "limit";
+  "projection" | "aggregate" | "sort" | "limit";
 
-function option(value: string, label: string): HTMLOptionElement {
-  const item = document.createElement("option");
-  item.value = value;
-  item.textContent = label;
-  return item;
-}
+const MAX_STRUCTURED_CLIPBOARD_BYTES = 65_536;
 
-function selectControl(label: string): HTMLSelectElement {
-  const select = document.createElement("select");
-  select.className = "query-slot";
-  select.name = label;
-  select.setAttribute("aria-label", label);
-  return select;
-}
-
-function removeButton(remove: () => void, label: string): HTMLButtonElement {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "query-clause-remove";
-  button.textContent = "×";
-  button.setAttribute("aria-label", label);
-  button.addEventListener("click", remove);
-  return button;
-}
-
-function row(name: string): HTMLDivElement {
-  const dom = document.createElement("div");
-  dom.className = `query-clause query-clause-${name}`;
-  return dom;
-}
-
-function literalInput(label: string): HTMLInputElement {
-  const input = document.createElement("input");
-  input.className = "query-slot query-value-slot";
-  input.name = label;
-  input.setAttribute("aria-label", label);
-  input.autocomplete = "off";
-  input.size = 8;
-  return input;
-}
-
-function stopControlEvent(event: Event): boolean {
-  return event.target instanceof HTMLInputElement ||
-    event.target instanceof HTMLSelectElement ||
-    event.target instanceof HTMLButtonElement ||
-    event.target instanceof HTMLDetailsElement ||
-    event.target instanceof HTMLLabelElement;
-}
+const CLAUSE_RANK: Record<string, number> = {
+  find: 0,
+  search: 1,
+  condition: 2,
+  condition_group: 2,
+  relation: 3,
+  projection: 4,
+  aggregate: 4,
+  sort: 5,
+  limit: 6,
+};
 
 function defaultConditionAttrs(owner: Owner): Record<string, unknown> {
   const available = new Set(queryFieldsFor(owner, "filter"));
@@ -110,55 +98,6 @@ function defaultConditionAttrs(owner: Owner): Record<string, unknown> {
     operator: queryConditionOperators(owner, field)[0] ?? "",
     raw: "",
   };
-}
-
-class ClauseView implements NodeView {
-  readonly dom: HTMLElement;
-  protected node: ProseMirrorNode;
-
-  constructor(
-    name: string,
-    node: ProseMirrorNode,
-    protected readonly view: EditorView,
-    private readonly getPos: () => number | undefined,
-  ) {
-    this.dom = row(name);
-    this.node = node;
-  }
-
-  protected updateAttrs(patch: Record<string, unknown>): void {
-    const position = this.getPos();
-    if (position === undefined) return;
-    const current = this.view.state.doc.nodeAt(position);
-    if (!current) return;
-    this.view.dispatch(this.view.state.tr.setNodeMarkup(
-      position,
-      undefined,
-      { ...current.attrs, ...patch },
-    ));
-  }
-
-  protected remove(): void {
-    const position = this.getPos();
-    if (position === undefined) return;
-    const current = this.view.state.doc.nodeAt(position);
-    if (current)
-      this.view.dispatch(this.view.state.tr.delete(position, position + current.nodeSize));
-  }
-
-  update(node: ProseMirrorNode): boolean {
-    if (node.type !== this.node.type) return false;
-    this.node = node;
-    return true;
-  }
-
-  stopEvent(event: Event): boolean {
-    return stopControlEvent(event);
-  }
-
-  ignoreMutation(): boolean {
-    return true;
-  }
 }
 
 class FindView extends ClauseView {
@@ -185,6 +124,7 @@ class FindView extends ClauseView {
 class SearchView extends ClauseView {
   private readonly scope = selectControl("搜索范围");
   private readonly value = literalInput("搜索文字");
+  private readonly parameter: ParameterSlot;
 
   constructor(
     node: ProseMirrorNode,
@@ -198,6 +138,11 @@ class SearchView extends ClauseView {
     this.scope.value = String(node.attrs.scope);
     this.value.value = String(node.attrs.raw);
     this.value.placeholder = "输入关键词";
+    this.parameter = new ParameterSlot(
+      String(node.attrs.parameter ?? ""),
+      () => "keyword",
+      (parameter) => this.updateAttrs({ parameter }),
+    );
     this.scope.addEventListener("change", () =>
       this.updateAttrs({ scope: this.scope.value })
     );
@@ -207,6 +152,7 @@ class SearchView extends ClauseView {
     this.dom.append(
       document.createTextNode("搜索"),
       this.scope,
+      this.parameter.dom,
       this.value,
       removeButton(() => this.remove(), "移除搜索"),
     );
@@ -216,6 +162,7 @@ class SearchView extends ClauseView {
     if (!super.update(node)) return false;
     this.scope.value = String(node.attrs.scope);
     if (this.value.value !== node.attrs.raw) this.value.value = String(node.attrs.raw);
+    this.parameter.sync(String(node.attrs.parameter ?? ""));
     return true;
   }
 }
@@ -225,12 +172,15 @@ class ConditionView extends ClauseView {
   private readonly operator = selectControl("比较方式");
   private value: HTMLInputElement | HTMLSelectElement | null = null;
   private readonly valueHost = document.createElement("span");
+  private readonly parameter: ParameterSlot;
+  private mappings: Mappings | undefined;
 
   constructor(
     node: ProseMirrorNode,
     view: EditorView,
     getPos: () => number | undefined,
     private readonly owner: Owner,
+    options: QueryEditorViewOptions,
   ) {
     super("condition", node, view, getPos);
     const common = document.createElement("optgroup");
@@ -246,6 +196,11 @@ class ConditionView extends ClauseView {
     if (common.childElementCount) this.field.append(common);
     if (more.childElementCount) this.field.append(more);
     this.field.value = String(node.attrs.field);
+    this.parameter = new ParameterSlot(
+      String(node.attrs.parameter ?? ""),
+      () => `${this.field.value || "value"}Value${getPos() ?? ""}`,
+      (parameter) => this.updateAttrs({ parameter }),
+    );
     this.field.addEventListener("change", () => {
       this.fillOperators();
       this.fillValue("");
@@ -253,11 +208,12 @@ class ConditionView extends ClauseView {
         field: this.field.value,
         operator: this.operator.value,
         raw: "",
+        parameter: "",
       });
     });
     this.operator.addEventListener("change", () => {
       this.fillValue("");
-      this.updateAttrs({ operator: this.operator.value, raw: "" });
+      this.updateAttrs({ operator: this.operator.value, raw: "", parameter: "" });
     });
     this.fillOperators(String(node.attrs.operator));
     this.fillValue(String(node.attrs.raw));
@@ -265,9 +221,14 @@ class ConditionView extends ClauseView {
       document.createTextNode("其中"),
       this.field,
       this.operator,
+      this.parameter.dom,
       this.valueHost,
       removeButton(() => this.remove(), "移除条件"),
     );
+    void options.mappings?.().then((mappings) => {
+      this.mappings = mappings;
+      this.fillValue(String(this.node.attrs.raw));
+    }).catch((error: unknown) => options.reportError(error));
   }
 
   private fillOperators(selected = ""): void {
@@ -280,12 +241,17 @@ class ConditionView extends ClauseView {
 
   private fillValue(raw: string): void {
     const operator = this.operator.value;
+    const parameterAvailable = ![
+      "in", "notIn", "isNull", "isNotNull", "isMissing", "isPresent",
+    ].includes(operator);
+    this.parameter.setAvailable(parameterAvailable);
+    if (!parameterAvailable) this.parameter.sync("");
     if (["isNull", "isNotNull", "isMissing", "isPresent"].includes(operator)) {
       this.value = null;
       this.valueHost.replaceChildren();
       return;
     }
-    const enums = enumValuesFor(this.owner, this.field.value);
+    const enums = enumValuesFor(this.owner, this.field.value, this.mappings);
     if (enums && operator !== "in" && operator !== "notIn") {
       const select = selectControl(`${FIELD_LABEL[this.field.value] ?? this.field.value}的值`);
       select.append(option("", "选择…"));
@@ -319,6 +285,7 @@ class ConditionView extends ClauseView {
     if (!super.update(node)) return false;
     if (this.value && this.value.value !== node.attrs.raw)
       this.value.value = String(node.attrs.raw);
+    this.parameter.sync(String(node.attrs.parameter ?? ""));
     return true;
   }
 }
@@ -508,6 +475,7 @@ class RelationView extends ClauseView {
         field,
         operator: queryFactConditionOperators(kind, field)[0] ?? "",
         raw: "",
+        parameter: "",
       },
     ];
     this.updateAttrs({ factConditions: next });
@@ -560,8 +528,18 @@ class RelationView extends ClauseView {
       };
       fillOperators();
       const valueHost = document.createElement("span");
+      const parameter = new ParameterSlot(
+        condition.parameter ?? "",
+        () => `${field.value || "relation"}Value${index + 1}`,
+        (name) => this.updateFactCondition(index, { parameter: name }, false),
+      );
       const fillValue = (): void => {
         valueHost.replaceChildren();
+        const parameterAvailable = ![
+          "in", "notIn", "isNull", "isNotNull", "isMissing", "isPresent",
+        ].includes(operator.value);
+        parameter.setAvailable(parameterAvailable);
+        if (!parameterAvailable) parameter.sync("");
         if (["isNull", "isNotNull", "isMissing", "isPresent"].includes(operator.value))
           return;
         const labels = factEnumValues(kind, field.value, this.mappings);
@@ -602,14 +580,20 @@ class RelationView extends ClauseView {
           field: field.value,
           operator: nextOperator,
           raw: "",
+          parameter: "",
         }, true);
       });
       operator.addEventListener("change", () =>
-        this.updateFactCondition(index, { operator: operator.value, raw: "" }, true)
+        this.updateFactCondition(index, {
+          operator: operator.value,
+          raw: "",
+          parameter: "",
+        }, true)
       );
       host.append(
         field,
         operator,
+        parameter.dom,
         valueHost,
         removeButton(() => this.removeFactCondition(index), "移除关系属性条件"),
       );
@@ -619,12 +603,19 @@ class RelationView extends ClauseView {
   }
 
   private syncEntity(ref: string): void {
-    this.entity.textContent = ref ? "读取名称…" : "选择当前实体";
-    this.entity.setAttribute("aria-label", ref ? "更换关联实体" : "选择关联实体");
+    this.setEntityLabel(ref ? "读取名称…" : "选择当前实体", Boolean(ref));
     if (!ref) return;
     void this.options.resolveEntityLabel?.(ref).then((label) => {
-      if (String(this.node.attrs.related) === ref) this.entity.textContent = label;
+      if (String(this.node.attrs.related) === ref) this.setEntityLabel(label, true);
     }).catch((error: unknown) => this.options.reportError(error));
+  }
+
+  private setEntityLabel(label: string, selected: boolean): void {
+    this.entity.textContent = label;
+    this.entity.setAttribute(
+      "aria-label",
+      `${label}（${selected ? "更换关联实体" : "选择关联实体"}）`,
+    );
   }
 
   private async pickSelected(): Promise<void> {
@@ -635,7 +626,7 @@ class RelationView extends ClauseView {
       const owner = selected.ref.split(":", 1)[0];
       if (owner !== expected)
         throw new TypeError(`请选择一个${OWNER_LABEL[expected]}`);
-      this.entity.textContent = selected.label;
+      this.setEntityLabel(selected.label, true);
       this.updateAttrs({ related: selected.ref });
     } catch (error) {
       this.options.reportError(error);
@@ -721,11 +712,11 @@ class SortView extends ClauseView {
     node: ProseMirrorNode,
     view: EditorView,
     getPos: () => number | undefined,
-    owner: Owner,
+    fields: Array<{ value: string; label: string }>,
   ) {
     super("sort", node, view, getPos);
-    for (const field of querySortFields(owner))
-      this.field.append(option(field, FIELD_LABEL[field] ?? field));
+    for (const field of fields)
+      this.field.append(option(field.value, field.label));
     this.direction.append(option("desc", "从高到低"), option("asc", "从低到高"));
     this.nulls.append(option("last", "空值最后"), option("first", "空值最前"));
     this.field.value = String(node.attrs.field);
@@ -790,148 +781,9 @@ class LimitView extends ClauseView {
   }
 }
 
-class RecipeView extends ClauseView {
-  private readonly text: HTMLInputElement | null;
-
-  constructor(
-    node: ProseMirrorNode,
-    view: EditorView,
-    getPos: () => number | undefined,
-    private readonly options: QueryEditorViewOptions,
-  ) {
-    super("recipe", node, view, getPos);
-    const kind = String(node.attrs.kind);
-    if (kind === "fullText") {
-      this.text = literalInput("正文关键词");
-      this.text.value = String(node.attrs.text);
-      this.text.placeholder = "输入关键词";
-      this.text.addEventListener("input", () =>
-        this.updateAttrs({ text: this.text?.value ?? "" })
-      );
-      this.dom.append(
-        document.createTextNode("搜索"),
-        this.slot("所有正文"),
-        document.createTextNode("包含"),
-        this.text,
-      );
-      return;
-    }
-    this.text = null;
-    const from = this.slot("读取名称…");
-    const to = this.slot("读取名称…");
-    const fromRef = String(node.attrs.from);
-    const toRef = String(node.attrs.to);
-    void Promise.all([
-      options.resolveEntityLabel?.(fromRef) ?? Promise.resolve(fromRef),
-      options.resolveEntityLabel?.(toRef) ?? Promise.resolve(toRef),
-    ]).then(([fromLabel, toLabel]) => {
-      if (String(this.node.attrs.from) === fromRef) from.textContent = fromLabel;
-      if (String(this.node.attrs.to) === toRef) to.textContent = toLabel;
-    }).catch((error: unknown) => options.reportError(error));
-    this.dom.append(
-      document.createTextNode("查找"),
-      from,
-      document.createTextNode(kind === "common" ? "与" : "到"),
-      to,
-      document.createTextNode(kind === "common" ? "的共同关联" : "的关系路径"),
-    );
-  }
-
-  private slot(label: string): HTMLSpanElement {
-    const slot = document.createElement("span");
-    slot.className = "query-slot query-readonly-slot";
-    slot.textContent = label;
-    return slot;
-  }
-
-  override update(node: ProseMirrorNode): boolean {
-    if (!super.update(node)) return false;
-    if (this.text && this.text.value !== node.attrs.text)
-      this.text.value = String(node.attrs.text);
-    return true;
-  }
-}
-
-function advancedOperatorText(operator: QueryOperator): string {
-  switch (operator.kind) {
-    case "scan": return `查找 ${OWNER_LABEL[operator.owner]}`;
-    case "lookup": return `按名称定位 ${OWNER_LABEL[operator.owner]}`;
-    case "fullText": return operator.target === "entity"
-      ? `搜索 ${OWNER_LABEL[operator.owner]}正文`
-      : "搜索关系说明";
-    case "factLookup": return "读取完整关系";
-    case "values": return `使用 ${operator.rows.length} 组指定值`;
-    case "filter": return "其中满足条件";
-    case "project": return `返回 ${operator.columns.length} 项信息`;
-    case "matchFact": return "关联完整事实";
-    case "followRef": return `沿${operator.direction === "forward" ? "正向" : "反向"}引用关联`;
-    case "aggregate": return `统计 ${operator.metrics.length} 项指标`;
-    case "path": return `查找不超过 ${operator.maxHops} 跳的路径`;
-    case "union": return "合并查询结果";
-    case "intersect": return "只保留共同结果";
-    case "except": return "从前者排除后者";
-    case "exists": return "保留存在关联的结果";
-    case "notExists": return "排除存在关联的结果";
-  }
-}
-
-class AdvancedBundleView implements NodeView {
-  readonly dom = document.createElement("div");
-  readonly contentDOM = document.createElement("div");
-
-  constructor() {
-    this.dom.className = "query-advanced-bundle";
-    this.contentDOM.className = "query-advanced-sections";
-    this.dom.append(this.contentDOM);
-  }
-}
-
-class AdvancedSectionView implements NodeView {
-  readonly dom = document.createElement("section");
-  readonly contentDOM = document.createElement("div");
-  private readonly heading = document.createElement("h3");
-
-  constructor(node: ProseMirrorNode) {
-    this.dom.className = "query-advanced-section";
-    this.contentDOM.className = "query-advanced-operators";
-    this.sync(node);
-    this.dom.append(this.heading, this.contentDOM);
-  }
-
-  update(node: ProseMirrorNode): boolean {
-    if (node.type.name !== "query_section") return false;
-    this.sync(node);
-    return true;
-  }
-
-  private sync(node: ProseMirrorNode): void {
-    this.heading.textContent = String(node.attrs.answer?.title ?? "查询结果");
-  }
-}
-
-class AdvancedOperatorView extends ClauseView {
-  private readonly summary = document.createElement("span");
-
-  constructor(node: ProseMirrorNode, view: EditorView, getPos: () => number | undefined) {
-    super("advanced", node, view, getPos);
-    this.summary.className = "query-clause-summary";
-    this.sync(node);
-    this.dom.append(this.summary);
-  }
-
-  override update(node: ProseMirrorNode): boolean {
-    if (!super.update(node)) return false;
-    this.sync(node);
-    return true;
-  }
-
-  private sync(node: ProseMirrorNode): void {
-    this.summary.textContent = advancedOperatorText(node.attrs.value as QueryOperator);
-  }
-}
-
 export class QueryDocumentEditor {
   private readonly view: EditorView;
+  private readonly entityLabels = new Map<string, string>();
 
   constructor(
     mount: HTMLElement,
@@ -942,12 +794,24 @@ export class QueryDocumentEditor {
       nodeViews: this.nodeViews(),
       dispatchTransaction: (transaction) => {
         const previousOwner = this.owner();
+        const previousSortFields = this.sortFieldsSignature(this.view.state.doc);
         const state = this.view.state.apply(transaction);
         this.view.updateState(state);
-        if (previousOwner !== this.owner())
+        if (
+          previousOwner !== this.owner() ||
+          previousSortFields !== this.sortFieldsSignature(state.doc)
+        )
           this.view.setProps({ nodeViews: this.nodeViews() });
-        if (transaction.docChanged)
-          this.options.onChange(lowerQueryEditorDocument(state.doc));
+        if (transaction.docChanged) {
+          const result = lowerQueryEditorDocument(state.doc);
+          this.showDiagnostics(result.diagnostics);
+          this.options.onChange(result);
+        }
+      },
+      clipboardTextSerializer: (slice) => this.readableSlice(slice),
+      handleDOMEvents: {
+        copy: (view, event) => this.copy(view, event as ClipboardEvent),
+        paste: (view, event) => this.paste(view, event as ClipboardEvent),
       },
       attributes: {
         class: "query-document",
@@ -955,7 +819,9 @@ export class QueryDocumentEditor {
         spellcheck: "false",
       },
     });
-    options.onChange(lowerQueryEditorDocument(this.view.state.doc));
+    const initial = lowerQueryEditorDocument(this.view.state.doc);
+    this.showDiagnostics(initial.diagnostics);
+    options.onChange(initial);
   }
 
   get doc(): ProseMirrorNode {
@@ -977,7 +843,19 @@ export class QueryDocumentEditor {
   replace(doc: ProseMirrorNode): void {
     this.view.updateState(createQueryEditorState(doc));
     this.view.setProps({ nodeViews: this.nodeViews() });
-    this.options.onChange(lowerQueryEditorDocument(doc));
+    const result = lowerQueryEditorDocument(doc);
+    this.showDiagnostics(result.diagnostics);
+    this.options.onChange(result);
+  }
+
+  replaceTransaction(doc: ProseMirrorNode): void {
+    this.view.dispatch(
+      this.view.state.tr.replaceWith(
+        0,
+        this.view.state.doc.content.size,
+        doc.content,
+      ).scrollIntoView(),
+    );
   }
 
   has(name: ClauseName): boolean {
@@ -989,8 +867,9 @@ export class QueryDocumentEditor {
   }
 
   insert(name: ClauseName): boolean {
-    if (["search", "projection", "limit"].includes(name) && this.has(name))
+    if (["search", "projection", "aggregate", "limit"].includes(name) && this.has(name))
       return false;
+    if (name === "projection" && this.has("aggregate")) return false;
     const owner = this.owner();
     const attrs = this.defaultAttrs(name, owner);
     const node = name === "condition_group"
@@ -998,23 +877,84 @@ export class QueryDocumentEditor {
           queryEditorSchema.node("condition", defaultConditionAttrs(owner)),
         ])
       : queryEditorSchema.node(name, attrs);
-    const rank: Record<string, number> = {
-      find: 0,
-      search: 1,
-      condition: 2,
-      condition_group: 2,
-      relation: 3,
-      projection: 4,
-      sort: 5,
-      limit: 6,
-    };
-    const targetRank = rank[name] ?? 99;
-    let position = this.view.state.doc.content.size;
-    this.view.state.doc.forEach((child, offset) => {
-      if (position === this.view.state.doc.content.size &&
-        (rank[child.type.name] ?? 99) > targetRank) position = offset;
+    const transaction = this.view.state.tr;
+    if (name === "aggregate") {
+      this.deleteClauses(transaction, new Set(["projection", "sort"]));
+    }
+    this.insertNode(name, node, transaction);
+    return true;
+  }
+
+  addFilter(field: string, operator: string, raw = ""): boolean {
+    if (this.view.state.doc.firstChild?.type.name !== "find") return false;
+    const owner = this.owner();
+    if (!queryConditionOperators(owner, field).includes(operator)) return false;
+    this.insertNode("condition", queryEditorSchema.node("condition", {
+      field,
+      operator,
+      raw,
+      parameter: "",
+    }), this.view.state.tr);
+    return true;
+  }
+
+  setSort(field: string, direction: "asc" | "desc"): boolean {
+    if (this.view.state.doc.firstChild?.type.name !== "find") return false;
+    const choices = new Set(this.sortFields(this.owner()).map((item) => item.value));
+    if (!choices.has(field)) return false;
+    let position: number | null = null;
+    this.view.state.doc.forEach((node, offset) => {
+      if (position === null && node.type.name === "sort" && node.attrs.field === field)
+        position = offset;
     });
-    this.view.dispatch(this.view.state.tr.insert(position, node).scrollIntoView());
+    if (position !== null) {
+      const current = this.view.state.doc.nodeAt(position);
+      if (!current) return false;
+      this.view.dispatch(this.view.state.tr.setNodeMarkup(position, undefined, {
+        ...current.attrs,
+        direction,
+      }).scrollIntoView());
+      return true;
+    }
+    this.insertNode("sort", queryEditorSchema.node("sort", {
+      field,
+      direction,
+      nulls: "last",
+    }), this.view.state.tr);
+    return true;
+  }
+
+  addGroup(field: string): boolean {
+    if (
+      this.view.state.doc.firstChild?.type.name !== "find" ||
+      !queryGroupFields(this.owner()).includes(field)
+    ) return false;
+    let aggregatePosition: number | null = null;
+    this.view.state.doc.forEach((node, offset) => {
+      if (node.type.name === "aggregate") aggregatePosition = offset;
+    });
+    if (aggregatePosition !== null) {
+      const current = this.view.state.doc.nodeAt(aggregatePosition);
+      if (!current) return false;
+      const groupBy = Array.isArray(current.attrs.groupBy)
+        ? (current.attrs.groupBy as string[])
+        : [];
+      if (groupBy.includes(field)) return true;
+      this.view.dispatch(this.view.state.tr.setNodeMarkup(
+        aggregatePosition,
+        undefined,
+        { ...current.attrs, groupBy: [...groupBy, field] },
+      ).scrollIntoView());
+      return true;
+    }
+    const transaction = this.view.state.tr;
+    this.deleteClauses(transaction, new Set(["projection", "sort"]));
+    this.insertNode("aggregate", queryEditorSchema.node("aggregate", {
+      groupBy: [field],
+      metrics: [{ function: "count" }],
+      having: [],
+    }), transaction);
+    this.setSort("count", "desc");
     return true;
   }
 
@@ -1022,8 +962,156 @@ export class QueryDocumentEditor {
     this.view.destroy();
   }
 
+  private insertNode(
+    name: ClauseName,
+    node: ProseMirrorNode,
+    transaction: Transaction,
+  ): void {
+    const targetRank = CLAUSE_RANK[name] ?? 99;
+    let position = transaction.doc.content.size;
+    transaction.doc.forEach((child, offset) => {
+      if (
+        position === transaction.doc.content.size &&
+        (CLAUSE_RANK[child.type.name] ?? 99) > targetRank
+      ) position = offset;
+    });
+    this.view.dispatch(transaction.insert(position, node).scrollIntoView());
+  }
+
+  private deleteClauses(
+    transaction: Transaction,
+    names: ReadonlySet<string>,
+  ): void {
+    const ranges: Array<{ from: number; to: number }> = [];
+    transaction.doc.forEach((node, offset) => {
+      if (names.has(node.type.name))
+        ranges.push({ from: offset, to: offset + node.nodeSize });
+    });
+    for (const range of ranges.reverse())
+      transaction.delete(range.from, range.to);
+  }
+
   private owner(): Owner {
     return String(this.view.state.doc.firstChild?.attrs.owner ?? "subject") as Owner;
+  }
+
+  private async resolveEntityLabel(ref: string): Promise<string> {
+    const previous = this.entityLabels.get(ref);
+    if (previous) return previous;
+    const label = await this.options.resolveEntityLabel?.(ref) ?? ref;
+    this.entityLabels.set(ref, label);
+    return label;
+  }
+
+  private readableSlice(slice: Slice): string {
+    const children: ProseMirrorNode[] = [];
+    slice.content.forEach((node) => children.push(node));
+    try {
+      const first = children[0]?.type.name;
+      const content = first === "find" || first === "recipe" || first === "query_bundle"
+        ? children
+        : this.view.state.doc.firstChild?.type.name === "find"
+          ? [this.view.state.doc.firstChild, ...children]
+          : children;
+      const doc = queryEditorSchema.node("doc", null, content);
+      return readableQueryEditorDocument(
+        doc,
+        (ref) => this.entityLabels.get(ref) ?? "已选实体",
+      );
+    } catch {
+      return readableQueryEditorDocument(
+        this.view.state.doc,
+        (ref) => this.entityLabels.get(ref) ?? "已选实体",
+      );
+    }
+  }
+
+  private copy(view: EditorView, event: ClipboardEvent): boolean {
+    if (!event.clipboardData || stopControlEvent(event)) return false;
+    const slice = view.state.selection.content();
+    if (!slice.size) return false;
+    event.clipboardData.setData(
+      "application/x-bangumi-atlas-query+json",
+      JSON.stringify(slice.toJSON()),
+    );
+    event.clipboardData.setData("text/plain", this.readableSlice(slice));
+    event.preventDefault();
+    return true;
+  }
+
+  private paste(view: EditorView, event: ClipboardEvent): boolean {
+    if (!event.clipboardData || stopControlEvent(event)) return false;
+    const source = event.clipboardData.getData(
+      "application/x-bangumi-atlas-query+json",
+    );
+    if (!source) return false;
+    event.preventDefault();
+    if (source.length > MAX_STRUCTURED_CLIPBOARD_BYTES) {
+      this.options.reportError(new TypeError("粘贴的查询内容过长"));
+      return true;
+    }
+    try {
+      const slice = Slice.fromJSON(queryEditorSchema, JSON.parse(source));
+      view.dispatch(view.state.tr.replaceSelection(slice).scrollIntoView());
+      return true;
+    } catch {
+      this.options.reportError(new TypeError("粘贴的查询结构无效"));
+      return true;
+    }
+  }
+
+  private showDiagnostics(
+    diagnostics: LoweredQueryEditorDocument["diagnostics"],
+  ): void {
+    const children = [...this.view.dom.children] as HTMLElement[];
+    for (const child of children) {
+      child.classList.remove("query-clause-invalid");
+      child.removeAttribute("aria-invalid");
+      child.removeAttribute("data-query-error");
+      child.removeAttribute("title");
+    }
+    for (const diagnostic of diagnostics) {
+      const child = children[diagnostic.clause];
+      if (!child) continue;
+      child.classList.add("query-clause-invalid");
+      child.setAttribute("aria-invalid", "true");
+      child.dataset.queryError = diagnostic.message;
+      child.title = diagnostic.message;
+    }
+  }
+
+  private aggregate(doc = this.view.state.doc): ExplorerAggregate | null {
+    let aggregate: ExplorerAggregate | null = null;
+    doc.forEach((node) => {
+      if (node.type.name === "aggregate") {
+        aggregate = {
+          groupBy: Array.isArray(node.attrs.groupBy)
+            ? (node.attrs.groupBy as string[])
+            : [],
+          metrics: Array.isArray(node.attrs.metrics)
+            ? (node.attrs.metrics as ExplorerAggregateMetric[])
+            : [],
+        };
+      }
+    });
+    return aggregate;
+  }
+
+  private sortFields(owner: Owner): Array<{ value: string; label: string }> {
+    const aggregate = this.aggregate();
+    return aggregate
+      ? queryStatisticColumns(aggregate)
+      : querySortFields(owner).map((field) => ({
+          value: field,
+          label: FIELD_LABEL[field] ?? field,
+        }));
+  }
+
+  private sortFieldsSignature(doc: ProseMirrorNode): string {
+    const aggregate = this.aggregate(doc);
+    return JSON.stringify(aggregate
+      ? queryStatisticColumns(aggregate)
+      : []);
   }
 
   private defaultAttrs(name: ClauseName, owner: Owner): Record<string, unknown> {
@@ -1044,8 +1132,13 @@ export class QueryDocumentEditor {
     if (name === "projection") return {
       columns: ["ref", ...queryProjectFields(owner).slice(0, 6)],
     };
+    if (name === "aggregate") return {
+      groupBy: [],
+      metrics: [{ function: "count" }],
+      having: [],
+    };
     if (name === "sort") {
-      const field = querySortFields(owner)[0] ?? "";
+      const field = this.sortFields(owner)[0]?.value ?? "";
       return { field, direction: defaultSortDirection(field), nulls: "last" };
     }
     return { raw: "200" };
@@ -1067,19 +1160,29 @@ export class QueryDocumentEditor {
       find: (node, view, getPos) => new FindView(node, view, getPos),
       search: (node, view, getPos) => new SearchView(node, view, getPos, owner),
       condition: (node, view, getPos) =>
-        new ConditionView(node, view, getPos, owner),
+        new ConditionView(node, view, getPos, owner, this.options),
       condition_group: (node, view, getPos) =>
         new ConditionGroupView(node, view, getPos, owner),
       relation: (node, view, getPos) =>
-        new RelationView(node, view, getPos, owner, this.options),
+        new RelationView(node, view, getPos, owner, {
+          ...this.options,
+          resolveEntityLabel: (ref) => this.resolveEntityLabel(ref),
+        }),
       projection: (node, view, getPos) =>
         new ProjectionView(node, view, getPos, owner),
-      sort: (node, view, getPos) => new SortView(node, view, getPos, owner),
+      aggregate: (node, view, getPos) =>
+        new AggregateView(node, view, getPos, owner),
+      sort: (node, view, getPos) =>
+        new SortView(node, view, getPos, this.sortFields(owner)),
       limit: (node, view, getPos) => new LimitView(node, view, getPos),
       recipe: (node, view, getPos) =>
-        new RecipeView(node, view, getPos, this.options),
+        new RecipeView(node, view, getPos, {
+          ...this.options,
+          resolveEntityLabel: (ref) => this.resolveEntityLabel(ref),
+        }),
       query_bundle: () => new AdvancedBundleView(),
-      query_section: (node) => new AdvancedSectionView(node),
+      query_section: (node, view, getPos) =>
+        new AdvancedSectionView(node, view, getPos),
     };
     for (const name of Object.values(QUERY_OPERATOR_NODE))
       nodeViews[name] = (node, view, getPos) =>
