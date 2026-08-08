@@ -12,6 +12,8 @@ data/layout/
 web/node_modules/
 web/.test-dist/
 site/app.js
+site/query-worker.js
+site/query.css
 spike/*.bin
 data/raw/
 data/fact-snapshots/

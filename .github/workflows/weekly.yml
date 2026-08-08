@@ -18,6 +18,8 @@ jobs:
   bake:
     runs-on: ubuntu-24.04
     timeout-minutes: 300
+    env:
+      ATLAS_SITE_DIR: ${{ runner.temp }}/bangumi-atlas-site
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -61,11 +63,16 @@ jobs:
           echo "layout report:"
           cat data/layout/report.json
 
+      - name: Prepare isolated staging site
+        run: |
+          mkdir -p "$ATLAS_SITE_DIR"
+          cp site/index.html "$ATLAS_SITE_DIR/index.html"
+
       - name: Bake site data (row-level reconciliation inside)
-        run: uv run python scripts/bake_site.py
+        run: uv run python scripts/bake_site.py --output "$ATLAS_SITE_DIR/data"
 
       - name: Verify SiteRelease against parquet (independent)
-        run: uv run python scripts/verify_site.py
+        run: uv run python scripts/verify_site.py --site "$ATLAS_SITE_DIR"
 
       - name: Install client dependencies
         run: npm ci
@@ -80,7 +87,7 @@ jobs:
 
       - name: Smoke-test the complete SiteRelease over HTTP
         run: |
-          npm run serve:smoke &
+          npx http-server "$ATLAS_SITE_DIR" -a 127.0.0.1 -p 8391 -c-1 --silent &
           server_pid=$!
           trap 'kill "$server_pid"' EXIT
           for _ in {1..30}; do
@@ -104,10 +111,11 @@ jobs:
       - name: Enforce size / file-count budgets on the full staging site
         run: |
           uv run python - <<'EOF'
-          import pathlib, sys
-          files = [p for p in pathlib.Path("site").rglob("*") if p.is_file()]
+          import os, pathlib, sys
+          root = pathlib.Path(os.environ["ATLAS_SITE_DIR"])
+          files = [p for p in root.rglob("*") if p.is_file()]
           total = sum(p.stat().st_size for p in files)
-          print(f"staging site/: {total:,} bytes, {len(files):,} files")
+          print(f"staging site: {total:,} bytes, {len(files):,} files")
           if total > 1_000_000_000:
               sys.exit("site exceeds GH Pages 1GB hard limit -> migrate to R2")
           if total > 900_000_000:
@@ -118,7 +126,7 @@ jobs:
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
-          path: site/
+          path: ${{ env.ATLAS_SITE_DIR }}
 
   keepalive:
     if: github.event_name == 'schedule'
