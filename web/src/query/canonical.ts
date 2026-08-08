@@ -965,20 +965,14 @@ export function normalizeQuery(
           throw new TypeError(`unsupported path policy ${String(operator.policy)}`);
         if (
           !Number.isSafeInteger(operator.maxHops) ||
-          operator.maxHops < 1 ||
-          operator.maxHops > QUERY_SECURITY_PROFILE.path.maxHops
+          operator.maxHops < 1
         )
-          throw new TypeError(
-            `path maxHops must be between 1 and ${QUERY_SECURITY_PROFILE.path.maxHops}`,
-          );
+          throw new TypeError("path maxHops must be a positive integer");
         if (
           !Number.isSafeInteger(operator.maxPaths) ||
-          operator.maxPaths < 1 ||
-          operator.maxPaths > QUERY_SECURITY_PROFILE.path.maxPaths
+          operator.maxPaths < 1
         )
-          throw new TypeError(
-            `path maxPaths must be between 1 and ${QUERY_SECURITY_PROFILE.path.maxPaths}`,
-          );
+          throw new TypeError("path maxPaths must be a positive integer");
         if (!operator.traversals.length)
           throw new TypeError("path requires at least one traversal");
         const seenKinds = new Set<string>();

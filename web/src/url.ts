@@ -3,7 +3,7 @@
 
 import { state } from "./store";
 import type { OrbitState } from "./camera";
-import { decodeBundle, encodeBundle } from "./query/bundle-url";
+import { decodeBundle, encodeShareableBundle } from "./query/bundle-url";
 import { normalizeBundle, type QueryBundle } from "./query/bundle";
 import { normalizeQuery } from "./query/canonical";
 import { decodeQuestion } from "./query/question-url";
@@ -42,7 +42,10 @@ export function encode(
   if (ortho) parts.push("o=1");
   if (key !== null) parts.push(`n=${key}`);
   if (rank !== null) parts.push(`r=${rank}`);
-  if (state.queryBundle) parts.push(`qb=${encodeBundle(state.queryBundle)}`);
+  if (state.queryBundle) {
+    const bundle = encodeShareableBundle(state.queryBundle);
+    if (bundle) parts.push(`qb=${bundle}`);
+  }
   return "#" + parts.join("&");
 }
 

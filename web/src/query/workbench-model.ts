@@ -358,8 +358,8 @@ export function combineExplorerConditions(
 
 export function parseExplorerLimit(raw: string): number {
   const limit = Number(raw);
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000)
-    throw new TypeError("结果条数必须在 1 到 10000 之间");
+  if (!Number.isSafeInteger(limit) || limit < 1)
+    throw new TypeError("结果条数必须是正整数");
   return limit;
 }
 

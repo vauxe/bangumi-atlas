@@ -76,6 +76,11 @@ const voiceCredit: FactValue = {
   fields: { type: 1, summary: "" },
 };
 
+test("keeps transport batching separate from execution quotas", () => {
+  assert.deepEqual(QUERY_SECURITY_PROFILE.execution, { maxPageSize: 500 });
+  assert.equal("path" in QUERY_SECURITY_PROFILE, false);
+});
+
 test("looks up one release-local fact by its typed FactRef", async () => {
   let requested: string | undefined;
   const pointSource: QueryDataSource = {
@@ -193,22 +198,14 @@ test("executes typed scan, filter, project, order, and semantic limit", async ()
   }]);
 });
 
-test("rejects an unbounded page offset before scanning", async () => {
-  let scanned = false;
-  const guarded: QueryDataSource = {
-    scan: async function* () {
-      scanned = true;
-    },
-  };
+test("accepts pagination offsets without an arbitrary product maximum", async () => {
+  const result = await executeQuery(rankedSubjects, { minimum: 8 }, source, {
+    pageSize: 1,
+    offset: 200_001,
+  });
 
-  await assert.rejects(
-    executeQuery(rankedSubjects, { minimum: 8 }, guarded, {
-      pageSize: 1,
-      offset: QUERY_SECURITY_PROFILE.execution.maxOffset + 1,
-    }),
-    /offset/,
-  );
-  assert.equal(scanned, false);
+  assert.deepEqual(result.rows, []);
+  assert.equal(result.hasMore, false);
 });
 
 test("pushes only referenced entity fields into a structural scan", async () => {

@@ -253,7 +253,7 @@ export function formatExplorerQuery(draft: ExplorerQuery): string {
     lines.push(`ORDER BY ${draft.orderBy.map((order) =>
       `${order.column} ${order.direction.toUpperCase()} NULLS ${order.nulls.toUpperCase()}`
     ).join(", ")}`);
-  const limit = draft.limit === undefined ? 200 : draft.limit;
+  const limit = draft.limit ?? null;
   if (limit !== null) lines.push(`LIMIT ${limit}`);
   return lines.join("\n");
 }
@@ -651,9 +651,9 @@ export function compileExplorerQuery(draft: ExplorerQuery): QueryBundle {
     };
     root = "project";
   }
-  const limit = draft.limit === undefined ? 200 : draft.limit;
-  if (limit !== null && (!Number.isSafeInteger(limit) || limit < 0 || limit > 10_000))
-    throw new TypeError("结果上限必须在 0 到 10000 之间");
+  const limit = draft.limit ?? null;
+  if (limit !== null && (!Number.isSafeInteger(limit) || limit < 0))
+    throw new TypeError("结果条数必须是非负整数");
   return {
     schema: "atlas-query-bundle-v2",
     release: { policy: "latest" },
@@ -1087,7 +1087,7 @@ export function decompileExplorerQuery(bundle: QueryBundle): ExplorerQuery | nul
         ? { aggregate }
         : usesDefaultColumns ? {} : { columns }),
       orderBy: query.orderBy ?? [],
-      ...(query.limit === 200 ? {} : { limit: query.limit }),
+      ...(query.limit === null ? {} : { limit: query.limit }),
     };
   }
 }

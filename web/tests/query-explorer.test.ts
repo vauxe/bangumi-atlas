@@ -23,6 +23,15 @@ test("builds the detailed-query text criterion from its own input", () => {
   assert.equal(explorerTextCriterion("   ", "lookup", "summary"), undefined);
 });
 
+test("does not impose a hidden result limit on an ordinary query", () => {
+  const draft = { owner: "subject" as const };
+  const bundle = compileExplorerQuery(draft);
+
+  assert.equal(bundle.sections.results?.query.limit, null);
+  assert.doesNotMatch(formatExplorerQuery(draft), /LIMIT/);
+  assert.equal(decompileExplorerQuery(bundle)?.limit, undefined);
+});
+
 test("the unified builder composes lookup, fields, relations, sort, and limit", () => {
   const bundle = normalizeBundle(compileExplorerQuery({
     owner: "subject",

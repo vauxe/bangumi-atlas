@@ -11,7 +11,6 @@ import type {
   QueryDocument,
   QueryOperator,
 } from "./document";
-import { QUERY_SECURITY_PROFILE } from "./security";
 import type { CompareOperator } from "./value";
 
 const MAX_SOURCE_LENGTH = 16_384;
@@ -1132,12 +1131,10 @@ function lowerAtlasPath(
   if (
     !Number.isSafeInteger(maxHops) ||
     maxHops < 1 ||
-    maxHops > QUERY_SECURITY_PROFILE.path.maxHops ||
     !Number.isSafeInteger(maxPaths) ||
-    maxPaths < 1 ||
-    maxPaths > QUERY_SECURITY_PROFILE.path.maxPaths
+    maxPaths < 1
   )
-    throw new TypeError("FIND PATH 超出路径查询上限");
+    throw new TypeError("FIND PATH 的跳数和条数必须是正整数");
   const traversals = (Object.entries(QUERY_CONTRACT.facts) as [
     QueryFactKind,
     (typeof QUERY_CONTRACT.facts)[QueryFactKind],

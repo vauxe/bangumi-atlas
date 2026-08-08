@@ -13,7 +13,6 @@ import { normalizeBundle, type QueryBundle } from "./bundle";
 import type { Owner, QueryFactKind } from "./contract";
 import type { QueryDocument, QueryOperator } from "./document";
 import type { QueryRecipe } from "./recipes";
-import { QUERY_SECURITY_PROFILE } from "./security";
 import {
   FACT_FIELD_LABEL,
   FIELD_LABEL,
@@ -312,7 +311,7 @@ export function createQueryEditorDocument(draft: ExplorerQuery): ProseMirrorNode
   }
   if (draft.limit !== undefined && draft.limit !== null) {
     children.push(queryEditorSchema.node("limit", {
-      raw: String(draft.limit ?? 200),
+      raw: String(draft.limit),
     }));
   }
   return queryEditorSchema.node("doc", null, children);
@@ -669,9 +668,7 @@ export function lowerQueryEditorDocument(
       const maxPaths = Number(doc.firstChild.attrs.maxPaths);
       if (
         Number.isSafeInteger(maxHops) && maxHops >= 1 &&
-        maxHops <= QUERY_SECURITY_PROFILE.path.maxHops &&
-        Number.isSafeInteger(maxPaths) && maxPaths >= 1 &&
-        maxPaths <= QUERY_SECURITY_PROFILE.path.maxPaths
+        Number.isSafeInteger(maxPaths) && maxPaths >= 1
       ) return {
         draft: null,
         recipe: { kind, from, to, maxHops, maxPaths },

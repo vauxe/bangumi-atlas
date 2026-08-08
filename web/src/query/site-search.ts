@@ -14,7 +14,6 @@ import { findSubstringEntries, type SearchEntryPage } from "../search";
 import type { Manifest, SearchAliases } from "../types";
 import { QUERY_CONTRACT, type Owner, type QueryFactKind } from "./contract";
 import type { FullTextField, LookupField } from "./document";
-import { QueryBudgetError } from "./security";
 import type { SiteQueryReader, SiteQuerySearch } from "./site-source";
 
 const OWNER_KIND: Record<Exclude<Owner, "episode">, number> = {
@@ -67,7 +66,6 @@ export interface SiteSearchDependencies {
     signal: AbortSignal,
   ): Promise<SearchEntryPage>;
   keys(signal?: AbortSignal): Promise<Uint32Array>;
-  maxCandidates: number;
   textPage?(
     query: string,
     cursor: number,
@@ -87,7 +85,6 @@ function defaultDependencies(
     page: (query, cursor, signal) =>
       findSubstringEntries(query, aliases, { cursor, signal }),
     keys: loadEntityKeys,
-    maxCandidates: 100_000,
     textPage: textSearchMemberPage,
   };
 }
@@ -133,7 +130,6 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
       if (!this.dependencies.textPage || !this.reader.textSearchRows || !this.reader.episode)
         throw new TypeError("published Episode identity index is unavailable");
       const seen = new Set<number>();
-      let scanned = 0;
       let textCursor = 0;
       for (;;) {
         signal.throwIfAborted();
@@ -143,9 +139,6 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
         );
         for await (const rows of textRowBlocks(this.reader, descriptors, signal)) {
           for (const row of rows) {
-            scanned++;
-            if (scanned > this.dependencies.maxCandidates)
-              throw new QueryBudgetError("lookup candidate budget exceeded");
             if (
               row.owner !== "episode" ||
               (row.field !== "name" && row.field !== "nameCn") ||
@@ -169,16 +162,12 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
     }
     const allowedKind = OWNER_KIND[owner];
     const seen = new Set<string>();
-    let scanned = 0;
     const keys = await this.dependencies.keys(signal);
     let cursor = 0;
     for (;;) {
       signal.throwIfAborted();
       const page = await this.dependencies.page(query, cursor, signal);
       for (const entry of page.entries) {
-        scanned++;
-        if (scanned > this.dependencies.maxCandidates)
-          throw new QueryBudgetError("lookup candidate budget exceeded");
         if (entry[4] !== allowedKind) continue;
         const rank = entry[2];
         const key = keys[rank];
@@ -225,7 +214,6 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
     if (!this.dependencies.textPage || !this.reader.textSearchRows)
       throw new TypeError("published text search index is unavailable");
     const seen = new Set<string>();
-    let scanned = 0;
     let textCursor = 0;
     for (;;) {
       signal.throwIfAborted();
@@ -235,9 +223,6 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
       );
       for await (const rows of textRowBlocks(this.reader, descriptors, signal)) {
         for (const row of rows) {
-          scanned++;
-          if (scanned > this.dependencies.maxCandidates)
-            throw new QueryBudgetError("search candidate budget exceeded");
           if (row.owner === "fact" || row.owner !== owner || row.field !== field)
             continue;
           if (!fold(row.text).includes(query)) continue;
@@ -280,7 +265,6 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
     if (!this.dependencies.textPage || !this.reader.textSearchRows)
       throw new TypeError("published text search index is unavailable");
     const seen = new Set<number>();
-    let scanned = 0;
     let cursor = 0;
     for (;;) {
       signal.throwIfAborted();
@@ -290,9 +274,6 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
       );
       for await (const rows of textRowBlocks(this.reader, descriptors, signal)) {
         for (const row of rows) {
-          scanned++;
-          if (scanned > this.dependencies.maxCandidates)
-            throw new QueryBudgetError("search candidate budget exceeded");
           if (row.owner !== "fact" || row.field !== "summary" || seen.has(row.id))
             continue;
           const range = foldedUtf8Range(row.text, query);

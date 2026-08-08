@@ -53,7 +53,37 @@ test("encodes one canonical QueryBundle and no parallel filter state", () => {
   decode(hash);
   const decodedBundle = state.queryBundle as QueryBundle | null;
   assert.equal(decodedBundle?.schema, "atlas-query-bundle-v2");
-  assert.equal(decodedBundle?.sections.results?.query.limit, 200);
+  assert.equal(decodedBundle?.sections.results?.query.limit, null);
+});
+
+test("an unshareable query does not prevent local URL updates", () => {
+  state.queryBundle = {
+    schema: "atlas-query-bundle-v2",
+    release: { policy: "latest" },
+    sections: {
+      results: {
+        query: {
+          schema: "atlas-query-document-v2",
+          root: "values",
+          parameters: {},
+          operators: {
+            values: {
+              kind: "values",
+              columns: ["value"],
+              rows: Array.from({ length: 1_000 }, (_, index) => [
+                `本地查询参数 ${index.toString().padStart(4, "0")} ${"内容".repeat(20)}`,
+              ]),
+            },
+          },
+        },
+        answer: { shape: "table", title: "结果" },
+      },
+    },
+  };
+
+  assert.doesNotThrow(() => encode(view, null, null));
+  assert.doesNotMatch(encode(view, null, null), /(?:^|&)qb=/);
+  assert.ok(state.queryBundle);
 });
 
 test("does not revive obsolete canvas filter state", () => {

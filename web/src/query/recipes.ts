@@ -8,7 +8,6 @@ import {
   type QueryFactKind,
 } from "./contract";
 import type { QueryOperator } from "./document";
-import { QUERY_SECURITY_PROFILE } from "./security";
 
 const OWNER_LABEL: Record<Owner, string> = {
   subject: "作品",
@@ -147,7 +146,7 @@ export function fullTextRecipe(text: string): QueryBundle {
               ],
             },
           },
-          limit: 200,
+          limit: null,
         },
         answer: {
           shape: "entity-list",
@@ -193,7 +192,7 @@ export function fullTextRecipe(text: string): QueryBundle {
           root: "project",
           parameters: {},
           operators,
-          limit: 200,
+          limit: null,
         },
         answer: { shape: "fact-list", title: `${factKind} 备注` },
       };
@@ -238,12 +237,10 @@ export function pathRecipe(
   if (
     !Number.isSafeInteger(maxHops) ||
     maxHops < 1 ||
-    maxHops > QUERY_SECURITY_PROFILE.path.maxHops ||
     !Number.isSafeInteger(maxPaths) ||
-    maxPaths < 1 ||
-    maxPaths > QUERY_SECURITY_PROFILE.path.maxPaths
+    maxPaths < 1
   )
-    throw new TypeError("path query exceeds the security profile");
+    throw new TypeError("path query limits must be positive integers");
   return normalizeBundle({
     schema: "atlas-query-bundle-v2",
     release: { policy: "latest" },
@@ -392,7 +389,7 @@ function comparisonSection(
       root: "result",
       parameters: {},
       operators,
-      limit: 500,
+      limit: null,
     },
     answer: { shape: "field-comparison", title },
   };

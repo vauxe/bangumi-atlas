@@ -45,7 +45,6 @@ export interface WireQueryResult extends Omit<QueryResult, "rows"> {
 export type QueryErrorCode =
   | "INVALID_QUERY"
   | "UNSUPPORTED_QUERY"
-  | "BUDGET_REQUIRED"
   | "CANCELLED"
   | "RELEASE_UNAVAILABLE"
   | "RELEASE_EVICTED"

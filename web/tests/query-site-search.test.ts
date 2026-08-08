@@ -37,7 +37,6 @@ test("enforces the published normalized search length", async () => {
     normalize: async () => "星",
     page: async () => assert.fail("short lookup must not read candidates"),
     keys: async () => new Uint32Array(),
-    maxCandidates: 10,
   });
 
   await assert.rejects(async () => {
@@ -63,7 +62,6 @@ test("verifies indexed aliases and resolves visual ranks to stable entities", as
       scannedThroughRank: 4,
     }),
     keys: async () => keys,
-    maxCandidates: 10,
   });
 
   const results = [];
@@ -93,7 +91,6 @@ test("uses hashed text members only as candidates and verifies authoritative tex
     normalize: async () => "星空",
     page: async () => ({ entries: [], next: null, scannedThroughRank: -1 }),
     keys: async () => new Uint32Array(),
-    maxCandidates: 10,
     textPage: async () => ({
       members: [descriptor],
       next: null,
@@ -112,7 +109,7 @@ test("uses hashed text members only as candidates and verifies authoritative tex
   }]);
 });
 
-test("charges the candidate budget for every decoded text row", async () => {
+test("does not truncate decoded text candidates", async () => {
   const descriptor: TextSearchMember = ["entity-summary", 1, 0, 10, 20];
   const reader: SiteQueryReader = {
     entities: async function* () {},
@@ -128,7 +125,6 @@ test("charges the candidate budget for every decoded text row", async () => {
     normalize: async () => "星空",
     page: async () => ({ entries: [], next: null, scannedThroughRank: -1 }),
     keys: async () => new Uint32Array(),
-    maxCandidates: 2,
     textPage: async () => ({
       members: [descriptor],
       next: null,
@@ -136,11 +132,9 @@ test("charges the candidate budget for every decoded text row", async () => {
     }),
   });
 
-  await assert.rejects(async () => {
-    for await (const _hit of search.fullText("星空", "subject", "summary")) {
-      assert.fail("unmatched rows cannot produce a hit");
-    }
-  }, /search candidate budget exceeded/);
+  const hits = [];
+  for await (const hit of search.fullText("星空", "subject", "summary")) hits.push(hit);
+  assert.deepEqual(hits, []);
 });
 
 test("filters text candidates by owner before reading source members", async () => {
@@ -163,7 +157,6 @@ test("filters text candidates by owner before reading source members", async () 
     normalize: async () => "星空",
     page: async () => ({ entries: [], next: null, scannedThroughRank: -1 }),
     keys: async () => new Uint32Array(),
-    maxCandidates: 10,
     textPage: async () => ({
       members: descriptors,
       next: null,
@@ -202,7 +195,6 @@ test("loads authoritative text members with bounded concurrency", async () => {
     normalize: async () => "星空",
     page: async () => ({ entries: [], next: null, scannedThroughRank: -1 }),
     keys: async () => new Uint32Array(),
-    maxCandidates: 10,
     textPage: async () => ({
       members: descriptors,
       next: null,
@@ -233,7 +225,6 @@ test("reports converted spellings as derived name variants and respects lookup f
       scannedThroughRank: 0,
     }),
     keys: async () => keys,
-    maxCandidates: 10,
   });
 
   const results = [];
@@ -261,7 +252,6 @@ test("returns verified fact-summary candidates without pretending they are entit
     normalize: async () => "星空",
     page: async () => ({ entries: [], next: null, scannedThroughRank: -1 }),
     keys: async () => new Uint32Array(),
-    maxCandidates: 10,
     textPage: async () => ({
       members: [descriptor],
       next: null,
@@ -317,7 +307,6 @@ test("looks up Episode names through published identity members without a global
     normalize: async () => "星空",
     page: async () => ({ entries: [], next: null, scannedThroughRank: -1 }),
     keys: async () => new Uint32Array(),
-    maxCandidates: 10,
     textPage: async () => ({
       members: [descriptor],
       next: null,
