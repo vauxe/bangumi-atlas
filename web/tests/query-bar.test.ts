@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
@@ -96,6 +97,28 @@ const removableToken: QueryToken = {
   editable: true,
   removable: true,
 };
+
+const queryStyles = readFileSync("src/query/workbench.css", "utf8");
+
+test("keeps text focus on the shared rounded query surface", () => {
+  assert.match(
+    queryStyles,
+    /\.query-name-input:focus-visible\s*\{[^}]*outline:\s*0/s,
+  );
+  assert.match(
+    queryStyles,
+    /\.query-bar-line:focus-within\s*\{[^}]*box-shadow:/s,
+  );
+});
+
+test("reserves a separate trailing cell for the add action", () => {
+  const inputGroup = queryStyles.match(/\.query-input-group\s*\{(?<body>[^}]*)\}/s)
+    ?.groups?.body ?? "";
+
+  assert.match(inputGroup, /display:\s*grid/);
+  assert.match(inputGroup, /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+36px/);
+  assert.match(inputGroup, /gap:\s*4px/);
+});
 
 test("keeps the persistent query input independent from popover sizing", () => {
   const originalDocument = globalThis.document;
