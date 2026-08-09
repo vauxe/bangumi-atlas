@@ -93,6 +93,16 @@ test("renders missing and explicit null as different user-visible states", () =>
   assert.equal(queryValueText(false), "否");
 });
 
+test("renders structured tags with their names and counts", () => {
+  assert.equal(
+    queryValueText([
+      { name: "科幻", count: 12_345 },
+      { name: "机器人", count: 678 },
+    ]),
+    "科幻（12,345）、机器人（678）",
+  );
+});
+
 test("uses an entity's readable name while retaining its stable ref elsewhere", () => {
   assert.equal(queryValueText({
     kind: "entity",
@@ -232,6 +242,70 @@ test("collects every visible answer entity for graph highlighting", () => {
       unrelated: "fact:9",
     }],
   }), ["subject:1", "person:2", "character:3", "subject:4", "episode:5"]);
+});
+
+test("recovers one row entity from field evidence when ref is not projected", () => {
+  assert.deepEqual(queryResultEntityRefs({
+    rows: [{ name: "原題", score: 8.8 }],
+    evidence: [{
+      name: [{ kind: "entity-field", ref: "subject:7", field: "name" }],
+      score: [{ kind: "entity-field", ref: "subject:7", field: "score" }],
+    }],
+  }), ["subject:7"]);
+});
+
+test("keeps an evidence-backed entity clickable after choosing display columns", () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    createElement: (tag: string) => new FakeElement(tag.toUpperCase()),
+  } as unknown as Document;
+  try {
+    const opened: string[] = [];
+    const container = new FakeElement();
+    renderAnswer(
+      container as unknown as HTMLElement,
+      { shape: "table", title: "查询结果" },
+      {
+        rows: [{
+          name: "原題",
+          nameCn: "中文名",
+          tags: [{ name: "科幻", count: 12_345 }],
+        }],
+        evidence: [{
+          name: [{ kind: "entity-field", ref: "subject:7", field: "name" }],
+          nameCn: [{ kind: "entity-field", ref: "subject:7", field: "nameCn" }],
+          tags: [{ kind: "entity-field", ref: "subject:7", field: "tags" }],
+        }],
+        columns: {
+          name: { type: "string", semantic: "subject.name" },
+          nameCn: { type: "string", semantic: "subject.nameCn" },
+          tags: { type: "tag[]", semantic: "subject.tags" },
+        },
+        totalMatches: 1,
+        visibleMatches: 1,
+        hasMore: false,
+        stability: "exact",
+        queryDigest: "a".repeat(64),
+        releaseId: "b".repeat(64),
+        coverage: {
+          schema: "atlas-coverage-v1",
+          atoms: ["owner:subject"],
+          digest: "c".repeat(64),
+        },
+        terminalEvidence: [{ kind: "completed-domain", coverage: "c".repeat(64) }],
+      },
+      { onEntity: (ref) => opened.push(ref) },
+    );
+
+    const body = container.children[2]?.children[0]?.children[1];
+    const identity = body?.children[0]?.children[0]?.children[0];
+    assert.equal(visibleText(identity as FakeElement), "中文名 原題");
+    identity?.click();
+    assert.deepEqual(opened, ["subject:7"]);
+    assert.match(visibleText(body as FakeElement), /科幻（12,345）/);
+  } finally {
+    globalThis.document = originalDocument;
+  }
 });
 
 test("lets users open an Episode result like every other entity", () => {

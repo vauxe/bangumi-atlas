@@ -8,7 +8,7 @@ import type {
   RuntimeValue,
 } from "./engine";
 import type { AnswerSpec } from "./bundle";
-import { isMissing } from "./value";
+import { isMissing, isTagValue } from "./value";
 import { MEDIA_NAMES } from "../types";
 import type { Mappings } from "../types";
 import {
@@ -132,7 +132,15 @@ function path(value: RuntimeValue): value is PathValue {
     "kind" in value && value.kind === "path";
 }
 
-const ENTITY_REF = /^(?:subject|person|character|episode):(?:0|[1-9][0-9]*)$/;
+const ENTITY_REF = /^(subject|person|character|episode):(0|[1-9][0-9]*)$/;
+
+function readableRef(ref: string): string {
+  const entityRef = ENTITY_REF.exec(ref);
+  if (entityRef)
+    return `${OWNER_LABEL[entityRef[1] as Owner]} #${entityRef[2]}`;
+  const factRef = /^fact:(0|[1-9][0-9]*)$/.exec(ref);
+  return factRef ? `关系事实 #${factRef[1]}` : ref;
+}
 
 function collectEntityRefs(value: RuntimeValue, refs: Set<string>): void {
   if (typeof value === "string" && ENTITY_REF.test(value)) {
@@ -155,13 +163,44 @@ function collectEntityRefs(value: RuntimeValue, refs: Set<string>): void {
     for (const node of value.nodes) refs.add(node.ref);
 }
 
+function projectedEntityRef(
+  row: Record<string, RuntimeValue>,
+  evidence: RowEvidence | undefined,
+): string | null {
+  const refs = new Set<string>();
+  for (const [column, items] of Object.entries(evidence ?? {})) {
+    if (!Object.hasOwn(row, column)) continue;
+    for (const item of items)
+      if (item.kind === "entity-field") refs.add(item.ref);
+  }
+  return refs.size === 1 ? [...refs][0] as string : null;
+}
+
+function rowEntityRef(
+  row: Record<string, RuntimeValue>,
+  evidence: RowEvidence | undefined,
+): string | null {
+  if (typeof row.ref === "string" && ENTITY_REF.test(row.ref)) return row.ref;
+  const visible = new Set<string>();
+  for (const value of Object.values(row)) collectEntityRefs(value, visible);
+  return visible.size ? null : projectedEntityRef(row, evidence);
+}
+
 /** Entity identities present in the currently rendered answer rows. */
 export function queryResultEntityRefs(
-  result: Pick<QueryResult, "rows">,
+  result: Pick<QueryResult, "rows"> & Partial<Pick<QueryResult, "evidence">>,
 ): string[] {
   const refs = new Set<string>();
-  for (const row of result.rows)
-    for (const value of Object.values(row)) collectEntityRefs(value, refs);
+  result.rows.forEach((row, index) => {
+    const visible = new Set<string>();
+    for (const value of Object.values(row)) collectEntityRefs(value, visible);
+    if (visible.size)
+      for (const ref of visible) refs.add(ref);
+    else {
+      const inferred = projectedEntityRef(row, result.evidence?.[index]);
+      if (inferred) refs.add(inferred);
+    }
+  });
   return [...refs];
 }
 
@@ -188,7 +227,8 @@ export function queryRowMatchSnippet(
   row: Record<string, RuntimeValue>,
   evidence: RowEvidence | undefined,
 ): string | undefined {
-  const identified = typeof row.ref === "string" || Object.values(row).some(entity);
+  const identified = typeof row.ref === "string" || Object.values(row).some(entity) ||
+    projectedEntityRef(row, evidence) !== null;
   return identified ? queryMatchSnippet(evidence) : undefined;
 }
 
@@ -202,8 +242,11 @@ export function queryValueText(
   if (Array.isArray(value) && !value.length) return "空列表";
   if (Array.isArray(value))
     return value.map((item) => queryValueText(item)).join("、");
+  if (isTagValue(value))
+    return `${value.name}（${value.count.toLocaleString("zh-CN")}）`;
   if (entity(value))
-    return entityNames(value.fields.name, value.fields.nameCn)?.primary ?? value.ref;
+    return entityNames(value.fields.name, value.fields.nameCn)?.primary ??
+      readableRef(value.ref);
   if (fact(value)) return FACT_LABEL[value.factKind] ?? value.factKind;
   if (path(value)) return `${value.cost} 跳路径`;
   if (typeof value === "boolean") return value ? "是" : "否";
@@ -211,6 +254,7 @@ export function queryValueText(
     typeof value === "string" && context?.column === "entityType" &&
     Object.hasOwn(OWNER_LABEL, value)
   ) return OWNER_LABEL[value as Owner];
+  if (typeof value === "string") return readableRef(value);
   if (typeof value === "number" && context) {
     const mapped = mappedNumber(value, context);
     if (mapped) return mapped;
@@ -262,7 +306,7 @@ function valueNode(
     const names = entity(value)
       ? entityNames(value.fields.name, value.fields.nameCn)
       : null;
-    const primary = label || names?.primary || queryValueText(value);
+    const primary = label || names?.primary || readableRef(ref);
     const secondary = secondaryLabel ?? names?.secondary;
     if (secondary && secondary !== primary) {
       button.className += " query-entity-names";
@@ -275,7 +319,6 @@ function valueNode(
       originalName.textContent = secondary;
       button.append(primaryName, originalName);
     } else button.textContent = primary;
-    button.title = ref;
     button.addEventListener("click", () => options.onEntity?.(ref));
     return button;
   }
@@ -376,12 +419,24 @@ function renderTable(
   const wrapper = document.createElement("div");
   wrapper.className = "query-table-wrap";
   const table = document.createElement("table");
-  table.className = "query-table";
   const columns = [...new Set(result.rows.flatMap((row) => Object.keys(row)))];
-  const displayColumns = columns.includes("ref")
-    ? columns.filter((column) => column !== "name" && column !== "nameCn")
+  const rowRefs = result.rows.map((row, index) =>
+    rowEntityRef(row, result.evidence[index])
+  );
+  const hasEntityColumn = rowRefs.some((ref) => ref !== null);
+  table.className = hasEntityColumn ? "query-table query-entity-table" : "query-table";
+  const displayColumns = hasEntityColumn
+    ? columns.filter((column) =>
+      column !== "ref" && column !== "name" && column !== "nameCn"
+    )
     : columns;
   const head = table.createTHead().insertRow();
+  if (hasEntityColumn) {
+    const cell = document.createElement("th");
+    cell.scope = "col";
+    cell.textContent = "条目";
+    head.append(cell);
+  }
   for (const column of displayColumns) {
     const cell = document.createElement("th");
     cell.scope = "col";
@@ -391,15 +446,26 @@ function renderTable(
   const body = table.createTBody();
   result.rows.forEach((row, rowIndex) => {
     const tr = body.insertRow();
+    if (hasEntityColumn) {
+      const cell = tr.insertCell();
+      cell.setAttribute("data-label", "条目");
+      const ref = rowRefs[rowIndex];
+      const names = entityNames(row.name, row.nameCn);
+      const value = ref ?? null;
+      cell.append(valueNode(
+        value,
+        options,
+        names?.primary ?? (ref ? readableRef(ref) : "未提供"),
+        names?.secondary,
+      ));
+    }
     for (const column of displayColumns) {
       const cell = tr.insertCell();
+      cell.setAttribute("data-label", columnLabel(column));
       const value = row[column];
-      const displayNames = column === "ref"
-        ? entityNames(row.name, row.nameCn)
-        : null;
       const rendered = value === undefined ? null : value;
       const semantic = result.columns[column]?.semantic;
-      const label = displayNames?.primary || queryValueText(rendered, {
+      const label = queryValueText(rendered, {
         column,
         row,
         semantic,
@@ -410,7 +476,6 @@ function renderTable(
         options,
         semantic,
         label,
-        displayNames?.secondary,
       ));
     }
     const snippet = queryRowMatchSnippet(row, result.evidence[rowIndex]);

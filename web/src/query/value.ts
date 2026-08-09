@@ -43,7 +43,7 @@ function isScalarList(
   return Array.isArray(value);
 }
 
-function isTag(value: QueryListValue): value is TagValue {
+export function isTagValue(value: unknown): value is TagValue {
   return typeof value === "object" && value !== null && "name" in value;
 }
 
@@ -63,9 +63,9 @@ export function compareValues(
         ? left.length === right.length &&
           left.every((value, index) => {
             const other = right[index] as QueryListValue;
-            return isTag(value) && isTag(other)
+            return isTagValue(value) && isTagValue(other)
               ? value.name === other.name && value.count === other.count
-              : !isTag(value) && !isTag(other) && equalValues(value, other);
+              : !isTagValue(value) && !isTagValue(other) && equalValues(value, other);
           })
         : !isScalarList(left) &&
           !isScalarList(right) &&
@@ -78,7 +78,7 @@ export function compareValues(
       return left.includes(right);
     if (isScalarList(left) && !isScalarList(right))
       return left.some((value) =>
-        isTag(value)
+        isTagValue(value)
           ? typeof right === "string" && value.name === right
           : equalValues(value, right)
       );
