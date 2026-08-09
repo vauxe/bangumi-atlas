@@ -10,7 +10,7 @@ import {
   type QueryDraft,
 } from "./draft";
 import type { QueryResult, RuntimeValue } from "./engine";
-import { renderAnswer } from "./answer-view";
+import { queryResultEntityRefs, renderAnswer } from "./answer-view";
 import {
   QueryBar,
   type EntitySuggestion,
@@ -50,6 +50,7 @@ export interface QueryWorkbenchDependencies {
   onNameSuggestion?(suggestion: NameSuggestion): void | Promise<void>;
   releaseId(): string;
   onEntity(ref: string): void | Promise<void>;
+  onResultEntities?(refs: readonly string[]): number | Promise<number>;
   mappings?(): Promise<Mappings>;
   onBundle?(bundle: QueryBundle): void;
   updateUrl(): void;
@@ -81,10 +82,21 @@ export function queryNeedsWorkspace(draft: QueryDraft): boolean {
   );
 }
 
+/** Merge the entities present in each currently rendered answer section. */
+export function mergeQueryResultRefs(
+  sections: ReadonlyMap<string, readonly string[]>,
+): string[] {
+  const refs = new Set<string>();
+  for (const section of sections.values())
+    for (const ref of section) refs.add(ref);
+  return [...refs];
+}
+
 export class QueryWorkbench {
   private readonly panel = document.createElement("main");
   private readonly workspace = document.createElement("section");
   private readonly status = document.createElement("div");
+  private readonly highlightStatus = document.createElement("span");
   private readonly answers = document.createElement("div");
   private readonly stopButton = action("停止", "query-stop");
   private readonly reopenButton = action("↗", "query-reopen");
@@ -97,6 +109,8 @@ export class QueryWorkbench {
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private lastBundle = "";
   private editableBundle = true;
+  private resultRefsBySection = new Map<string, string[]>();
+  private highlightSerial = 0;
 
   constructor(private readonly dependencies: QueryWorkbenchDependencies) {
     this.panel.id = "query-workbench";
@@ -118,6 +132,8 @@ export class QueryWorkbench {
     this.workspace.hidden = true;
     this.workspace.setAttribute("aria-label", "查询答案");
     const toolbar = document.createElement("header");
+    const meta = document.createElement("div");
+    meta.className = "query-workspace-meta";
     const reset = action("清空", "query-reset");
     const collapse = action("×", "query-collapse");
     collapse.setAttribute("aria-label", "收起查询答案");
@@ -126,7 +142,9 @@ export class QueryWorkbench {
     this.status.className = "query-status";
     this.status.setAttribute("role", "status");
     this.status.setAttribute("aria-live", "polite");
-    toolbar.append(this.status, this.stopButton, reset, collapse);
+    this.highlightStatus.className = "query-highlight-status";
+    meta.append(this.status, this.highlightStatus);
+    toolbar.append(meta, this.stopButton, reset, collapse);
 
     this.answers.className = "query-answers";
     this.answers.setAttribute("aria-label", "查询答案内容");
@@ -197,6 +215,8 @@ export class QueryWorkbench {
       this.lastBundle = "";
       this.editableBundle = true;
       this.hasAnswer = false;
+      this.resultRefsBySection = new Map();
+      this.publishResultEntities();
       this.answers.replaceChildren();
       this.setStatus("");
       this.bar.replace(defaultQueryDraft());
@@ -217,7 +237,6 @@ export class QueryWorkbench {
 
   private expand(focus = true): void {
     this.expanded = true;
-    this.panel.classList.add("expanded");
     this.workspace.hidden = false;
     this.reopenButton.hidden = true;
     if (focus) this.bar.focus();
@@ -227,7 +246,6 @@ export class QueryWorkbench {
     if (this.running)
       this.abortCurrent(new DOMException("query workspace collapsed", "AbortError"));
     this.expanded = false;
-    this.panel.classList.remove("expanded");
     this.workspace.hidden = true;
     this.reopenButton.hidden = !this.hasAnswer;
     if (focus) this.bar.focus();
@@ -238,6 +256,8 @@ export class QueryWorkbench {
     this.lastBundle = "";
     this.editableBundle = true;
     this.hasAnswer = false;
+    this.resultRefsBySection = new Map();
+    this.publishResultEntities();
     state.queryBundle = null;
     notify();
     if (this.dependencies.pushUrl) this.dependencies.pushUrl();
@@ -311,25 +331,39 @@ export class QueryWorkbench {
       notify();
       this.dependencies.updateUrl();
     }
+    const pendingRefs = new Map<string, string[]>();
     const cards = Object.entries(normalized.sections).map(([name, section]) => {
       const card = document.createElement("section");
       card.className = "query-answer-card loading";
       card.dataset.section = name;
       card.textContent = `${section.answer.title}：加载中…`;
-      return { card, section };
+      pendingRefs.set(name, []);
+      return { card, name, section };
     });
     this.answers.setAttribute("aria-busy", "true");
     this.setStatus("正在查询");
     try {
       const results = await commitRenderedResults(
         controller.signal,
-        cards.map(({ card, section }) =>
-          this.loadSection(card, section, currentRelease, controller.signal)
+        cards.map(({ card, name, section }) =>
+          this.loadSection(
+            card,
+            section,
+            currentRelease,
+            controller.signal,
+            (refs) => {
+              pendingRefs.set(name, refs);
+              if (this.resultRefsBySection === pendingRefs)
+                this.publishResultEntities();
+            },
+          )
         ),
         () => {
           this.answers.replaceChildren(...cards.map(({ card }) => card));
           this.answers.setAttribute("aria-busy", "false");
           this.hasAnswer = true;
+          this.resultRefsBySection = pendingRefs;
+          this.publishResultEntities();
         },
       );
       if (results) {
@@ -348,6 +382,7 @@ export class QueryWorkbench {
     section: QuerySection,
     releaseId: string,
     signal: AbortSignal,
+    onVisibleRefs: (refs: string[]) => void,
   ): Promise<boolean> {
     try {
       const fetchSize = Math.min(
@@ -395,6 +430,7 @@ export class QueryWorkbench {
       };
       const render = (focusMore = false): void => {
         const visible = revealQueryResult(result, shown);
+        onVisibleRefs(queryResultEntityRefs(visible));
         renderAnswer(card, section.answer, visible, {
           onEntity: (ref) => {
             void Promise.resolve(this.dependencies.onEntity(ref))
@@ -526,5 +562,24 @@ export class QueryWorkbench {
 
   private setStatus(message: string): void {
     this.status.textContent = message;
+  }
+
+  private publishResultEntities(): void {
+    const serial = ++this.highlightSerial;
+    const refs = mergeQueryResultRefs(this.resultRefsBySection);
+    if (!this.dependencies.onResultEntities) {
+      this.highlightStatus.textContent = "";
+      return;
+    }
+    void Promise.resolve().then(() =>
+      this.dependencies.onResultEntities?.(refs) ?? 0
+    ).then((count) => {
+      if (serial !== this.highlightSerial) return;
+      this.highlightStatus.textContent = count > 0
+        ? `图上 ${count.toLocaleString()} 个当前结果`
+        : "";
+    }).catch((error) => {
+      if (serial === this.highlightSerial) this.showError(error);
+    });
   }
 }

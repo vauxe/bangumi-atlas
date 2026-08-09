@@ -132,6 +132,39 @@ function path(value: RuntimeValue): value is PathValue {
     "kind" in value && value.kind === "path";
 }
 
+const ENTITY_REF = /^(?:subject|person|character|episode):(?:0|[1-9][0-9]*)$/;
+
+function collectEntityRefs(value: RuntimeValue, refs: Set<string>): void {
+  if (typeof value === "string" && ENTITY_REF.test(value)) {
+    refs.add(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectEntityRefs(item, refs);
+    return;
+  }
+  if (entity(value)) {
+    refs.add(value.ref);
+    return;
+  }
+  if (fact(value)) {
+    for (const ref of Object.values(value.roles)) refs.add(ref);
+    return;
+  }
+  if (path(value))
+    for (const node of value.nodes) refs.add(node.ref);
+}
+
+/** Entity identities present in the currently rendered answer rows. */
+export function queryResultEntityRefs(
+  result: Pick<QueryResult, "rows">,
+): string[] {
+  const refs = new Set<string>();
+  for (const row of result.rows)
+    for (const value of Object.values(row)) collectEntityRefs(value, refs);
+  return [...refs];
+}
+
 function isFullTextMatch(
   item: Evidence,
 ): item is Extract<Evidence, { kind: "text-range" }> {
@@ -418,7 +451,7 @@ export function renderAnswer(
   options: AnswerViewOptions = {},
 ): void {
   container.replaceChildren();
-  const heading = document.createElement("h3");
+  const heading = document.createElement("h2");
   heading.textContent = answer.title;
   const count = document.createElement("p");
   count.className = "query-result-count";

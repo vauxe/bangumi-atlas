@@ -82,6 +82,26 @@ export interface AtlasUniforms {
   spotlight: number;
 }
 
+export interface QueryHighlightItem {
+  rank: number;
+  position: [number, number, number];
+}
+
+export function queryHighlightItems(
+  ranks: readonly number[],
+  positionOf: (rank: number) => [number, number, number] | null,
+): QueryHighlightItem[] {
+  const seen = new Set<number>();
+  const items: QueryHighlightItem[] = [];
+  for (const rank of ranks) {
+    if (rank < 0 || seen.has(rank)) continue;
+    seen.add(rank);
+    const position = positionOf(rank);
+    if (position) items.push({ rank, position });
+  }
+  return items;
+}
+
 export class NodeStyleExtension extends LayerExtension {
   static override extensionName = "NodeStyleExtension";
 
@@ -788,6 +808,61 @@ export class Scene {
     return layers;
   }
 
+  private queryResultLayers(): unknown[] {
+    const items = queryHighlightItems(
+      state.queryResultRanks,
+      (rank) => this.posOf(rank),
+    );
+    if (!items.length) return [];
+    const ranks = items.map((item) => item.rank);
+    const positions = new Float32Array(items.length * 3);
+    items.forEach((item, index) => positions.set(item.position, index * 3));
+    const data = {
+      length: items.length,
+      attributes: { getPosition: { value: positions, size: 3 } },
+    };
+    return [
+      // 被其他节点遮挡时只保留低亮轮廓，维持 3D 深度感。
+      new ScatterplotLayer({
+        id: "query-results-xray",
+        data,
+        radiusUnits: "pixels",
+        getRadius: 8,
+        filled: false,
+        stroked: true,
+        getLineColor: [57, 197, 187, 105],
+        getLineWidth: 1.5,
+        lineWidthUnits: "pixels",
+        billboard: true,
+        parameters: { depthCompare: "greater", depthWriteEnabled: false },
+      }),
+      new ScatterplotLayer({
+        id: "query-results-lit",
+        data,
+        radiusUnits: "pixels",
+        getRadius: 6,
+        filled: true,
+        stroked: true,
+        getFillColor: [57, 197, 187, 170],
+        getLineColor: [234, 252, 250, 235],
+        getLineWidth: 1,
+        lineWidthUnits: "pixels",
+        billboard: true,
+        pickable: true,
+        onHover: (info: { index: number; x: number; y: number }) => {
+          const rank = info.index >= 0 ? ranks[info.index] : undefined;
+          this.cb.onHover(rank ?? null, info.x, info.y);
+        },
+        onClick: (info: { index: number }) => {
+          const rank = ranks[info.index];
+          if (rank !== undefined) this.cb.onPick(rank);
+          return true;
+        },
+        parameters: { depthWriteEnabled: false },
+      }),
+    ];
+  }
+
   /** 语境层数据:属性引用恒定(GPU Buffer 或 CPU 数组),
    * 对象只在填充进度变化时更换 → deck 不做无谓重传。
    * 长度用 styled 而非 geo.loaded:loaded 在流回调里实时推进,
@@ -844,7 +919,9 @@ export class Scene {
 
   private atlasUniforms(): AtlasUniforms {
     return {
-      spotlight: state.selection !== null ? 1 : 0,
+      spotlight: state.selection !== null || state.queryResultRanks.some(
+        (rank) => this.posOf(rank) !== null,
+      ) ? 1 : 0,
     };
   }
 
@@ -877,6 +954,7 @@ export class Scene {
         },
       } as never),
     ];
+    layers.push(...this.queryResultLayers());
     layers.push(...this.workingSetLayers());
     const flash = this.anchorFlash;
     if (flash) {
