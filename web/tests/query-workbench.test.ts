@@ -10,6 +10,7 @@ import {
   isExplorerConditionComplete,
   parseExplorerLimit,
   factEnumValues,
+  FIELD_LABEL,
   parseFactValue,
   describeAggregateMetric,
   queryAggregateFields,
@@ -208,9 +209,27 @@ test("names same-type relationship directions without duplicate choices", () => 
   assert.equal(related.length, 2);
   assert.equal(new Set(related.map((item) => item.label)).size, 2);
   assert.deepEqual(related.map((item) => item.label), [
-    "作品关系 · 目标作品",
-    "作品关系 · 来源作品",
+    "作品关系 · 关联到的作品",
+    "作品关系 · 关联到它的作品",
   ]);
+});
+
+test("uses domain language for fields and content availability", () => {
+  assert.equal(FIELD_LABEL.date, "首发日期");
+  assert.equal(FIELD_LABEL.metaTags, "内容标签");
+  assert.equal(FIELD_LABEL.summaryState, "是否有简介");
+  assert.deepEqual(enumValuesFor("subject", "summaryState"), {
+    HAS: "有简介",
+    EMPTY: "无简介",
+  });
+  assert.deepEqual(enumValuesFor("episode", "descriptionState"), {
+    HAS: "有分集介绍",
+    EMPTY: "无分集介绍",
+  });
+  assert.deepEqual(factEnumValues("VOICE_CREDIT", "summaryState"), {
+    HAS: "有说明",
+    EMPTY: "无说明",
+  });
 });
 
 test("uses the direction users expect for common result sorts", () => {

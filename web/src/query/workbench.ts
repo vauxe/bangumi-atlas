@@ -3,13 +3,12 @@ import { normalizeBundle, type QueryBundle, type QuerySection } from "./bundle";
 import {
   compileQueryDraft,
   defaultQueryDraft,
-  draftOwner,
   draftQuery,
   queryDraftFromBundle,
   type EntityRef,
   type QueryDraft,
 } from "./draft";
-import type { QueryResult, RuntimeValue } from "./engine";
+import type { QueryResult } from "./engine";
 import { queryResultEntityRefs, renderAnswer } from "./answer-view";
 import {
   QueryBar,
@@ -23,9 +22,7 @@ import {
   revealQueryResult,
 } from "./result-buffer";
 import { QUERY_SECURITY_PROFILE } from "./security";
-import { isMissing } from "./value";
-import { INTERNAL_FIELDS, queryFieldsFor } from "./workbench-model";
-import type { FieldCapability, Owner } from "./contract";
+import type { Owner } from "./contract";
 import { notify, state } from "../store";
 import type { Mappings } from "../types";
 
@@ -108,7 +105,6 @@ export class QueryWorkbench {
   private hasAnswer = false;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private lastBundle = "";
-  private editableBundle = true;
   private resultRefsBySection = new Map<string, string[]>();
   private highlightSerial = 0;
 
@@ -202,7 +198,6 @@ export class QueryWorkbench {
     const draft: QueryDraft = kind === "path"
       ? { kind: "path", from, to, maxHops: 6, maxPaths: 10 }
       : { kind: "comparison", from, to };
-    this.editableBundle = true;
     this.bar.replace(draft);
     this.expand();
     this.runCurrent();
@@ -213,7 +208,6 @@ export class QueryWorkbench {
       if (!this.lastBundle) return;
       this.abortCurrent(new DOMException("query navigation", "AbortError"));
       this.lastBundle = "";
-      this.editableBundle = true;
       this.hasAnswer = false;
       this.resultRefsBySection = new Map();
       this.publishResultEntities();
@@ -227,7 +221,6 @@ export class QueryWorkbench {
     const key = canonicalJson(normalized);
     if (key === this.lastBundle) return;
     const draft = queryDraftFromBundle(normalized);
-    this.editableBundle = draft !== null;
     if (draft) this.bar.replace(draft);
     this.expand();
     void this.runBundle(normalized, false).then(() => {
@@ -254,7 +247,6 @@ export class QueryWorkbench {
   private newQuery(): void {
     this.abortCurrent(new DOMException("new query", "AbortError"));
     this.lastBundle = "";
-    this.editableBundle = true;
     this.hasAnswer = false;
     this.resultRefsBySection = new Map();
     this.publishResultEntities();
@@ -269,7 +261,6 @@ export class QueryWorkbench {
   }
 
   private draftChanged(draft: QueryDraft): void {
-    this.editableBundle = true;
     if (this.refreshTimer !== null) clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
     this.abortCurrent(new DOMException("query changed", "AbortError"));
@@ -437,18 +428,6 @@ export class QueryWorkbench {
               .catch((error) => this.showError(error));
           },
           onMore: visible.hasMore ? () => void showMore() : undefined,
-          onSort: this.editableBundle
-            ? (semantic, direction) => this.sortResult(semantic, direction)
-            : undefined,
-          onGroup: this.editableBundle
-            ? (semantic) => this.groupResult(semantic)
-            : undefined,
-          onFilter: this.editableBundle
-            ? (semantic, value, exclude) => this.filterResult(semantic, value, exclude)
-            : undefined,
-          canSort: (semantic) => this.resultField(semantic, "sort") !== null,
-          canGroup: (semantic) => this.resultField(semantic, "group") !== null,
-          canFilter: (semantic) => this.resultField(semantic, "filter") !== null,
           mappings,
         });
         if (focusMore)
@@ -486,78 +465,6 @@ export class QueryWorkbench {
   private setRunning(running: boolean): void {
     this.running = running;
     this.stopButton.hidden = !running;
-  }
-
-  private resultField(
-    semantic: string,
-    capability: FieldCapability,
-  ): { owner: Owner; field: string } | null {
-    const split = semantic.indexOf(".");
-    const owner = semantic.slice(0, split) as Owner;
-    const field = semantic.slice(split + 1);
-    const query = draftQuery(this.bar.current());
-    const currentOwner = draftOwner(this.bar.current());
-    if (
-      split <= 0 || !query || currentOwner !== owner || INTERNAL_FIELDS.has(field) ||
-      !queryFieldsFor(owner, capability).includes(field)
-    ) return null;
-    return { owner, field };
-  }
-
-  private filterResult(
-    semantic: string,
-    value: RuntimeValue,
-    exclude: boolean,
-  ): void {
-    const target = this.resultField(semantic, "filter");
-    if (!target) return;
-    const condition = isMissing(value)
-      ? { kind: "isMissing" as const, field: target.field, ...(exclude ? { negated: true } : {}) }
-      : value === null
-        ? { kind: "isNull" as const, field: target.field, ...(exclude ? { negated: true } : {}) }
-        : typeof value === "string" || typeof value === "number" || typeof value === "boolean"
-          ? {
-              kind: "compare" as const,
-              field: target.field,
-              operator: exclude ? "ne" as const : "eq" as const,
-              value,
-            }
-          : null;
-    if (condition) {
-      this.bar.dispatch({ type: "addCondition", condition, owner: target.owner });
-      this.bar.focus();
-    }
-  }
-
-  private sortResult(semantic: string, direction: "asc" | "desc"): void {
-    const target = this.resultField(semantic, "sort");
-    if (!target) return;
-    this.bar.dispatch({
-      type: "setOrder",
-      owner: target.owner,
-      orderBy: [{
-        column: target.field,
-        direction,
-        nulls: direction === "asc" ? "first" : "last",
-      }],
-    });
-    this.bar.focus();
-  }
-
-  private groupResult(semantic: string): void {
-    const target = this.resultField(semantic, "group");
-    if (!target) return;
-    const draft = this.bar.current();
-    const aggregate = draft.kind === "aggregate"
-      ? {
-          ...draft.query.aggregate,
-          groupBy: draft.query.aggregate.groupBy.includes(target.field)
-            ? draft.query.aggregate.groupBy
-            : [...draft.query.aggregate.groupBy, target.field],
-        }
-      : { groupBy: [target.field], metrics: [{ function: "count" as const }] };
-    this.bar.dispatch({ type: "setAggregate", aggregate, owner: target.owner });
-    this.bar.focus();
   }
 
   private setStatus(message: string): void {

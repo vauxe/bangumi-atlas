@@ -26,7 +26,7 @@ export const FIELD_LABEL: Record<string, string> = {
   nameCn: "中文名",
   type: "类型",
   platform: "平台",
-  date: "日期",
+  date: "首发日期",
   year: "年份",
   score: "评分",
   rank: "Bangumi 排名",
@@ -38,7 +38,7 @@ export const FIELD_LABEL: Record<string, string> = {
   dropped: "抛弃",
   series: "系列",
   scoreDetails: "评分分布",
-  metaTags: "元标签",
+  metaTags: "内容标签",
   tags: "用户标签",
   career: "职业",
   comments: "评论数",
@@ -50,7 +50,7 @@ export const FIELD_LABEL: Record<string, string> = {
   sort: "集数",
   summary: "简介",
   description: "分集介绍",
-  summaryState: "简介状态",
+  summaryState: "是否有简介",
   descriptionState: "分集介绍状态",
 };
 
@@ -60,7 +60,7 @@ export const FACT_FIELD_LABEL: Record<string, string> = {
   type: "关系类型",
   spoiler: "包含剧透",
   ended: "已经结束",
-  summaryState: "说明状态",
+  summaryState: "是否有说明",
 };
 
 export const OPERATOR_LABEL: Record<string, string> = {
@@ -161,17 +161,19 @@ export function enumValuesFor(
     ];
     if (values) return values;
   }
-  return owner === "subject" && field === "type"
-    ? Object.fromEntries(Object.entries(MEDIA_NAMES).map(([value, label]) => [value, label]))
-    : owner === "person" && field === "type"
-      ? { "1": "个人", "2": "公司", "3": "组合" }
-      : owner === "character" && field === "role"
-        ? { "1": "角色", "2": "机体", "3": "舰船", "4": "组织" }
-        : field === "summaryState" || field === "descriptionState"
-          ? { "HAS": "有内容", "EMPTY": "无内容" }
-          : definition?.type === "boolean"
-            ? { "true": "是", "false": "否" }
-            : null;
+  if (owner === "subject" && field === "type")
+    return Object.fromEntries(
+      Object.entries(MEDIA_NAMES).map(([value, label]) => [value, label]),
+    );
+  if (owner === "person" && field === "type")
+    return { "1": "个人", "2": "公司", "3": "组合" };
+  if (owner === "character" && field === "role")
+    return { "1": "角色", "2": "机体", "3": "舰船", "4": "组织" };
+  if (field === "summaryState") return { HAS: "有简介", EMPTY: "无简介" };
+  if (field === "descriptionState")
+    return { HAS: "有分集介绍", EMPTY: "无分集介绍" };
+  if (definition?.type === "boolean") return { true: "是", false: "否" };
+  return null;
 }
 
 function summaryValue(owner: Owner, field: string, value: unknown): string {
@@ -287,7 +289,7 @@ export function factEnumValues(
     return mappings?.fact_labels[namespace] ?? null;
   }
   if (definition.type === "boolean") return { true: "是", false: "否" };
-  if (field === "summaryState") return { HAS: "有内容", EMPTY: "无内容" };
+  if (field === "summaryState") return { HAS: "有说明", EMPTY: "无说明" };
   return null;
 }
 
@@ -362,9 +364,9 @@ export function queryRelationOptions(owner: Owner): Array<{
         if (candidateRole === relatedRole) continue;
         const direction = candidateOwner === relatedOwner
           ? relatedRole === "target"
-            ? "目标"
+            ? "关联到的"
             : relatedRole === "source"
-              ? "来源"
+              ? "关联到它的"
               : `${relatedRole} · `
           : "";
         options.push({

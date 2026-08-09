@@ -54,7 +54,7 @@ test("directional facts label the target side with a reverse arrow", () => {
 test("unknown raw codes stay visible as numbers instead of dropping", () => {
   assert.equal(
     factLabel(relates(S(1), S(2), 99), S(1), mappings),
-    "关系 99",
+    "未知关系（99）",
   );
 });
 

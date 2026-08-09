@@ -424,6 +424,45 @@ test("makes the complete subject overview the default dossier view", () => {
   assert.match(element.innerHTML, /系列作品/);
   assert.match(element.innerHTML, /成人内容/);
   assert.match(element.innerHTML, /这是简介/);
+  assert.doesNotMatch(element.innerHTML, /<dt>条目<\/dt>/);
+});
+
+test("labels unknown subject codes without exposing bare enum values", () => {
+  const drawer = makeDrawer(new FakeDrawerElement());
+  const current = {
+    entity: {
+      kind: "subject",
+      key: (1 << 24) | 7,
+      name: "Unknown",
+      nameCn: null,
+      type: 99,
+      platformCode: 88,
+      date: "",
+      score: null,
+      bgmRank: null,
+      nsfw: false,
+      favorite: [0, 0, 0, 0, 0],
+      series: false,
+      scoreDetails: [],
+      metaTags: [],
+      tags: [],
+      hasSummary: false,
+      hasInfobox: false,
+    },
+    mappings: {
+      fact_labels: {}, subject_type: {}, platform: {},
+      person_type: {}, character_role: {}, episode_type: {},
+    },
+    summary: { s: "idle" },
+    summaryOpen: false,
+  };
+  const badge = Reflect.get(drawer, "badge") as (cur: unknown) => string;
+  const renderOverview = Reflect.get(drawer, "renderSubjectOverview") as (
+    cur: unknown,
+  ) => string;
+
+  assert.equal(badge.call(drawer, current), "未知作品类型（99）");
+  assert.match(renderOverview.call(drawer, current), /未知平台（88）/);
 });
 
 test("renders named infobox list items without flattening their meaning", () => {
