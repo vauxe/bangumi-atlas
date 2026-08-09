@@ -6,6 +6,13 @@ import { FOCUS_ZOOM } from "../src/camera";
 import type { OrbitState } from "../src/camera";
 import { state } from "../src/store";
 
+const projectedCommonPixels = (
+  value: number,
+  zoom: number,
+  minPixels: number,
+  maxPixels: number,
+): number => Math.min(Math.max(value * 2 ** zoom, minPixels), maxPixels);
+
 test("commits the final camera frame after the view callback returns", async () => {
   const events: string[] = [];
   const next: OrbitState = {
@@ -158,6 +165,56 @@ test("renders query results as a separate pickable graph layer", () => {
   }
 });
 
+test("keeps query-result markers subtle at overview and prominent through zoom", () => {
+  const previous = state.queryResultRanks;
+  try {
+    state.queryResultRanks = [0];
+    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
+      posOf: (): [number, number, number] => [0, 0, 0],
+      cb: {
+        onHover: () => undefined,
+        onPick: () => undefined,
+      },
+    });
+    const buildLayers = Reflect.get(scene, "queryResultLayers") as () => {
+      id: string;
+      props: Record<string, unknown>;
+    }[];
+    const layers = buildLayers.call(scene);
+    const layer = (id: string): Record<string, unknown> => {
+      const result = layers.find((candidate) => candidate.id === id);
+      assert.ok(result);
+      return result.props;
+    };
+    const lit = layer("query-results-lit");
+    const xray = layer("query-results-xray");
+    const radiusAt = (props: Record<string, unknown>, zoom: number): number =>
+      projectedCommonPixels(
+        props.getRadius as number,
+        zoom,
+        props.radiusMinPixels as number,
+        props.radiusMaxPixels as number,
+      );
+
+    assert.equal(lit.radiusUnits, "common");
+    assert.equal(xray.radiusUnits, "common");
+    const overviewLit = radiusAt(lit, 0);
+    const focusedLit = radiusAt(lit, FOCUS_ZOOM);
+    const closerLit = radiusAt(lit, FOCUS_ZOOM + 2);
+    assert.ok(overviewLit >= 3);
+    assert.ok(overviewLit <= 4);
+    assert.ok(radiusAt(xray, 0) <= 6);
+    assert.ok(focusedLit > overviewLit);
+    assert.ok(closerLit >= focusedLit);
+    assert.ok(closerLit <= 12);
+    assert.ok(radiusAt(xray, FOCUS_ZOOM + 2) <= 16);
+    for (const zoom of [0, FOCUS_ZOOM, FOCUS_ZOOM + 2])
+      assert.ok(radiusAt(xray, zoom) > radiusAt(lit, zoom));
+  } finally {
+    state.queryResultRanks = previous;
+  }
+});
+
 test("lets working-set nodes grow when zooming in", () => {
   const previousState = {
     selection: state.selection,
@@ -201,12 +258,6 @@ test("lets working-set nodes grow when zooming in", () => {
     const xray = requireLayer("ws-xray");
     const covers = requireLayer("ws-covers");
 
-    const projectedCommonPixels = (
-      value: number,
-      zoom: number,
-      minPixels: number,
-      maxPixels: number,
-    ): number => Math.min(Math.max(value * 2 ** zoom, minPixels), maxPixels);
     const assertDoublesWithZoom = (
       value: number,
       minPixels: number,
