@@ -85,12 +85,25 @@ function visibleText(element: FakeElement): string {
     .join(" ");
 }
 
+function countElements(element: FakeElement, tagName: string): number {
+  return Number(element.tagName === tagName) + element.children.reduce(
+    (count, child) => count + countElements(child, tagName),
+    0,
+  );
+}
+
 test("renders missing and explicit null as different user-visible states", () => {
   assert.equal(queryValueText(MISSING), "未提供");
-  assert.equal(queryValueText(null), "空值");
-  assert.equal(queryValueText(""), "空字符串");
-  assert.equal(queryValueText([]), "空列表");
+  assert.equal(queryValueText(null), "未记录");
+  assert.equal(queryValueText(""), "暂无内容");
+  assert.equal(queryValueText([]), "暂无内容");
   assert.equal(queryValueText(false), "否");
+});
+
+test("renders stable references as domain labels instead of storage IDs", () => {
+  assert.equal(queryValueText("subject:42"), "作品 #42");
+  assert.equal(queryValueText("person:7"), "人物 #7");
+  assert.equal(queryValueText("fact:9"), "关系事实 #9");
 });
 
 test("renders structured tags with their names and counts", () => {
@@ -163,8 +176,23 @@ test("renders common entity codes as user-facing labels", () => {
   );
   assert.equal(
     queryValueText(99, { column: "type", row: { ref: "subject:42" } }),
-    "99",
+    "未知作品类型（99）",
   );
+});
+
+test("labels unknown release enum values with their domain meaning", () => {
+  assert.equal(queryValueText(99, {
+    column: "type",
+    row: { ref: "episode:7" },
+    semantic: "episode.type",
+    mappings,
+  }), "未知分集类型（99）");
+  assert.equal(queryValueText(99, {
+    column: "position",
+    row: {},
+    semantic: "WORKED_ON.position",
+    mappings,
+  }), "未知职位（99）");
 });
 
 test("renders release-scoped relation and platform codes as domain labels", () => {
@@ -394,6 +422,48 @@ test("shows Chinese and original entity names without repeating identical names"
     const identical = body?.children[1]?.children[0]?.children[0];
     assert.equal(visibleText(bilingual as FakeElement), "中文名 原題");
     assert.equal(visibleText(identical as FakeElement), "同名");
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
+test("keeps result tables for reading instead of duplicating the query editor", () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    createElement: (tag: string) => new FakeElement(tag.toUpperCase()),
+  } as unknown as Document;
+  try {
+    const container = new FakeElement();
+    renderAnswer(
+      container as unknown as HTMLElement,
+      { shape: "entity-list", title: "查询结果" },
+      {
+        rows: [{ ref: "subject:1", name: "原題", nameCn: "中文名", score: 8.8 }],
+        evidence: [{}],
+        columns: {
+          ref: { type: "entity-ref", semantic: "subject.ref" },
+          name: { type: "string", semantic: "subject.name" },
+          nameCn: { type: "string", semantic: "subject.nameCn" },
+          score: { type: "number", semantic: "subject.score" },
+        },
+        totalMatches: 1,
+        visibleMatches: 1,
+        hasMore: false,
+        stability: "exact",
+        queryDigest: "a".repeat(64),
+        releaseId: "b".repeat(64),
+        coverage: {
+          schema: "atlas-coverage-v1",
+          atoms: ["owner:subject"],
+          digest: "c".repeat(64),
+        },
+        terminalEvidence: [{ kind: "completed-domain", coverage: "c".repeat(64) }],
+      },
+      {},
+    );
+
+    assert.equal(countElements(container, "DETAILS"), 0);
+    assert.doesNotMatch(visibleText(container), /只看此值|排除此值|按此分组/);
   } finally {
     globalThis.document = originalDocument;
   }

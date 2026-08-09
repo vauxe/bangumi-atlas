@@ -1,6 +1,6 @@
 /** Scene Model 显示规则:从类型化事实生成方向文案、分组标签和
  * 工作集邻居。反向文案("← 关系名")、固定语义标签和颜色都在这里,
- * 不写入数据事实;未知原始码按数值显示,不丢弃记录。 */
+ * 不写入数据事实;未知原始码带领域名称显示,不丢弃记录。 */
 
 import type { Fact, Mappings } from "./types";
 
@@ -40,7 +40,7 @@ function decode(
   code: number,
   fallback: string,
 ): string {
-  return table?.[String(code)] ?? `${fallback} ${code}`;
+  return table?.[String(code)] ?? `未知${fallback}（${code}）`;
 }
 
 /** 分组显示标签(self 视角)。方向由角色字段判定:定向关系在

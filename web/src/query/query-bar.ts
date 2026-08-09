@@ -455,7 +455,7 @@ export class QueryBar {
   private readonly text = createQueryNameInput();
   private readonly add = button("＋", "query-add");
   private readonly panel = document.createElement("section");
-  private readonly panelTitle = document.createElement("h3");
+  private readonly panelTitle = document.createElement("h2");
   private readonly panelBody = document.createElement("div");
   private readonly panelClose = button("×", "query-popover-close");
   private history: QueryHistory;

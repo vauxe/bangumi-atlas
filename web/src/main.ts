@@ -357,12 +357,11 @@ async function boot(): Promise<void> {
   // ---- 上下文提示栏:随选中状态切换操作提示 ----
   const hint = $("#hint");
   const HINT_DEFAULT =
-    "左键拖 平移 · 滚轮 飞向光标 · 右键或 Shift+拖 旋转 · " +
-    "单击选中 · 双击聚焦 · R 复位 · T 俯视 · S 搜索";
+    "拖动平移 · 滚轮缩放 · 单击查看 · 双击聚焦 · S 搜索 · R 复位";
   const HINT_SELECTED =
-    "Esc 取消选中 · 双击节点 聚焦 · ▶ 指向关系目标 · " +
-    "悬停边看关系 · 单击关系条目 前往 · R 复位";
-  let hintSelected: boolean | null = null;
+    "Esc 取消 · 双击聚焦 · 单击关联前往 · R 复位";
+  let hintSelected = false;
+  hint.textContent = HINT_DEFAULT;
   subscribe(() => {
     const sel = state.selection !== null;
     if (sel === hintSelected) return;

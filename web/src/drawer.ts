@@ -580,10 +580,10 @@ export class Drawer {
     const m = cur.mappings;
     if (!e) return TYPE_NAMES[etype(cur.key)] ?? "";
     if (e.kind === "subject")
-      return m.subject_type[String(e.type)] ?? `作品 ${e.type}`;
+      return m.subject_type[String(e.type)] ?? `未知作品类型（${e.type}）`;
     if (e.kind === "person")
-      return m.person_type[String(e.type)] ?? "人物";
-    return m.character_role[String(e.role)] ?? "角色";
+      return m.person_type[String(e.type)] ?? `未知人物类型（${e.type}）`;
+    return m.character_role[String(e.role)] ?? `未知角色定位（${e.role}）`;
   }
 
   private statsOf(cur: Current): string[] {
@@ -691,7 +691,7 @@ export class Drawer {
       entity.platformCode === null
         ? "未记录"
         : cur.mappings.platform[`${entity.type}:${entity.platformCode}`] ??
-          `平台 ${entity.platformCode}`;
+          `未知平台（${entity.platformCode}）`;
     const tags = tagGroups(entity);
     const meta = tags.meta
       .map((tag) => html`<span class="tag-pill">${tag}</span>`)
@@ -705,7 +705,6 @@ export class Drawer {
         <small>${tag.count.toLocaleString()}</small></span>`)
       .join("");
     const details = html`<dl class="dossier-facts">
-      <div><dt>条目</dt><dd>#${eid(entity.key)}</dd></div>
       <div><dt>首发</dt><dd>${entity.date || "未记录"}</dd></div>
       <div><dt>平台</dt><dd>${platform}</dd></div>
       <div><dt>系列</dt><dd>${entity.series ? "系列作品" : "单独条目"}</dd></div>
@@ -756,7 +755,6 @@ export class Drawer {
       : html`${raw(this.renderSummary(cur))}
           <section class="dossier-section"><h3>基本资料</h3>
             <dl class="dossier-facts">
-              <div><dt>条目</dt><dd>#${eid(cur.key)}</dd></div>
               <div><dt>类型</dt><dd>${this.badge(cur)}</dd></div>
               <div><dt>收藏</dt><dd>${entity?.collects.toLocaleString() ?? "未记录"}</dd></div>
               <div><dt>评论</dt><dd>${entity?.comments.toLocaleString() ?? "未记录"}</dd></div>

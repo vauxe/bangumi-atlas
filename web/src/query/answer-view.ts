@@ -29,12 +29,6 @@ import {
 export interface AnswerViewOptions {
   onEntity?(ref: string): void;
   onMore?(): void;
-  onSort?(semantic: string, direction: "asc" | "desc"): void;
-  onGroup?(semantic: string): void;
-  onFilter?(semantic: string, value: RuntimeValue, exclude: boolean): void;
-  canSort?(semantic: string): boolean;
-  canGroup?(semantic: string): boolean;
-  canFilter?(semantic: string): boolean;
   mappings?: Mappings;
 }
 
@@ -46,7 +40,7 @@ const COLUMN_LABEL: Record<string, string> = {
   nameCn: "中文名",
   type: "类型",
   platform: "平台",
-  date: "日期",
+  date: "首发日期",
   year: "年份",
   score: "评分",
   rank: "Bangumi 排名",
@@ -114,7 +108,39 @@ function mappedNumber(value: number, context: ValueContext): string | null {
   const mapped = namespace.startsWith("fact_labels.")
     ? mappings.fact_labels[namespace.slice("fact_labels.".length)]?.[code]
     : mappings[namespace as Exclude<keyof Mappings, "fact_labels" | "platform">]?.[code];
-  return mapped ?? `未知枚举值（${code}）`;
+  return mapped ?? null;
+}
+
+function enumLabel(context: ValueContext): string | null {
+  const semantic = context.semantic;
+  if (!semantic) return null;
+  const separator = semantic.indexOf(".");
+  if (separator <= 0) return null;
+  const scope = semantic.slice(0, separator);
+  const field = semantic.slice(separator + 1);
+  if (Object.hasOwn(QUERY_CONTRACT.owners, scope)) {
+    const owner = scope as Owner;
+    if (!QUERY_CONTRACT.owners[owner].fields[field]?.enum) return null;
+    return field === "type"
+      ? `${OWNER_LABEL[owner]}类型`
+      : FIELD_LABEL[field] ?? field;
+  }
+  if (!Object.hasOwn(QUERY_CONTRACT.facts, scope)) return null;
+  return factFieldDefinition(scope as QueryFactKind, field).enum
+    ? FACT_FIELD_LABEL[field] ?? field
+    : null;
+}
+
+function entityEnumText(value: number, context: ValueContext): string | null {
+  const ref = context.row.ref;
+  if (typeof ref !== "string") return null;
+  if (context.column === "type" && ref.startsWith("subject:"))
+    return MEDIA_NAMES[value] ?? `未知作品类型（${value}）`;
+  if (context.column === "type" && ref.startsWith("person:"))
+    return PERSON_TYPE_NAMES[value] ?? `未知人物类型（${value}）`;
+  if (context.column === "role" && ref.startsWith("character:"))
+    return CHARACTER_ROLE_NAMES[value] ?? `未知角色定位（${value}）`;
+  return null;
 }
 
 function entity(value: RuntimeValue): value is EntityValue {
@@ -237,9 +263,8 @@ export function queryValueText(
   context?: ValueContext,
 ): string {
   if (isMissing(value)) return "未提供";
-  if (value === null) return "空值";
-  if (value === "") return "空字符串";
-  if (Array.isArray(value) && !value.length) return "空列表";
+  if (value === null) return "未记录";
+  if (value === "" || Array.isArray(value) && !value.length) return "暂无内容";
   if (Array.isArray(value))
     return value.map((item) => queryValueText(item)).join("、");
   if (isTagValue(value))
@@ -258,16 +283,10 @@ export function queryValueText(
   if (typeof value === "number" && context) {
     const mapped = mappedNumber(value, context);
     if (mapped) return mapped;
-    const ref = context.row.ref;
-    if (context.column === "type" && typeof ref === "string") {
-      if (ref.startsWith("subject:")) return MEDIA_NAMES[value] ?? String(value);
-      if (ref.startsWith("person:")) return PERSON_TYPE_NAMES[value] ?? String(value);
-    }
-    if (
-      context.column === "role" &&
-      typeof ref === "string" &&
-      ref.startsWith("character:")
-    ) return CHARACTER_ROLE_NAMES[value] ?? String(value);
+    const entityValue = entityEnumText(value, context);
+    if (entityValue) return entityValue;
+    const label = enumLabel(context);
+    if (label) return `未知${label}（${value}）`;
   }
   return String(value);
 }
@@ -329,89 +348,6 @@ function valueNode(
   return span;
 }
 
-function resultValueNode(
-  value: RuntimeValue,
-  options: AnswerViewOptions,
-  semantic: string | undefined,
-  label: string,
-  secondaryLabel?: string,
-): HTMLElement {
-  const rendered = valueNode(value, options, label, secondaryLabel);
-  const filterable = semantic && options.onFilter &&
-    (options.canFilter?.(semantic) ?? true) && value !== "" && (
-    isMissing(value) || value === null ||
-    typeof value === "string" || typeof value === "number" ||
-    typeof value === "boolean"
-  );
-  if (!filterable) return rendered;
-  const details = document.createElement("details");
-  details.className = "query-result-action";
-  const summary = document.createElement("summary");
-  summary.setAttribute("aria-label", `${label}：筛选操作`);
-  summary.append(rendered);
-  const menu = document.createElement("div");
-  for (const [text, exclude] of [["只看此值", false], ["排除此值", true]] as const) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = text;
-    button.addEventListener("click", () => {
-      details.open = false;
-      options.onFilter?.(semantic, value, exclude);
-    });
-    menu.append(button);
-  }
-  details.append(summary, menu);
-  return details;
-}
-
-function columnHeading(
-  column: string,
-  semantic: string | undefined,
-  options: AnswerViewOptions,
-): HTMLElement {
-  const label = columnLabel(column);
-  const sortable = Boolean(
-    semantic && options.onSort && (options.canSort?.(semantic) ?? true),
-  );
-  const groupable = Boolean(
-    semantic && options.onGroup && (options.canGroup?.(semantic) ?? true),
-  );
-  if (!semantic || (!sortable && !groupable)) {
-    const text = document.createElement("span");
-    text.textContent = label;
-    return text;
-  }
-  const details = document.createElement("details");
-  details.className = "query-column-action";
-  const summary = document.createElement("summary");
-  summary.textContent = label;
-  summary.setAttribute("aria-label", `${label}：列操作`);
-  const menu = document.createElement("div");
-  for (const [text, direction] of [["从低到高", "asc"], ["从高到低", "desc"]] as const) {
-    if (!sortable) break;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = text;
-    button.addEventListener("click", () => {
-      details.open = false;
-      options.onSort?.(semantic, direction);
-    });
-    menu.append(button);
-  }
-  if (groupable) {
-    const group = document.createElement("button");
-    group.type = "button";
-    group.textContent = "按此分组";
-    group.addEventListener("click", () => {
-      details.open = false;
-      options.onGroup?.(semantic);
-    });
-    menu.append(group);
-  }
-  details.append(summary, menu);
-  return details;
-}
-
 function renderTable(
   result: QueryResult,
   options: AnswerViewOptions,
@@ -440,7 +376,7 @@ function renderTable(
   for (const column of displayColumns) {
     const cell = document.createElement("th");
     cell.scope = "col";
-    cell.append(columnHeading(column, result.columns[column]?.semantic, options));
+    cell.textContent = columnLabel(column);
     head.append(cell);
   }
   const body = table.createTBody();
@@ -471,12 +407,7 @@ function renderTable(
         semantic,
         mappings: options.mappings,
       });
-      cell.append(resultValueNode(
-        rendered,
-        options,
-        semantic,
-        label,
-      ));
+      cell.append(valueNode(rendered, options, label));
     }
     const snippet = queryRowMatchSnippet(row, result.evidence[rowIndex]);
     if (snippet) {
