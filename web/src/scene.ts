@@ -43,6 +43,10 @@ const FOCUS_SCALE = 2 ** FOCUS_ZOOM;
 const WORKING_NODE_RADIUS = 9 / FOCUS_SCALE;
 const WORKING_COVER_SIZE = 16.5 / FOCUS_SCALE;
 const WORKING_GLOW_RADIUS = 36 / FOCUS_SCALE;
+// 查询结果与图中节点使用相同的缩放语义：远景只保证可见，靠近时随
+// 场景增长，并在近景上限处停止，避免视觉优先级随缩放反转。
+const QUERY_RESULT_RADIUS = 10 / FOCUS_SCALE;
+const QUERY_RESULT_XRAY_RADIUS = 14 / FOCUS_SCALE;
 
 class CircleCropExtension extends LayerExtension {
   static override extensionName = "CircleCropExtension";
@@ -826,8 +830,10 @@ export class Scene {
       new ScatterplotLayer({
         id: "query-results-xray",
         data,
-        radiusUnits: "pixels",
-        getRadius: 8,
+        radiusUnits: "common",
+        getRadius: QUERY_RESULT_XRAY_RADIUS,
+        radiusMinPixels: 5,
+        radiusMaxPixels: 16,
         filled: false,
         stroked: true,
         getLineColor: [57, 197, 187, 105],
@@ -839,8 +845,10 @@ export class Scene {
       new ScatterplotLayer({
         id: "query-results-lit",
         data,
-        radiusUnits: "pixels",
-        getRadius: 6,
+        radiusUnits: "common",
+        getRadius: QUERY_RESULT_RADIUS,
+        radiusMinPixels: 3.5,
+        radiusMaxPixels: 12,
         filled: true,
         stroked: true,
         getFillColor: [57, 197, 187, 170],
