@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   queryMatchSnippet,
+  queryResultEntityRefs,
   queryRowMatchSnippet,
   queryValueText,
   renderAnswer,
@@ -32,6 +33,8 @@ class FakeElement {
   scope = "";
   colSpan = 1;
   private listeners = new Map<string, () => void>();
+
+  constructor(readonly tagName = "") {}
 
   append(...children: FakeElement[]): void {
     this.children.push(...children);
@@ -195,6 +198,42 @@ test("renders union entity types as readable labels", () => {
   }), "分集");
 });
 
+test("collects every visible answer entity for graph highlighting", () => {
+  assert.deepEqual(queryResultEntityRefs({
+    rows: [{
+      ref: "subject:1",
+      participant: {
+        kind: "entity",
+        owner: "person",
+        ref: "person:2",
+        fields: { name: "人物" },
+      },
+      fact: {
+        kind: "fact",
+        factKind: "APPEARS_IN",
+        ref: "fact:3",
+        multiplicity: 1,
+        roles: { character: "character:3", subject: "subject:1" },
+        fields: {},
+      },
+      path: {
+        kind: "path",
+        policy: "fewest-hops",
+        cost: 1,
+        nodes: [{
+          kind: "entity",
+          owner: "subject",
+          ref: "subject:4",
+          fields: { name: "路径终点" },
+        }],
+        steps: [],
+      },
+      episode: "episode:5",
+      unrelated: "fact:9",
+    }],
+  }), ["subject:1", "person:2", "character:3", "subject:4", "episode:5"]);
+});
+
 test("lets users open an Episode result like every other entity", () => {
   const originalDocument = globalThis.document;
   globalThis.document = {
@@ -243,7 +282,7 @@ test("lets users open an Episode result like every other entity", () => {
 test("keeps result UI focused on the answer instead of export internals", () => {
   const originalDocument = globalThis.document;
   globalThis.document = {
-    createElement: () => new FakeElement(),
+    createElement: (tag: string) => new FakeElement(tag.toUpperCase()),
   } as unknown as Document;
   try {
     const container = new FakeElement();
@@ -270,6 +309,7 @@ test("keeps result UI focused on the answer instead of export internals", () => 
     );
 
     const text = visibleText(container);
+    assert.equal(container.children[0]?.tagName, "H2");
     assert.match(text, /查询结果/);
     assert.match(text, /没有找到符合条件的结果/);
     assert.doesNotMatch(text, /下载|证据与覆盖|Release|查询 [0-9a-f]{12}|覆盖/);

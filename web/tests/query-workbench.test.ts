@@ -24,7 +24,10 @@ import {
   queryStatisticColumns,
   queryTextScopes,
 } from "../src/query/workbench-model";
-import { queryNeedsWorkspace } from "../src/query/workbench";
+import {
+  mergeQueryResultRefs,
+  queryNeedsWorkspace,
+} from "../src/query/workbench";
 
 test("keeps plain name location compact and expands for structured answers", () => {
   assert.equal(queryNeedsWorkspace({
@@ -49,6 +52,13 @@ test("keeps plain name location compact and expands for structured answers", () 
       aggregate: { groupBy: ["year"], metrics: [{ function: "count" }] },
     },
   }), true);
+});
+
+test("merges visible answer entities in stable section order", () => {
+  assert.deepEqual(mergeQueryResultRefs(new Map([
+    ["matches", ["subject:1", "person:2"]],
+    ["paths", ["person:2", "character:3"]],
+  ])), ["subject:1", "person:2", "character:3"]);
 });
 
 test("offers one readable text-scope control for each entity type", () => {

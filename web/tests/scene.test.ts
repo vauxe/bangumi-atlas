@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { NodeStyleExtension, Scene } from "../src/scene";
+import { NodeStyleExtension, queryHighlightItems, Scene } from "../src/scene";
 import { FOCUS_ZOOM } from "../src/camera";
 import type { OrbitState } from "../src/camera";
 import { state } from "../src/store";
@@ -88,6 +88,74 @@ test("does not interpolate per-node metadata across a billboard", () => {
 
   assert.match(vertexDecl, /flat out vec4 atlas_style;/);
   assert.match(fragmentDecl, /flat in vec4 atlas_style;/);
+});
+
+test("keeps only unique query-result nodes whose graph positions are available", () => {
+  assert.deepEqual(queryHighlightItems(
+    [2, 1, 2, -1, 3],
+    (rank) => rank === 3 ? null : [rank, rank + 1, rank + 2],
+  ), [
+    { rank: 2, position: [2, 3, 4] },
+    { rank: 1, position: [1, 2, 3] },
+  ]);
+});
+
+test("dims context only when a query highlight can actually be drawn", () => {
+  const previous = {
+    selection: state.selection,
+    queryResultRanks: state.queryResultRanks,
+  };
+  try {
+    state.selection = null;
+    state.queryResultRanks = [4];
+    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
+      posOf: () => null,
+    });
+    const uniforms = Reflect.get(scene, "atlasUniforms") as () => {
+      spotlight: number;
+    };
+    assert.equal(uniforms.call(scene).spotlight, 0);
+    Reflect.set(scene, "posOf", () => [0, 0, 0]);
+    assert.equal(uniforms.call(scene).spotlight, 1);
+  } finally {
+    state.selection = previous.selection;
+    state.queryResultRanks = previous.queryResultRanks;
+  }
+});
+
+test("renders query results as a separate pickable graph layer", () => {
+  const queryState = state as typeof state & { queryResultRanks: number[] };
+  const previous = queryState.queryResultRanks;
+  const picked: number[] = [];
+  try {
+    queryState.queryResultRanks = [0, 1, 1, 2];
+    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
+      posOf: (rank: number): [number, number, number] | null =>
+        rank < 2 ? [rank, 0, 0] : null,
+      cb: {
+        onHover: () => undefined,
+        onPick: (rank: number) => picked.push(rank),
+      },
+    });
+    const buildLayers = Reflect.get(scene, "queryResultLayers") as () => {
+      id: string;
+      props: Record<string, unknown>;
+    }[];
+    const layers = buildLayers.call(scene);
+    assert.deepEqual(layers.map((layer) => layer.id), [
+      "query-results-xray",
+      "query-results-lit",
+    ]);
+    assert.equal(
+      (layers[1]?.props.data as { length: number }).length,
+      2,
+    );
+    assert.equal(layers[1]?.props.pickable, true);
+    (layers[1]?.props.onClick as (info: { index: number }) => void)({ index: 1 });
+    assert.deepEqual(picked, [1]);
+  } finally {
+    queryState.queryResultRanks = previous;
+  }
 });
 
 test("lets working-set nodes grow when zooming in", () => {

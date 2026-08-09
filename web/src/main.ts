@@ -21,6 +21,7 @@ import {
 import { relationNeighbors } from "./neighbors";
 import { parseEntityRef, QUERY_CONTRACT, type Owner } from "./query/contract";
 import { compileExplorerQuery } from "./query/explorer";
+import { queryResultGraphRanks } from "./query/graph-results";
 import { rankEntitySuggestions } from "./query/query-bar";
 import { OWNER_LABEL } from "./query/workbench-model";
 import { QueryWorkbench } from "./query/workbench";
@@ -537,6 +538,27 @@ async function boot(): Promise<void> {
     await select(rank, "fly", true, key);
   };
 
+  let queryHighlightEpoch = 0;
+  const highlightQueryResultEntities = async (
+    refs: readonly string[],
+  ): Promise<number> => {
+    const epoch = ++queryHighlightEpoch;
+    if (!refs.length) {
+      state.queryResultRanks = [];
+      notify();
+      return 0;
+    }
+    await ensureRankIndex();
+    const ranks = await queryResultGraphRanks(refs, {
+      episodeSubjectKey: async (id) => (await data.episode(id))?.subject ?? null,
+      rankOfKey: rankOfKeyLocal,
+    });
+    if (epoch !== queryHighlightEpoch) return 0;
+    state.queryResultRanks = ranks;
+    notify();
+    return ranks.length;
+  };
+
   queryWorkbench = new QueryWorkbench({
     host: $("#query-dock"),
     execute: (section, options) =>
@@ -627,6 +649,7 @@ async function boot(): Promise<void> {
     releaseId: () => manifest.version,
     mappings: () => data.mappings(),
     onEntity: navigateEntity,
+    onResultEntities: highlightQueryResultEntities,
     updateUrl: replaceUrl,
     pushUrl,
   });
