@@ -543,6 +543,8 @@ select.query-popover-control[multiple] { min-width: 14ch; max-width: 22ch; }
 .query-table .query-match-row td { padding-top: 0; color: var(--ink-2); font-size: 11px; line-height: 1.5; white-space: normal; }
 .query-entity-link { border: 0; padding: 0; background: none; color: var(--miku); cursor: pointer; }
 .query-entity-link:hover { text-decoration: underline; }
+.query-entity-names { display: grid; gap: 2px; text-align: left; white-space: normal; }
+.query-entity-name-original { color: var(--ink-2); font-size: 11px; line-height: 1.35; }
 .query-missing { color: #d6a65d; }
 .query-null { color: var(--ink-2); font-style: italic; }
 .query-path-list { display: grid; gap: 10px; padding-left: 24px; }

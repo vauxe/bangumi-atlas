@@ -279,6 +279,52 @@ test("lets users open an Episode result like every other entity", () => {
   }
 });
 
+test("shows Chinese and original entity names without repeating identical names", () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    createElement: (tag: string) => new FakeElement(tag.toUpperCase()),
+  } as unknown as Document;
+  try {
+    const container = new FakeElement();
+    renderAnswer(
+      container as unknown as HTMLElement,
+      { shape: "table", title: "查询结果" },
+      {
+        rows: [
+          { ref: "subject:1", name: "原題", nameCn: "中文名" },
+          { ref: "subject:2", name: "同名", nameCn: "同名" },
+        ],
+        evidence: [{}, {}],
+        columns: {
+          ref: { type: "entity-ref", semantic: "subject.ref" },
+          name: { type: "string", semantic: "subject.name" },
+          nameCn: { type: "string", semantic: "subject.nameCn" },
+        },
+        totalMatches: 2,
+        visibleMatches: 2,
+        hasMore: false,
+        stability: "exact",
+        queryDigest: "a".repeat(64),
+        releaseId: "b".repeat(64),
+        coverage: {
+          schema: "atlas-coverage-v1",
+          atoms: ["owner:subject"],
+          digest: "c".repeat(64),
+        },
+        terminalEvidence: [{ kind: "completed-domain", coverage: "c".repeat(64) }],
+      },
+    );
+
+    const body = container.children[2]?.children[0]?.children[1];
+    const bilingual = body?.children[0]?.children[0]?.children[0];
+    const identical = body?.children[1]?.children[0]?.children[0];
+    assert.equal(visibleText(bilingual as FakeElement), "中文名 原題");
+    assert.equal(visibleText(identical as FakeElement), "同名");
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
 test("keeps result UI focused on the answer instead of export internals", () => {
   const originalDocument = globalThis.document;
   globalThis.document = {

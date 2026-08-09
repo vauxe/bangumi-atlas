@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { normalizeBundle } from "../src/query/bundle";
+import {
+  executeQuery,
+  type EntityValue,
+  type QueryDataSource,
+} from "../src/query/engine";
 
 import {
   applyQueryAction,
@@ -45,6 +50,53 @@ test("lowers and lifts a multi-entity name query without hidden limits", () => {
   assert.equal(section.query.operators[section.query.root]?.kind, "union");
   assert.deepEqual(queryDraftFromBundle(bundle), draft);
   assert.deepEqual(queryDraftFromBundle(normalizeBundle(bundle)), draft);
+});
+
+test("keeps original and Chinese names in a multi-entity result", async () => {
+  const entities: EntityValue[] = [
+    {
+      kind: "entity",
+      owner: "subject",
+      ref: "subject:1",
+      fields: { name: "原題", nameCn: "中文名" },
+    },
+    {
+      kind: "entity",
+      owner: "person",
+      ref: "person:2",
+      fields: { name: "人物原名" },
+    },
+    {
+      kind: "entity",
+      owner: "character",
+      ref: "character:3",
+      fields: { name: "角色原名" },
+    },
+  ];
+  const source: QueryDataSource = {
+    scan: async function* (owner) {
+      yield* entities.filter((entity) => entity.owner === owner);
+    },
+  };
+  const section = compileQueryDraft(defaultQueryDraft()).sections.results;
+  assert.ok(section);
+
+  const result = await executeQuery(
+    section.query,
+    section.parameterValues ?? {},
+    source,
+    { pageSize: 10 },
+  );
+  const rows = new Map(result.rows.map((row) => [row.ref, row]));
+
+  assert.deepEqual(rows.get("subject:1"), {
+    ref: "subject:1",
+    name: "原題",
+    nameCn: "中文名",
+    entityType: "subject",
+  });
+  assert.equal(rows.get("person:2")?.nameCn, null);
+  assert.equal(rows.get("character:3")?.nameCn, null);
 });
 
 test("narrows a multi-entity query and adds a type-specific condition atomically", () => {

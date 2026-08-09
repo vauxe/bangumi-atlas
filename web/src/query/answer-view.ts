@@ -203,7 +203,7 @@ export function queryValueText(
   if (Array.isArray(value))
     return value.map((item) => queryValueText(item)).join("、");
   if (entity(value))
-    return String(value.fields.nameCn || value.fields.name || value.ref);
+    return entityNames(value.fields.name, value.fields.nameCn)?.primary ?? value.ref;
   if (fact(value)) return FACT_LABEL[value.factKind] ?? value.factKind;
   if (path(value)) return `${value.cost} 跳路径`;
   if (typeof value === "boolean") return value ? "是" : "否";
@@ -228,10 +228,27 @@ export function queryValueText(
   return String(value);
 }
 
+function entityNames(
+  originalValue: unknown,
+  chineseValue: unknown,
+): { primary: string; secondary?: string } | null {
+  const original = typeof originalValue === "string" ? originalValue.trim() : "";
+  const chinese = typeof chineseValue === "string" ? chineseValue.trim() : "";
+  const primary = chinese || original;
+  if (!primary) return null;
+  return {
+    primary,
+    ...(chinese && original && chinese !== original
+      ? { secondary: original }
+      : {}),
+  };
+}
+
 function valueNode(
   value: RuntimeValue,
   options: AnswerViewOptions,
   label?: string,
+  secondaryLabel?: string,
 ): HTMLElement {
   const ref = entity(value)
     ? value.ref
@@ -242,7 +259,22 @@ function valueNode(
     const button = document.createElement("button");
     button.type = "button";
     button.className = "query-entity-link";
-    button.textContent = label || queryValueText(value);
+    const names = entity(value)
+      ? entityNames(value.fields.name, value.fields.nameCn)
+      : null;
+    const primary = label || names?.primary || queryValueText(value);
+    const secondary = secondaryLabel ?? names?.secondary;
+    if (secondary && secondary !== primary) {
+      button.className += " query-entity-names";
+      button.setAttribute("aria-label", `${primary}，原名：${secondary}`);
+      const primaryName = document.createElement("span");
+      primaryName.className = "query-entity-name-primary";
+      primaryName.textContent = primary;
+      const originalName = document.createElement("span");
+      originalName.className = "query-entity-name-original";
+      originalName.textContent = secondary;
+      button.append(primaryName, originalName);
+    } else button.textContent = primary;
     button.title = ref;
     button.addEventListener("click", () => options.onEntity?.(ref));
     return button;
@@ -259,8 +291,9 @@ function resultValueNode(
   options: AnswerViewOptions,
   semantic: string | undefined,
   label: string,
+  secondaryLabel?: string,
 ): HTMLElement {
-  const rendered = valueNode(value, options, label);
+  const rendered = valueNode(value, options, label, secondaryLabel);
   const filterable = semantic && options.onFilter &&
     (options.canFilter?.(semantic) ?? true) && value !== "" && (
     isMissing(value) || value === null ||
@@ -361,13 +394,12 @@ function renderTable(
     for (const column of displayColumns) {
       const cell = tr.insertCell();
       const value = row[column];
-      const displayName = column === "ref"
-        ? (typeof row.nameCn === "string" && row.nameCn) ||
-          (typeof row.name === "string" ? row.name : "")
-        : undefined;
+      const displayNames = column === "ref"
+        ? entityNames(row.name, row.nameCn)
+        : null;
       const rendered = value === undefined ? null : value;
       const semantic = result.columns[column]?.semantic;
-      const label = displayName || queryValueText(rendered, {
+      const label = displayNames?.primary || queryValueText(rendered, {
         column,
         row,
         semantic,
@@ -378,6 +410,7 @@ function renderTable(
         options,
         semantic,
         label,
+        displayNames?.secondary,
       ));
     }
     const snippet = queryRowMatchSnippet(row, result.evidence[rowIndex]);
