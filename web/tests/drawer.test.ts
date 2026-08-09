@@ -129,7 +129,6 @@ function makeDrawer(
       }),
     },
     walk: () => undefined,
-    arm: () => undefined,
     reportError: () => undefined,
     ...overrides,
   } as unknown as DrawerDeps;
@@ -153,6 +152,30 @@ test("renders the Bangumi link as an accessible top action", () => {
 
 test("omits the external action outside node details", () => {
   assert.doesNotMatch(drawerTopActions(), /bgm\.tv/);
+});
+
+test("keeps query construction out of the node overview", () => {
+  const drawer = makeDrawer(new FakeDrawerElement());
+  const renderOverview = Reflect.get(drawer, "renderOverview") as (
+    current: unknown,
+  ) => string;
+  const markup = renderOverview.call(drawer, {
+    key: (2 << 24) | 1,
+    entity: null,
+    mappings: {
+      fact_labels: {}, subject_type: {}, platform: {},
+      person_type: {}, character_role: {}, episode_type: {},
+    },
+    factsTotal: 12,
+    summary: { s: "idle" },
+    summaryOpen: false,
+  });
+
+  assert.match(markup, /基本资料/);
+  assert.doesNotMatch(markup, /探索 12 条关联/);
+  assert.doesNotMatch(markup, /共同关联/);
+  assert.doesNotMatch(markup, /查找路径/);
+  assert.doesNotMatch(markup, /data-arm|overview-actions/);
 });
 
 test("keeps a closed drawer out of focus navigation", () => {

@@ -81,13 +81,6 @@ async function boot(): Promise<void> {
       data,
       reportError,
       walk: (rank) => runTask(select(rank, "fly"), "节点加载"),
-      arm: (kind, fromRank, fromKey) => {
-        pendingLink = { kind, fromRank, fromKey };
-        hud.textContent =
-          kind === "common"
-            ? "已锁定起点——点击或搜索另一个节点,查看共同关联"
-            : "已锁定起点——点击或搜索另一个节点,查找最短路径";
-      },
     },
   );
 
@@ -250,7 +243,6 @@ async function boot(): Promise<void> {
       if (geo.key[i] === key) return i;
     return null;
   };
-  let pendingLink: LinkState | null = null;
   let navigationEpoch = 0;
   let firstStructuralPaint = false;
 
@@ -291,7 +283,6 @@ async function boot(): Promise<void> {
     }
     const from = queryRefFromKey(link.fromKey);
     const to = queryRefFromKey(bKey);
-    pendingLink = null;
     await select(bRank, cam, push, bKey);
     queryWorkbench?.askRelationship(link.kind, from, to);
   }
@@ -306,8 +297,6 @@ async function boot(): Promise<void> {
     episodeId: number | null = null,
   ): Promise<void> {
     const epoch = ++navigationEpoch;
-    const link = pendingLink;
-    pendingLink = null;
     state.selection = rank;
     state.selectionKey = keyHint;
     // 落点未流式覆盖时,一次 Range 点查同时解析坐标与 key。
@@ -327,10 +316,6 @@ async function boot(): Promise<void> {
       return;
     }
     state.selectionKey = key;
-    if (link && link.fromRank !== rank) {
-      await handleLink(link, rank, push, cam === "none" ? "none" : "fly");
-      return;
-    }
     if (cam === "fly") scene.flyTo(rank);
     else if (cam === "center")
       scene.centerSelection(rank);
@@ -362,7 +347,6 @@ async function boot(): Promise<void> {
     state.selectionKey = null;
     state.neighbors = [];
     state.neighborLabels = [];
-    pendingLink = null;
     drawer.hide();
     notify();
     if (push) pushUrl();
@@ -395,7 +379,6 @@ async function boot(): Promise<void> {
     historyApplications++;
     try {
       const st = decode(appliedHash);
-      pendingLink = null;
       scene.setOrtho(st.ortho);
       if (st.view) scene.setView(st.view);
       if (st.key === null && st.rank === null) {

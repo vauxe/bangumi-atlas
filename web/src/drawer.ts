@@ -35,8 +35,6 @@ export interface DrawerDeps {
   manifest: Manifest;
   data: Data;
   walk: (rank: number) => void;
-  /** 连接查询:锁定起点,等待用户选第二个节点。 */
-  arm: (kind: "common" | "path", from: number, fromKey: number) => void;
   reportError: (context: string, error: unknown) => void;
 }
 
@@ -178,13 +176,6 @@ export class Drawer {
       const rankAttr = t.closest("[data-rank]")?.getAttribute("data-rank");
       if (rankAttr) {
         this.deps.walk(Number(rankAttr));
-        return;
-      }
-      const armKind = t
-        .closest("[data-arm]")
-        ?.getAttribute("data-arm") as "common" | "path" | null;
-      if (armKind && this.cur) {
-        this.deps.arm(armKind, this.cur.rank, this.cur.key);
         return;
       }
       const epAttr = t.closest("[data-ep]")?.getAttribute("data-ep");
@@ -777,16 +768,7 @@ export class Drawer {
               )}
             </dl>
           </section>`;
-    return html`
-      <div class="overview-actions">
-        <button class="primary-action" data-tab="relations">
-          探索 ${cur.factsTotal.toLocaleString()} 条关联
-        </button>
-        <button class="secondary-action" data-arm="common">共同关联</button>
-        <button class="secondary-action" data-arm="path">查找路径</button>
-      </div>
-      ${raw(subject || generic)}
-    `;
+    return subject || generic;
   }
 
   private renderRelations(cur: Current): string {
