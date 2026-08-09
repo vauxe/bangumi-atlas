@@ -432,7 +432,7 @@ export function applyQueryAction(
   return checked(result);
 }
 
-const MULTI_SCOPE_FIELDS = ["ref", "name"] as const;
+const MULTI_SCOPE_FIELDS = ["ref", "name", "nameCn"] as const;
 
 function prefixedOperator(operator: QueryOperator, prefix: string): QueryOperator {
   const id = (value: string): string => `${prefix}${value}`;
@@ -500,9 +500,16 @@ function compileScopedList(query: ListQuery): QueryBundle {
 
   query.scope.forEach((owner, index) => {
     const prefix = `scope${index}-`;
+    const hasNameCn = Object.hasOwn(
+      QUERY_CONTRACT.owners[owner].fields,
+      "nameCn",
+    );
+    const ownerFields = hasNameCn
+      ? fields
+      : fields.filter((field) => field !== "nameCn");
     const branch = compileExplorerQuery({
       ...explorerOf(query, owner),
-      columns: fields,
+      columns: ownerFields,
       orderBy: [],
       limit: null,
     }).sections.results!;
@@ -517,7 +524,9 @@ function compileScopedList(query: ListQuery): QueryBundle {
       columns: [
         ...fields.map((field) => ({
           name: field,
-          value: { kind: "column" as const, name: field },
+          value: field === "nameCn" && !hasNameCn
+            ? { kind: "literal" as const, value: null }
+            : { kind: "column" as const, name: field },
         })),
         {
           name: "entityType",
@@ -627,6 +636,11 @@ function decompileScopedList(bundle: QueryBundle): QueryDraft | null {
       .map((column) =>
         column.value.kind === "column" && column.value.name === column.name
           ? column.name
+          : column.name === "nameCn" &&
+              column.value.kind === "literal" &&
+              column.value.value === null &&
+              !Object.hasOwn(QUERY_CONTRACT.owners[owner].fields, "nameCn")
+            ? column.name
           : null
       );
     if (fields.some((field) => field === null)) return null;
