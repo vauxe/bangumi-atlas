@@ -103,7 +103,7 @@ const queryStyles = readFileSync("src/query/workbench.css", "utf8");
 test("keeps text focus on the shared rounded query surface", () => {
   assert.match(
     queryStyles,
-    /\.query-name-input:focus-visible\s*\{[^}]*outline:\s*0/s,
+    /#query-workbench\s+\.query-name-input:focus-visible\s*\{[^}]*outline:\s*0/s,
   );
   assert.match(
     queryStyles,
