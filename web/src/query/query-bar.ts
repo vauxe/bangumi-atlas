@@ -482,6 +482,7 @@ export class QueryBar {
     this.text.setAttribute("aria-haspopup", "listbox");
     this.text.setAttribute("aria-expanded", "false");
     this.add.setAttribute("aria-label", "添加查询条件或切换答案");
+    this.add.title = "添加查询条件或切换答案";
     this.add.setAttribute("aria-haspopup", "listbox");
     this.add.setAttribute("aria-expanded", "false");
 

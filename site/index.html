@@ -32,13 +32,18 @@ button:focus-visible, input:focus-visible, a:focus-visible {
   outline: 2px solid var(--pink);
   outline-offset: 2px; }
 #query-dock { position: fixed; top: 14px; left: 14px;
-  width: min(680px, calc(100vw - 76px)); z-index: 6;
+  width: min(680px, calc(100vw - 78px)); z-index: 6;
   pointer-events: none; }
 #query-dock > * { pointer-events: auto; }
-#dice { position: absolute; left: calc(100% + 8px); top: 3px; width: 40px;
-  height: 36px; border: 0; background: none; font-size: 18px;
-  color: var(--ink); cursor: pointer; border-radius: 50%; }
-#dice:hover { background: var(--line); }
+#dice { position: absolute; left: calc(100% + 8px); top: 2px; width: 44px;
+  height: 44px; border: 1px solid var(--line);
+  background: rgba(20, 38, 43, .94); font-size: 19px;
+  color: var(--ink); cursor: pointer; border-radius: 50%;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .28);
+  transition: background .15s, border-color .15s, transform .15s; }
+#dice:hover { border-color: var(--miku); background: rgba(57, 197, 187, .14);
+  transform: translateY(-1px) rotate(-8deg); }
+#dice:active { transform: scale(.94); }
 #drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 500px;
   max-width: 96vw; background: var(--panel); z-index: 7; padding: 20px;
   overflow-y: auto; transform: translateX(105%); transition: transform .25s;
@@ -226,9 +231,14 @@ pre.infobox { white-space: pre-wrap; word-break: break-all;
 }
 
 #legend { position: fixed; left: 14px; bottom: 12px; z-index: 5;
-  color: var(--ink-2); font-size: 12px; pointer-events: none; }
+  max-width: calc(100vw - 28px); padding: 5px 9px;
+  border: 1px solid rgba(36, 68, 74, .75); border-radius: 16px;
+  background: rgba(15, 26, 28, .72); color: var(--ink-2);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .18);
+  backdrop-filter: blur(8px); font-size: 12px; pointer-events: none; }
 #legend i { display: inline-block; width: 10px; height: 10px;
   border-radius: 50%; margin: 0 4px 0 10px; vertical-align: -1px; }
+#legend i:first-child { margin-left: 0; }
 #tooltip { position: fixed; display: none; z-index: 8;
   background: rgba(20,38,43,.95); border: 1px solid var(--line);
   padding: 4px 10px; border-radius: 8px; pointer-events: none;
@@ -236,6 +246,7 @@ pre.infobox { white-space: pre-wrap; word-break: break-all;
 #tooltip .tt { color: var(--ink-2); font-size: 11px; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
+  #dice:hover { transform: none; }
 }
 </style>
 <link rel="stylesheet" href="query.css">
