@@ -1,6 +1,11 @@
 #query-workbench {
+  display: flex;
   width: 100%;
+  height: calc(100dvh - 28px);
+  flex-direction: column;
+  align-items: flex-start;
   color: var(--ink);
+  pointer-events: none;
 }
 
 #query-workbench button,
@@ -19,9 +24,12 @@
 
 .query-compose {
   display: flex;
+  width: 100%;
+  flex: none;
   align-items: flex-start;
   gap: 6px;
   min-width: 0;
+  pointer-events: auto;
 }
 
 .query-bar-host,
@@ -395,8 +403,8 @@ select.query-popover-control[multiple] { min-width: 14ch; max-width: 22ch; }
 .query-workspace {
   display: grid;
   width: min(570px, 100%);
-  height: min(64dvh, 620px);
-  min-height: 220px;
+  min-height: 0;
+  flex: 1;
   margin-top: 8px;
   grid-template-rows: 44px minmax(0, 1fr);
   overflow: hidden;
@@ -405,6 +413,7 @@ select.query-popover-control[multiple] { min-width: 14ch; max-width: 22ch; }
   background: rgba(20, 38, 43, .96);
   box-shadow: 0 14px 40px rgba(0, 0, 0, .38);
   backdrop-filter: blur(10px);
+  pointer-events: auto;
 }
 
 .query-workspace > header {
