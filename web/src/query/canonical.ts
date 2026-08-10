@@ -388,6 +388,7 @@ function canonicalizeBindings(
           columns: operator.columns.map((column) => ({
             name: column.name,
             value: renameExpressionBindings(column.value, input),
+            ...(column.hidden ? { hidden: true } : {}),
           })),
         };
         state = outputBindingState(operator.columns.map((column) => column.name));
@@ -850,7 +851,10 @@ export function normalizeQuery(
           !operator.columns.length ||
           new Set(operator.columns.map((column) => column.name)).size !==
             operator.columns.length ||
-          operator.columns.some((column) => !column.name)
+          operator.columns.some((column) =>
+            !column.name ||
+            (column.hidden !== undefined && typeof column.hidden !== "boolean")
+          )
         )
           throw new TypeError("project columns must be non-empty and unique");
         normalized = {
@@ -864,6 +868,7 @@ export function normalizeQuery(
               values,
               preserveParameters,
             ),
+            ...(column.hidden ? { hidden: true } : {}),
           })),
         } satisfies ProjectOperator;
         break;

@@ -63,6 +63,25 @@ test("keeps provenance values as evidence instead of query dimensions", () => {
   assert.equal(QUERY_CONTRACT.factFields.multiplicity.exposure, "evidence");
 });
 
+test("publishes user-facing Subject totals as derived numeric dimensions", () => {
+  for (const [field, source] of [
+    ["ratingCount", "derived:scoreDetails"],
+    ["totalCollections", "derived:favorite"],
+  ] as const) {
+    const definition = fieldDefinition("subject", field);
+    assert.equal(definition.type, "integer");
+    assert.equal(definition.source, source);
+    assert.equal(definition.exposure, "query");
+    assert.deepEqual(definition.capabilities, [
+      "project",
+      "filter",
+      "sort",
+      "group",
+      "aggregate",
+    ]);
+  }
+});
+
 test("separates lookup, full text, evidence, and private field behavior", () => {
   assert.equal(QUERY_CONTRACT.schema, "atlas-query-v2");
   assert.deepEqual(fieldDefinition("subject", "summary").capabilities, [

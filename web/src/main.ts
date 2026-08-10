@@ -22,16 +22,25 @@ import { relationNeighbors } from "./neighbors";
 import { parseEntityRef, QUERY_CONTRACT, type Owner } from "./query/contract";
 import { compileExplorerQuery } from "./query/explorer";
 import { queryResultGraphRanks } from "./query/graph-results";
-import { rankEntitySuggestions } from "./query/query-bar";
+import {
+  rankEntitySuggestions,
+  type EntitySuggestion,
+  type EntitySuggestionBatch,
+} from "./query/query-bar";
+import { QUERY_SECURITY_PROFILE } from "./query/security";
 import { OWNER_LABEL } from "./query/workbench-model";
 import { QueryWorkbench } from "./query/workbench";
 import { QueryWorkerClient } from "./query/worker-client";
-import { Scene } from "./scene";
+import { interactionHint, Scene } from "./scene";
 import { searchNameSuggestions } from "./search";
 import { notify, state, subscribe } from "./store";
 import { TYPE_NAMES, etype, type EntityKind } from "./types";
 import { decode, encode, type LinkState } from "./url";
 import { locateStableTarget, resolveUrlSelection } from "./url-restore";
+import {
+  ambiguousNameSuggestionRanks,
+  entitySuggestionContext,
+} from "./value-labels";
 
 const HOVER_PREFETCH_MS = 150;
 
@@ -354,19 +363,15 @@ async function boot(): Promise<void> {
 
   subscribe(() => scene.recolor());
 
-  // ---- 上下文提示栏:随选中状态切换操作提示 ----
+  // ---- 画布操作提示 ----
   const hint = $("#hint");
-  const HINT_DEFAULT =
-    "拖动平移 · 滚轮缩放 · 单击查看 · 双击聚焦 · S 搜索 · R 复位";
-  const HINT_SELECTED =
-    "Esc 取消 · 双击聚焦 · 单击关联前往 · R 复位";
-  let hintSelected = false;
-  hint.textContent = HINT_DEFAULT;
+  let hintSelected = state.selection !== null;
+  hint.textContent = interactionHint(hintSelected);
   subscribe(() => {
-    const sel = state.selection !== null;
-    if (sel === hintSelected) return;
-    hintSelected = sel;
-    hint.textContent = sel ? HINT_SELECTED : HINT_DEFAULT;
+    const selected = state.selection !== null;
+    if (selected === hintSelected) return;
+    hintSelected = selected;
+    hint.textContent = interactionHint(selected);
   });
 
   let queryWorkbench: QueryWorkbench | null = null;
@@ -438,61 +443,108 @@ async function boot(): Promise<void> {
     return suggestionClient;
   };
 
-  const suggestQueryEntities = async (
+  const queryEntitySuggestionPage = async (
+    text: string,
+    owner: Owner,
+    offset: number,
+    pageSize: number,
+    signal: AbortSignal,
+  ): Promise<{ items: EntitySuggestion[]; consumed: number; hasMore: boolean }> => {
+    const columns = [
+      "ref",
+      "name",
+      ...(owner === "subject" || owner === "episode" ? ["nameCn"] : []),
+      ...(owner === "episode" ? ["subjectRef"] : []),
+    ];
+    const section = compileExplorerQuery({
+      owner,
+      text: { value: text, capability: "lookup" },
+      columns,
+      limit: offset + pageSize + 1,
+    }).sections.results!;
+    const result = await suggestions().execute(
+      section.query,
+      section.parameterValues ?? {},
+      { offset, pageSize, signal },
+    );
+    const items = await Promise.all(result.rows.map(async (row, index) => {
+      const ref = row.ref;
+      const name = typeof row.nameCn === "string" && row.nameCn
+        ? row.nameCn
+        : row.name;
+      if (typeof ref !== "string" || typeof name !== "string") return null;
+      const match = Object.values(result.evidence[index] ?? {}).flat()
+        .find((item) => item.kind === "text-range")?.snippet;
+      let detail = OWNER_LABEL[owner];
+      if (owner === "episode" && typeof row.subjectRef === "string") {
+        const subjectRef = parseEntityRef(row.subjectRef);
+        if (subjectRef.owner === "subject" && subjectRef.archiveId <= 0xffffff) {
+          const subject = await data.entity((1 << 24) | subjectRef.archiveId, signal);
+          if (subject?.kind === "subject")
+            detail = `${detail} · ${subject.nameCn || subject.name}`;
+        }
+      }
+      return {
+        ref: ref as `${Owner}:${number}`,
+        owner,
+        label: name,
+        detail,
+        ...(match ? { match } : {}),
+      } satisfies EntitySuggestion;
+    }));
+    signal.throwIfAborted();
+    return {
+      items: items.filter((item) => item !== null),
+      consumed: result.rows.length,
+      hasMore: result.hasMore,
+    };
+  };
+
+  const suggestQueryEntities = async function* (
     text: string,
     owners: readonly Owner[],
     signal: AbortSignal,
-  ) => {
+  ): AsyncGenerator<EntitySuggestionBatch> {
     if (
       [...text.trim()].length <
         QUERY_CONTRACT.search.lookup.minNormalizedCharacters
-    ) return [];
-    const pages = await Promise.all(owners.map(async (owner) => {
-      const columns = [
-        "ref",
-        "name",
-        ...(owner === "subject" || owner === "episode" ? ["nameCn"] : []),
-        ...(owner === "episode" ? ["subjectRef"] : []),
-      ];
-      const section = compileExplorerQuery({
+    ) {
+      yield { items: [], complete: true };
+      return;
+    }
+    let cursors = [...new Set(owners)].map((owner) => ({ owner, offset: 0 }));
+    if (!cursors.length) {
+      yield { items: [], complete: true };
+      return;
+    }
+    while (cursors.length) {
+      const pages = await Promise.all(cursors.map(async ({ owner, offset }) => ({
         owner,
-        text: { value: text, capability: "lookup" },
-        columns,
-        limit: 12,
-      }).sections.results!;
-      const result = await suggestions().execute(
-        section.query,
-        section.parameterValues ?? {},
-        { offset: 0, pageSize: 12, signal },
-      );
-      const items = await Promise.all(result.rows.map(async (row, index) => {
-        const ref = row.ref;
-        const name = typeof row.nameCn === "string" && row.nameCn
-          ? row.nameCn
-          : row.name;
-        if (typeof ref !== "string" || typeof name !== "string") return null;
-        const match = Object.values(result.evidence[index] ?? {}).flat()
-          .find((item) => item.kind === "text-range")?.snippet;
-        let detail = OWNER_LABEL[owner];
-        if (owner === "episode" && typeof row.subjectRef === "string") {
-          const subjectRef = parseEntityRef(row.subjectRef);
-          if (subjectRef.owner === "subject" && subjectRef.archiveId <= 0xffffff) {
-            const subject = await data.entity((1 << 24) | subjectRef.archiveId, signal);
-            if (subject?.kind === "subject")
-              detail = `${detail} · ${subject.nameCn || subject.name}`;
-          }
-        }
-        return {
-          ref: ref as `${Owner}:${number}`,
+        offset,
+        page: await queryEntitySuggestionPage(
+          text,
           owner,
-          label: name,
-          detail,
-          ...(match ? { match } : {}),
-        };
-      }));
-      return items.filter((item) => item !== null);
-    }));
-    return rankEntitySuggestions(text, pages.flat()).slice(0, 18);
+          offset,
+          QUERY_SECURITY_PROFILE.execution.maxPageSize,
+          signal,
+        ),
+      })));
+      signal.throwIfAborted();
+      const next: { owner: Owner; offset: number }[] = [];
+      for (const { owner, offset, page } of pages) {
+        if (!page.hasMore) continue;
+        if (!page.consumed)
+          throw new TypeError("实体建议分页没有向前推进");
+        next.push({ owner, offset: offset + page.consumed });
+      }
+      const items = rankEntitySuggestions(
+        text,
+        pages.flatMap(({ page }) => page.items),
+      );
+      cursors = next;
+      if (items.length || !cursors.length)
+        yield { items, complete: cursors.length === 0 };
+    }
   };
 
   const navigateEntity = async (ref: string): Promise<void> => {
@@ -591,19 +643,47 @@ async function boot(): Promise<void> {
             })
           : [],
         owners.includes("episode")
-          ? suggestQueryEntities(text, ["episode"], signal)
+          ? queryEntitySuggestionPage(text, "episode", 0, 18, signal)
+              .then(({ items }) => items)
           : [],
       ]);
+      const ambiguousRanks = ambiguousNameSuggestionRanks(canvas);
+      const contextTargets = canvas.flatMap((item) => {
+        const key = geo.key[item.rank];
+        return ambiguousRanks.has(item.rank) && key
+          ? [{ rank: item.rank, key }]
+          : [];
+      });
+      const contextByRank = new Map<number, string>();
+      if (contextTargets.length) {
+        const mappings = await data.mappings();
+        const contexts = await Promise.allSettled(contextTargets.map(
+          async ({ rank, key }) => {
+            const entity = await data.entity(key, signal);
+            return entity
+              ? [rank, entitySuggestionContext(entity, mappings)] as const
+              : null;
+          },
+        ));
+        signal.throwIfAborted();
+        for (const context of contexts) {
+          if (context.status === "fulfilled" && context.value?.[1])
+            contextByRank.set(...context.value);
+        }
+      }
       const ownerOfKind = (["", "subject", "person", "character"] as const);
       return [
         ...canvas.map((item) => {
           const owner = ownerOfKind[item.entityKind] as Owner;
+          const context = contextByRank.get(item.rank);
           return {
             key: `rank:${item.rank}`,
             rank: item.rank,
             owner,
             label: item.display,
-            detail: OWNER_LABEL[owner],
+            detail: context
+              ? `${OWNER_LABEL[owner]} · ${context}`
+              : OWNER_LABEL[owner],
             ...(item.matched !== item.display ? { match: item.matched } : {}),
           };
         }),
@@ -617,6 +697,9 @@ async function boot(): Promise<void> {
         })),
       ].slice(0, 18);
     },
+    suggestTagValues: (field, text, signal) =>
+      data.suggestTagValues(field, text, { signal }),
+    featuredMetaTagValues: manifest.tags,
     onNameSuggestion: async (suggestion) => {
       if (suggestion.rank !== undefined) {
         await select(suggestion.rank, "fly");

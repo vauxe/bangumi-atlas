@@ -88,7 +88,12 @@ export interface FilterOperator {
 export interface ProjectOperator {
   kind: "project";
   input: string;
-  columns: { name: string; value: Expression }[];
+  columns: {
+    name: string;
+    value: Expression;
+    /** Participates in execution but is omitted from the public result row. */
+    hidden?: boolean;
+  }[];
 }
 
 export interface MatchFactOperator {

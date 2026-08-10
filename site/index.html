@@ -16,7 +16,19 @@
   --ink: #eafcfa; --ink-2: #8fb8b5; --line: #24444a;
   --miku: #39c5bb; --pink: #f25ba6;
   --c-subject: #3d8ede; --c-person: #e56a40; --c-character: #27ab7c;
+  --page-inset: 14px; --query-max-width: 680px;
+  --floating-action-size: 44px; --floating-action-gap: 8px;
+  --drawer-max-width: 500px;
+  --drawer-width: min(100dvw, clamp(360px, 38dvw, var(--drawer-max-width)));
+  --occupied-right: 0px;
+  --query-shell-max-width: calc(
+    var(--query-max-width) + var(--floating-action-gap) + var(--floating-action-size)
+  );
+  --query-shell-min-width: calc(
+    var(--floating-action-gap) + var(--floating-action-size)
+  );
 }
+body:has(#drawer.open) { --occupied-right: var(--drawer-width); }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--surface);
   color: var(--ink);
@@ -31,12 +43,22 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 button:focus-visible, input:focus-visible, a:focus-visible {
   outline: 2px solid var(--pink);
   outline-offset: 2px; }
-#query-dock { position: fixed; top: 14px; left: 14px;
-  width: min(680px, calc(100vw - 78px)); z-index: 6;
-  pointer-events: none; }
+#query-dock { position: fixed; top: var(--page-inset); left: var(--page-inset);
+  display: grid;
+  grid-template-columns: minmax(0, var(--query-max-width)) var(--floating-action-size);
+  gap: var(--floating-action-gap);
+  width: min(
+    var(--query-shell-max-width),
+    max(
+      var(--query-shell-min-width),
+      calc(100dvw - var(--occupied-right) - var(--page-inset) - var(--page-inset))
+    )
+  );
+  z-index: 6; pointer-events: none; }
 #query-dock > * { pointer-events: auto; }
-#dice { position: absolute; left: calc(100% + 8px); top: 2px; width: 44px;
-  height: 44px; border: 1px solid var(--line);
+#query-dock > :not(#dice) { min-width: 0; grid-column: 1; grid-row: 1; }
+#dice { grid-column: 2; grid-row: 1; width: var(--floating-action-size);
+  height: var(--floating-action-size); margin-top: 2px; border: 1px solid var(--line);
   background: rgba(20, 38, 43, .94); font-size: 19px;
   color: var(--ink); cursor: pointer; border-radius: 50%;
   box-shadow: 0 4px 18px rgba(0, 0, 0, .28);
@@ -44,8 +66,9 @@ button:focus-visible, input:focus-visible, a:focus-visible {
 #dice:hover { border-color: var(--miku); background: rgba(57, 197, 187, .14);
   transform: translateY(-1px) rotate(-8deg); }
 #dice:active { transform: scale(.94); }
-#drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 500px;
-  max-width: 96vw; background: var(--panel); z-index: 7; padding: 20px;
+#drawer { position: fixed; top: 0; right: 0; bottom: 0;
+  width: var(--drawer-width);
+  background: var(--panel); z-index: 7; padding: 20px;
   overflow-y: auto; transform: translateX(105%); transition: transform .25s;
   border-left: 2px solid var(--pink);
   box-shadow: -8px 0 24px rgba(242, 91, 166, .12); }
@@ -217,21 +240,11 @@ pre.infobox { white-space: pre-wrap; word-break: break-all;
   border-radius: 6px; padding: 8px; max-height: 40vh; overflow: auto; }
 .loading { color: var(--ink-2); }
 
-@media (max-width: 720px) {
-  #drawer-reopen { top: 76px; transform: none; }
-}
-@media (max-width: 600px) {
-  #drawer { width: 100%; max-width: none; padding: 16px; border-left: 0;
-    border-top: 2px solid var(--pink); }
-  .dossier-tabs { top: -16px; margin-inline: -16px; padding-inline: 16px;
-    overflow-x: auto; }
-  .dossier-facts { grid-template-columns: 1fr; }
-  .dossier-facts > .fact-wide { grid-column: auto; }
-  .reference-grid > div { grid-template-columns: 1fr; gap: 2px; }
-}
-
-#legend { position: fixed; left: 14px; bottom: 12px; z-index: 5;
-  max-width: calc(100vw - 28px); padding: 5px 9px;
+#legend { position: fixed; left: var(--page-inset); bottom: 12px; z-index: 5;
+  max-width: max(
+    0px,
+    calc(100dvw - var(--occupied-right) - var(--page-inset) - var(--page-inset))
+  ); padding: 5px 9px;
   border: 1px solid rgba(36, 68, 74, .75); border-radius: 16px;
   background: rgba(15, 26, 28, .72); color: var(--ink-2);
   box-shadow: 0 4px 18px rgba(0, 0, 0, .18);

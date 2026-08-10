@@ -150,6 +150,7 @@ function entityValue(
         date: entity.date,
         year: subjectYear(entity.date),
         score: entity.score,
+        ratingCount: entity.scoreDetails.reduce((sum, count) => sum + count, 0),
         rank: entity.bgmRank,
         nsfw: entity.nsfw,
         wish,
@@ -157,6 +158,7 @@ function entityValue(
         doing,
         onHold,
         dropped,
+        totalCollections: wish + done + doing + onHold + dropped,
         series: entity.series,
         scoreDetails: entity.scoreDetails,
         metaTags: entity.metaTags,
@@ -205,6 +207,26 @@ function projectedEntityValue(
   mappings: Mappings | null,
 ): EntityValue {
   const fields = { ...entity.fields };
+  if (entity.kind === "subject" && requested.has("ratingCount")) {
+    const scoreDetails = fields.scoreDetails;
+    if (!Array.isArray(scoreDetails) || scoreDetails.some((value) =>
+      typeof value !== "number" || !Number.isFinite(value)
+    )) throw new TypeError("projected Subject scoreDetails is invalid");
+    fields.ratingCount = (scoreDetails as number[])
+      .reduce((sum, count) => sum + count, 0);
+    if (!requested.has("scoreDetails")) delete fields.scoreDetails;
+  }
+  if (entity.kind === "subject" && requested.has("totalCollections")) {
+    const favoriteFields = ["wish", "done", "doing", "onHold", "dropped"];
+    const favorite = favoriteFields.map((field) => fields[field]);
+    if (favorite.some((value) =>
+      typeof value !== "number" || !Number.isFinite(value)
+    )) throw new TypeError("projected Subject favorite counters are invalid");
+    fields.totalCollections = (favorite as number[])
+      .reduce((sum, count) => sum + count, 0);
+    for (const field of favoriteFields)
+      if (!requested.has(field)) delete fields[field];
+  }
   if (entity.kind === "subject" && requested.has("platform")) {
     const type = fields.type;
     const code = fields.platformCode;
@@ -353,10 +375,14 @@ export class SiteQueryDataSource implements QueryDataSource {
     }
     if (this.reader.projectEntities) {
       const requested = new Set(fields);
-      const physicalFields = owner === "subject" && requested.has("platform")
-        ? [...new Set(fields.flatMap((field) =>
-            field === "platform" ? ["type", "platformCode"] : [field]
-          ))]
+      const physicalFields = owner === "subject"
+        ? [...new Set(fields.flatMap((field) => {
+            if (field === "platform") return ["type", "platformCode"];
+            if (field === "ratingCount") return ["scoreDetails"];
+            if (field === "totalCollections")
+              return ["wish", "done", "doing", "onHold", "dropped"];
+            return [field];
+          }))]
         : fields;
       const mappings = owner === "subject" && requested.has("platform")
         ? await this.mappings()

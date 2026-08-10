@@ -1,7 +1,12 @@
-import { parseEntityRef, type Owner, type QueryFactKind } from "./contract";
+import {
+  parseEntityRef,
+  QUERY_CONTRACT,
+  type Owner,
+  type QueryFactKind,
+} from "./contract";
 import type { ExplorerCondition, ExplorerRelation } from "./explorer";
 import {
-  DEFAULT_ENTITY_SCOPE,
+  ENTITY_SCOPE_ORDER,
   type EntityScope,
   type QueryDraft,
 } from "./draft";
@@ -13,8 +18,11 @@ import {
   factEnumValues,
   FIELD_LABEL,
   OWNER_LABEL,
-  queryRelationOptions,
+  queryFactDiscriminatorField,
+  queryReferenceOwner,
   queryStatisticColumns,
+  sameFilterFieldSemantics,
+  splitFactDiscriminatorCondition,
 } from "./workbench-model";
 import type { Mappings } from "../types";
 
@@ -58,25 +66,6 @@ export interface QueryPresentationOptions {
   entityLabel?: (ref: string) => string | undefined;
 }
 
-export type CompletionActionId =
-  | "fullText"
-  | "condition"
-  | "relation"
-  | "columns"
-  | "sort"
-  | "limit"
-  | "aggregate"
-  | "list"
-  | "comparison"
-  | "path";
-
-export interface CompletionAction {
-  id: CompletionActionId;
-  label: string;
-  description: string;
-  owner?: Owner;
-}
-
 const COMPARE_SYMBOL: Record<string, string> = {
   eq: "=",
   ne: "≠",
@@ -109,9 +98,19 @@ function conditionTerms(condition: ExplorerCondition | undefined): ExplorerCondi
 function valueLabel(
   value: unknown,
   values: Record<string, string> | null,
+  options?: QueryPresentationOptions,
+  referenceOwner?: Owner | null,
 ): string {
   const mapped = values?.[String(value)];
   if (mapped !== undefined) return mapped;
+  if (typeof value === "string" && options && referenceOwner) {
+    try {
+      if (parseEntityRef(value).owner === referenceOwner)
+        return describeEntity(value, options);
+    } catch {
+      // Invalid references keep their quoted value below.
+    }
+  }
   if (typeof value === "string") return `“${value}”`;
   if (typeof value === "boolean") return value ? "是" : "否";
   if (value === null) return "空值";
@@ -122,11 +121,18 @@ function describeCondition(
   condition: ExplorerCondition,
   fieldLabel: (field: string) => string,
   valuesFor: (field: string) => Record<string, string> | null,
+  options?: QueryPresentationOptions,
+  referenceOwnerFor?: (field: string) => Owner | null,
 ): string {
   switch (condition.kind) {
     case "compare": {
       const field = fieldLabel(condition.field);
-      const value = valueLabel(condition.value, valuesFor(condition.field));
+      const value = valueLabel(
+        condition.value,
+        valuesFor(condition.field),
+        options,
+        referenceOwnerFor?.(condition.field),
+      );
       if (condition.negated && condition.operator === "contains")
         return `${field}不含${value}`;
       const expression = `${field} ${COMPARE_SYMBOL[condition.operator]} ${value}`;
@@ -134,7 +140,12 @@ function describeCondition(
     }
     case "in": {
       const values = condition.values
-        .map((value) => valueLabel(value, valuesFor(condition.field)))
+        .map((value) => valueLabel(
+          value,
+          valuesFor(condition.field),
+          options,
+          referenceOwnerFor?.(condition.field),
+        ))
         .join("、");
       return `${fieldLabel(condition.field)}${condition.negated ? "不属于" : "属于"}（${values}）`;
     }
@@ -146,12 +157,30 @@ function describeCondition(
     case "any": {
       const joiner = condition.kind === "all" ? " 且 " : " 或 ";
       return `（${condition.terms.map((term) =>
-        describeCondition(term, fieldLabel, valuesFor)
+        describeCondition(term, fieldLabel, valuesFor, options, referenceOwnerFor)
       ).join(joiner)}）`;
     }
     case "not":
-      return `非（${describeCondition(condition.term, fieldLabel, valuesFor)}）`;
+      return `非（${describeCondition(
+        condition.term,
+        fieldLabel,
+        valuesFor,
+        options,
+        referenceOwnerFor,
+      )}）`;
   }
+}
+
+export function describeFactCondition(
+  kind: QueryFactKind,
+  condition: ExplorerCondition,
+  mappings?: Mappings,
+): string {
+  return describeCondition(
+    condition,
+    (field) => FACT_FIELD_LABEL[field] ?? field,
+    (field) => factEnumValues(kind, field, mappings),
+  );
 }
 
 function describeEntity(ref: string, options: QueryPresentationOptions): string {
@@ -169,20 +198,38 @@ function describeRelation(
   relation: ExplorerRelation,
   options: QueryPresentationOptions,
 ): string {
-  const relatedOwner = parseEntityRef(relation.related).owner;
-  const parts = [
-    `${relation.exists ? "" : "没有"}${FACT_LABEL[relation.factKind] ?? relation.factKind}`,
-    `${OWNER_LABEL[relatedOwner]}是${describeEntity(relation.related, options)}`,
-  ];
-  if (relation.condition) {
-    parts.push(describeCondition(
-      relation.condition,
-      (field) => FACT_FIELD_LABEL[field] ?? field,
-      (field) => factEnumValues(
-        relation.factKind as QueryFactKind,
-        field,
-        options.mappings,
-      ),
+  const split = splitFactDiscriminatorCondition(
+    relation.factKind,
+    relation.condition,
+  );
+  const discriminatorField = queryFactDiscriminatorField(relation.factKind);
+  const relationship = split.discriminator && discriminatorField
+    ? [...new Set(split.values.map((value) =>
+        valueLabel(
+          value,
+          factEnumValues(
+            relation.factKind,
+            discriminatorField,
+            options.mappings,
+          ),
+        )
+      ))].join("、")
+    : FACT_LABEL[relation.factKind] ?? relation.factKind;
+  const entity = describeEntity(relation.related, options);
+  const description = split.discriminator
+    ? `${relationship}是${entity}`
+    : `${relationship}：${entity}`;
+  const parts = [relation.exists ? description : `排除：${description}`];
+  for (const endpoint of relation.additionalEndpoints ?? []) {
+    const owner = QUERY_CONTRACT.facts[relation.factKind].roles[endpoint.role];
+    if (!owner) continue;
+    parts.push(`${OWNER_LABEL[owner]}：${describeEntity(endpoint.related, options)}`);
+  }
+  if (split.remainder) {
+    parts.push(describeFactCondition(
+      relation.factKind as QueryFactKind,
+      split.remainder,
+      options.mappings,
     ));
   }
   return parts.join(" · ");
@@ -193,7 +240,7 @@ function sameScope(left: readonly Owner[], right: readonly Owner[]): boolean {
 }
 
 export function entityScopeLabel(scope: EntityScope): string {
-  if (sameScope(scope, DEFAULT_ENTITY_SCOPE)) return "全部";
+  if (sameScope(scope, ENTITY_SCOPE_ORDER)) return "全部类型";
   return scope.map((owner) => OWNER_LABEL[owner]).join("、");
 }
 
@@ -203,26 +250,38 @@ function listTokens(
   options: QueryPresentationOptions,
 ): QueryToken[] {
   const { query } = draft;
-  const owner = draft.kind === "aggregate"
-    ? draft.query.owner
-    : draft.query.scope.length === 1 ? draft.query.scope[0] : null;
-  const result: QueryToken[] = [
-    token(
-      "head",
-      "intent",
-      draft.kind === "aggregate"
-        ? `统计${OWNER_LABEL[draft.query.owner]}`
-        : `查找${entityScopeLabel(draft.query.scope)}`,
-      { type: "head" },
-    ),
-  ];
+  const ownerForField = (field: string): Owner | null => {
+    if (draft.kind === "aggregate") return draft.query.owner;
+    const [first, ...rest] = draft.query.scope;
+    return first && rest.every((owner) =>
+      sameFilterFieldSemantics(first, owner, field)
+    ) ? first : null;
+  };
+  const result: QueryToken[] = [draft.kind === "aggregate"
+    ? token(
+        "head",
+        "intent",
+        `统计${OWNER_LABEL[draft.query.owner]}`,
+        { type: "owner" },
+      )
+    : token(
+        "head",
+        "scope",
+        entityScopeLabel(draft.query.scope),
+        { type: "owner" },
+      )];
 
-  if (query.text?.capability === "fullText") {
-    const field = query.text.field ?? "summary";
+  if (query.fullText) {
+    const label = draft.kind === "aggregate"
+      ? FIELD_LABEL[draft.query.fullText!.field] ?? draft.query.fullText!.field
+      : draft.query.scope.includes("episode") &&
+          draft.query.scope.some((owner) => owner !== "episode")
+        ? "简介与分集介绍"
+        : draft.query.scope[0] === "episode" ? "分集介绍" : "简介";
     result.push(token(
       "text",
       "text",
-      `${FIELD_LABEL[field] ?? field}含“${query.text.value}”`,
+      `${label}含“${query.fullText.value}”`,
       { type: "text" },
       true,
     ));
@@ -235,7 +294,15 @@ function listTokens(
       describeCondition(
         condition,
         (field) => FIELD_LABEL[field] ?? field,
-        (field) => owner ? enumValuesFor(owner, field, options.mappings) : null,
+        (field) => {
+          const owner = ownerForField(field);
+          return owner ? enumValuesFor(owner, field, options.mappings) : null;
+        },
+        options,
+        (field) => {
+          const owner = ownerForField(field);
+          return owner ? queryReferenceOwner(owner, field) : null;
+        },
       ),
       { type: "condition", index },
       true,
@@ -289,6 +356,10 @@ function listTokens(
           (field) => aggregate.groupBy.includes(field)
             ? enumValuesFor(draft.query.owner, field, options.mappings)
             : null,
+          options,
+          (field) => aggregate.groupBy.includes(field)
+            ? queryReferenceOwner(draft.query.owner, field)
+            : null,
         )}`,
         { type: "having" },
         true,
@@ -297,17 +368,31 @@ function listTokens(
   }
 
   if (query.orderBy?.length) {
+    const prefix = query.limit !== undefined && query.limit !== null
+      ? `前 ${query.limit} 条 · `
+      : "";
+    const labels = query.orderBy.map((order) => {
+      const field = FIELD_LABEL[order.column] ?? order.column;
+      const label = "owners" in order && order.owners?.length
+        ? `${order.owners.map((owner) => OWNER_LABEL[owner]).join("、")}的${field}`
+        : field;
+      return `${label}${order.direction === "asc" ? "升序" : "降序"}`;
+    });
+    const terms = labels.length === 1
+      ? `按${labels[0]}`
+      : labels.map((label, index) => `${index === 0 ? "先按" : "再按"}${label}`).join("，");
     result.push(token(
       "order",
       "order",
-      `按${query.orderBy.map((order) =>
-        `${FIELD_LABEL[order.column] ?? order.column}${order.direction === "asc" ? "升序" : "降序"}`
-      ).join("、")}`,
+      `${prefix}${terms}`,
       { type: "order" },
       true,
     ));
   }
-  if (query.limit !== undefined && query.limit !== null) {
+  if (
+    query.limit !== undefined && query.limit !== null &&
+    !query.orderBy?.length
+  ) {
     result.push(token(
       "limit",
       "limit",
@@ -325,7 +410,7 @@ export function queryTokens(
 ): QueryToken[] {
   if (draft.kind === "list" && !draft.query) {
     return [
-      token("intent", "intent", "查找正文", { type: "intent" }),
+      token("intent", "intent", "查找正文", { type: "intent" }, false, false),
       token("text-scope", "scope", "所有正文与关系备注", { type: "text" }),
       token("text", "text", `正文含“${draft.allText}”`, { type: "text" }, true),
     ];
@@ -334,7 +419,7 @@ export function queryTokens(
     return listTokens(draft, options);
   if (draft.kind === "comparison") {
     return [
-      token("head", "intent", "比较共同关联", { type: "head" }),
+      token("head", "intent", "比较共同关联", { type: "head" }, false, false),
       token("from", "entity", describeEntity(draft.from, options), {
         type: "endpoint",
         endpoint: "from",
@@ -346,7 +431,7 @@ export function queryTokens(
     ];
   }
   return [
-    token("head", "intent", "最短路径", { type: "head" }),
+    token("head", "intent", "最短路径", { type: "head" }, false, false),
     token("from", "entity", describeEntity(draft.from, options), {
       type: "endpoint",
       endpoint: "from",
@@ -362,80 +447,5 @@ export function queryTokens(
 
 export function queryInputValue(draft: QueryDraft): string {
   if (draft.kind !== "list" && draft.kind !== "aggregate") return "";
-  return draft.query?.text?.capability === "lookup" ? draft.query.text.value : "";
-}
-
-const LIST_ACTIONS: CompletionAction[] = [
-  { id: "fullText", label: "检索正文", description: "在简介或分集介绍中查找文字" },
-  { id: "condition", label: "添加条件", description: "按字段和值缩小范围" },
-  { id: "relation", label: "添加关联", description: "按相关作品、人物或角色筛选" },
-  { id: "columns", label: "选择显示列", description: "决定列表中显示哪些属性" },
-  { id: "sort", label: "排序", description: "按一个或多个字段排列结果" },
-  { id: "limit", label: "限定条数", description: "只在明确需要时限制结果" },
-  { id: "aggregate", label: "统计", description: "分组并计算条数、合计或平均值" },
-  { id: "comparison", label: "比较两个条目", description: "查看共同关联与差异" },
-  { id: "path", label: "查找关系路径", description: "寻找两个条目之间的最短关联" },
-];
-
-const SHAPE_ACTIONS: CompletionAction[] = [
-  { id: "list", label: "查找条目", description: "返回可继续筛选的条目列表" },
-  { id: "comparison", label: "比较两个条目", description: "查看共同关联与差异" },
-  { id: "path", label: "查找关系路径", description: "寻找两个条目之间的最短关联" },
-];
-
-const LIST_SHAPE_ACTION: CompletionAction = {
-  id: "list",
-  label: "查找条目",
-  description: "返回可继续筛选的条目列表",
-};
-
-function listActions(owner: Owner): CompletionAction[] {
-  return LIST_ACTIONS.filter((action) =>
-    action.id !== "relation" || queryRelationOptions(owner).length > 0
-  );
-}
-
-function scopedActions(scope: EntityScope): CompletionAction[] {
-  const shared = LIST_ACTIONS.filter((action) =>
-    action.id === "fullText" || action.id === "limit" ||
-    action.id === "comparison" || action.id === "path"
-  );
-  const typedIds = new Set<CompletionActionId>([
-    "condition", "relation", "columns", "sort", "aggregate",
-  ]);
-  const typed = scope.flatMap((owner) =>
-    listActions(owner)
-      .filter((action) => typedIds.has(action.id))
-      .map((action) => ({
-        ...action,
-        owner,
-        label: `${OWNER_LABEL[owner]} · ${action.label}`,
-      }))
-  );
-  return [shared[0]!, ...typed, ...shared.slice(1)];
-}
-
-export function completionActions(
-  draft: QueryDraft,
-  input: string,
-): CompletionAction[] {
-  const actions = draft.kind === "list"
-    ? draft.query
-      ? draft.query.scope.length === 1
-        ? listActions(draft.query.scope[0]!)
-        : scopedActions(draft.query.scope)
-      : [LIST_ACTIONS[0]!, LIST_SHAPE_ACTION, ...SHAPE_ACTIONS.slice(1)]
-    : draft.kind === "aggregate"
-      ? [
-          ...listActions(draft.query.owner).filter((action) =>
-            action.id !== "columns" && action.id !== "aggregate"
-          ),
-          LIST_SHAPE_ACTION,
-        ]
-      : SHAPE_ACTIONS;
-  const needle = input.trim().replace(/^\//, "").toLocaleLowerCase();
-  if (!needle) return actions;
-  return actions.filter((action) =>
-    `${action.label} ${action.description}`.toLocaleLowerCase().includes(needle)
-  );
+  return draft.query?.text?.value ?? "";
 }

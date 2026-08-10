@@ -48,9 +48,16 @@ export interface ExplorerRelation {
   candidateRole: string;
   relatedRole: string;
   related: `${Owner}:${number}`;
+  /** Other fixed roles on the same fact (for example a voice credit's work). */
+  additionalEndpoints?: ExplorerRelationEndpoint[];
   exists: boolean;
   /** Predicates over the relationship fact itself (role, position, etc.). */
   condition?: ExplorerCondition;
+}
+
+export interface ExplorerRelationEndpoint {
+  role: string;
+  related: `${Owner}:${number}`;
 }
 
 export interface ExplorerQuery {
@@ -58,8 +65,12 @@ export interface ExplorerQuery {
   text?: {
     value: string;
     parameter?: string;
-    capability: "lookup" | "fullText";
-    field?: FullTextField;
+    capability: "lookup";
+  };
+  fullText?: {
+    value: string;
+    parameter?: string;
+    field: FullTextField;
   };
   condition?: ExplorerCondition;
   relations?: ExplorerRelation[];
@@ -83,20 +94,6 @@ export interface ExplorerAggregate {
 
 export function explorerMetricName(metric: ExplorerAggregateMetric): string {
   return metric.field ? `${metric.function}_${metric.field}` : metric.function;
-}
-
-export function explorerTextCriterion(
-  value: string,
-  capability: "lookup" | "fullText",
-  field?: FullTextField,
-): ExplorerQuery["text"] | undefined {
-  const text = value.trim();
-  if (!text) return undefined;
-  return {
-    value: text,
-    capability,
-    ...(capability === "fullText" && field ? { field } : {}),
-  };
 }
 
 const DEFAULT_COLUMNS: Record<Owner, string[]> = {
@@ -181,29 +178,34 @@ function relationSource(
   const fact = QUERY_CONTRACT.facts[relation.factKind];
   if (fact.roles[relation.candidateRole] !== owner)
     throw new TypeError("关系的候选角色类型不匹配");
-  const relatedOwner = fact.roles[relation.relatedRole];
-  if (
-    relation.candidateRole === relation.relatedRole ||
-    !relatedOwner ||
-    parseEntityRef(relation.related).owner !== relatedOwner
-  ) throw new TypeError("关系的固定端点类型不匹配");
-  const related = `relation${index}_related`;
+  const endpoints = relationEndpoints(relation);
+  const endpointVariables = endpoints.map((_, endpointIndex) =>
+    endpointIndex === 0
+      ? `relation${index}_related`
+      : `relation${index}_related${endpointIndex}`
+  );
+  const endpointByRole = new Map(
+    endpoints.map((endpoint, endpointIndex) => [endpoint.role, endpointIndex]),
+  );
   const roles = [
-    relation.relatedRole,
+    ...endpoints.map((endpoint) => endpoint.role),
     relation.candidateRole,
     ...Object.keys(fact.roles).filter((role) =>
-      role !== relation.relatedRole && role !== relation.candidateRole
+      !endpointByRole.has(role) && role !== relation.candidateRole
     ),
   ].map((role) => {
+    const endpointIndex = endpointByRole.get(role);
     const variable = role === relation.candidateRole
       ? "item"
-      : role === relation.relatedRole
-        ? related
+      : endpointIndex !== undefined
+        ? endpointVariables[endpointIndex]!
         : `relation${index}_${role}`;
     return `${role}: ${variable}`;
   });
   const predicates = [
-    `${related}.ref = ${queryLiteral(relation.related)}`,
+    ...endpoints.map((endpoint, endpointIndex) =>
+      `${endpointVariables[endpointIndex]}.ref = ${queryLiteral(endpoint.related)}`
+    ),
     ...(relation.condition
       ? [conditionSource(
           relation.condition,
@@ -215,14 +217,37 @@ function relationSource(
   return `${relation.exists ? "" : "NOT "}EXISTS { MATCH ${relation.factKind}(${roles.join(", ")}) AS relation${index} WHERE ${predicates.join(" AND ")} }`;
 }
 
+function relationEndpoints(
+  relation: ExplorerRelation,
+): Array<ExplorerRelationEndpoint & { owner: Owner }> {
+  const fact = QUERY_CONTRACT.facts[relation.factKind];
+  const endpoints: ExplorerRelationEndpoint[] = [
+    { role: relation.relatedRole, related: relation.related },
+    ...(relation.additionalEndpoints ?? []),
+  ];
+  const seen = new Set<string>();
+  return endpoints.map((endpoint) => {
+    const expectedOwner = fact.roles[endpoint.role];
+    if (
+      endpoint.role === relation.candidateRole ||
+      !expectedOwner ||
+      seen.has(endpoint.role) ||
+      parseEntityRef(endpoint.related).owner !== expectedOwner
+    ) throw new TypeError("关系的固定端点类型不匹配");
+    seen.add(endpoint.role);
+    return { ...endpoint, owner: expectedOwner };
+  });
+}
+
 export function formatExplorerQuery(draft: ExplorerQuery): string {
   const lines = [`FIND ${draft.owner} AS item`];
   const text = draft.text?.value.trim();
-  if (text) {
-    if (draft.text?.capability === "fullText" && !draft.text.field)
-      throw new TypeError("正文检索必须选择正文范围");
+  if (text) lines.push(`SEARCH ${queryInput(text, draft.text?.parameter)}`);
+  const fullText = draft.fullText?.value.trim();
+  if (fullText) {
+    if (!draft.fullText?.field) throw new TypeError("正文检索缺少内容字段");
     lines.push(
-      `SEARCH ${queryInput(text, draft.text?.parameter)}${draft.text?.capability === "fullText" ? ` IN ${draft.text.field}` : ""}`,
+      `SEARCH ${queryInput(fullText, draft.fullText.parameter)} IN ${draft.fullText.field}`,
     );
   }
   const predicates = [
@@ -486,19 +511,8 @@ export function compileExplorerQuery(draft: ExplorerQuery): QueryBundle {
   const operators: Record<string, QueryOperator> = {};
   const parameters: ParameterCollector = { types: {}, values: {} };
   const text = draft.text?.value.trim();
-  if (text && draft.text?.capability === "fullText") {
-    if (!draft.text.field)
-      throw new TypeError("正文检索必须选择正文范围");
-    assertFieldCapability(draft.owner, draft.text.field, "fullText");
-    operators.source = {
-      kind: "fullText",
-      target: "entity",
-      owner: draft.owner,
-      binding,
-      field: draft.text.field,
-      text: inputExpression(text, draft.text.parameter, parameters, "string"),
-    };
-  } else if (text) {
+  const fullText = draft.fullText?.value.trim();
+  if (text) {
     operators.source = {
       kind: "lookup",
       owner: draft.owner,
@@ -506,10 +520,40 @@ export function compileExplorerQuery(draft: ExplorerQuery): QueryBundle {
       fields: fieldsWithCapability(draft.owner, "lookup") as LookupField[],
       text: inputExpression(text, draft.text?.parameter, parameters, "string"),
     };
+  } else if (fullText) {
+    if (!draft.fullText?.field) throw new TypeError("正文检索缺少内容字段");
+    assertFieldCapability(draft.owner, draft.fullText.field, "fullText");
+    operators.source = {
+      kind: "fullText",
+      target: "entity",
+      owner: draft.owner,
+      binding,
+      field: draft.fullText.field,
+      text: inputExpression(fullText, draft.fullText.parameter, parameters, "string"),
+    };
   } else {
     operators.source = { kind: "scan", owner: draft.owner, binding };
   }
   let root = "source";
+  if (text && fullText) {
+    if (!draft.fullText?.field) throw new TypeError("正文检索缺少内容字段");
+    assertFieldCapability(draft.owner, draft.fullText.field, "fullText");
+    operators.fullTextSource = {
+      kind: "fullText",
+      target: "entity",
+      owner: draft.owner,
+      binding: "fullTextEntity",
+      field: draft.fullText.field,
+      text: inputExpression(fullText, draft.fullText.parameter, parameters, "string"),
+    };
+    operators.fullTextExists = {
+      kind: "exists",
+      input: root,
+      match: "fullTextSource",
+      columns: [{ outer: binding, inner: "fullTextEntity" }],
+    };
+    root = "fullTextExists";
+  }
   if (draft.condition) {
     operators.filter = {
       kind: "filter",
@@ -527,31 +571,35 @@ export function compileExplorerQuery(draft: ExplorerQuery): QueryBundle {
     const fact = QUERY_CONTRACT.facts[relation.factKind];
     if (fact.roles[relation.candidateRole] !== draft.owner)
       throw new TypeError("关系的候选角色类型不匹配");
-    const relatedOwner = fact.roles[relation.relatedRole];
-    if (
-      relation.candidateRole === relation.relatedRole ||
-      !relatedOwner ||
-      parseEntityRef(relation.related).owner !== relatedOwner
-    )
-      throw new TypeError("关系的固定端点类型不匹配");
+    const endpoints = relationEndpoints(relation);
     const prefix = `relation${index}`;
-    const fixed = `${prefix}Fixed`;
+    const fixed = endpoints.map((_, endpointIndex) =>
+      endpointIndex === 0 ? `${prefix}Fixed` : `${prefix}Fixed${endpointIndex}`
+    );
+    const endpointByRole = new Map(
+      endpoints.map((endpoint, endpointIndex) => [endpoint.role, endpointIndex]),
+    );
     const candidate = `${prefix}Candidate`;
-    const roles = Object.fromEntries(
-      Object.keys(fact.roles).map((role) => [
-        role,
-        role === relation.relatedRole
-          ? fixed
-          : role === relation.candidateRole
-            ? candidate
-            : `${prefix}${role}`,
-      ]),
+    const roles: Record<string, string> = Object.fromEntries(
+      Object.keys(fact.roles).map((role) => {
+        const endpointIndex = endpointByRole.get(role);
+        return [
+          role,
+          endpointIndex !== undefined
+            ? fixed[endpointIndex]!
+            : role === relation.candidateRole
+              ? candidate
+              : `${prefix}${role}`,
+        ];
+      }),
     );
     operators[`${prefix}Values`] = {
       kind: "values",
-      columns: [fixed],
-      types: { [fixed]: `entity:${relatedOwner}` },
-      rows: [[relation.related]],
+      columns: fixed,
+      types: Object.fromEntries(endpoints.map((endpoint, endpointIndex) =>
+        [fixed[endpointIndex]!, `entity:${endpoint.owner}`]
+      )),
+      rows: [endpoints.map((endpoint) => endpoint.related)],
     };
     operators[`${prefix}Match`] = {
       kind: "matchFact",
@@ -635,19 +683,31 @@ export function compileExplorerQuery(draft: ExplorerQuery): QueryBundle {
     }
     answerShape = "aggregate-table";
   } else {
-    const columns = draft.columns ?? DEFAULT_COLUMNS[draft.owner];
-    if (!columns.length || new Set(columns).size !== columns.length)
+    const selectedColumns = draft.columns ?? DEFAULT_COLUMNS[draft.owner];
+    if (!selectedColumns.length || new Set(selectedColumns).size !== selectedColumns.length)
       throw new TypeError("结果列必须非空且唯一");
+    for (const { column } of draft.orderBy ?? [])
+      assertFieldCapability(draft.owner, column, "sort");
+    const selected = new Set(selectedColumns);
     operators.project = {
       kind: "project",
       input: root,
-      columns: columns.map((field) => {
-        assertFieldCapability(draft.owner, field, "project");
-        return {
-          name: field,
-          value: { kind: "field" as const, binding, field },
-        };
-      }),
+      columns: [
+        ...selectedColumns.map((field) => {
+          assertFieldCapability(draft.owner, field, "project");
+          return {
+            name: field,
+            value: { kind: "field" as const, binding, field },
+          };
+        }),
+        ...[...new Set((draft.orderBy ?? []).map(({ column }) => column))]
+          .filter((column) => !selected.has(column))
+          .map((column) => ({
+            name: column,
+            value: { kind: "field" as const, binding, field: column },
+            hidden: true,
+          })),
+      ],
     };
     root = "project";
   }
@@ -881,6 +941,7 @@ function sourceExplorerRelation(
   query: QueryDocument,
   operator: Extract<QueryOperator, { kind: "exists" | "notExists" }>,
   binding: string,
+  parameterValues: ParameterValues,
 ): ExplorerRelation | null {
   if (
     operator.columns.length !== 1 ||
@@ -888,38 +949,79 @@ function sourceExplorerRelation(
   ) return null;
   const innerBinding = operator.columns[0].inner;
   const fixedFilter = query.operators[operator.match];
-  if (
-    fixedFilter?.kind !== "filter" ||
-    fixedFilter.predicate.kind !== "compare" ||
-    fixedFilter.predicate.operator !== "eq" ||
-    fixedFilter.predicate.left.kind !== "field" ||
-    fixedFilter.predicate.left.field !== "ref" ||
-    fixedFilter.predicate.right.kind !== "literal" ||
-    typeof fixedFilter.predicate.right.value !== "string"
-  ) return null;
-  const fixedBinding = fixedFilter.predicate.left.binding;
-  const relatedRef = fixedFilter.predicate.right.value;
+  if (fixedFilter?.kind !== "filter") return null;
   const match = query.operators[fixedFilter.input];
   if (match?.kind !== "matchFact") return null;
   const candidateRole = Object.entries(match.roles)
     .find(([, roleBinding]) => roleBinding === innerBinding)?.[0];
-  const relatedRole = Object.entries(match.roles)
-    .find(([, roleBinding]) => roleBinding === fixedBinding)?.[0];
-  if (!candidateRole || !relatedRole || candidateRole === relatedRole) return null;
-  let related: ReturnType<typeof parseEntityRef>;
-  try {
-    related = parseEntityRef(relatedRef);
-  } catch {
-    return null;
-  }
+  if (!candidateRole) return null;
   const fact = QUERY_CONTRACT.facts[match.factKind];
-  if (fact.roles[relatedRole] !== related.owner) return null;
+  const terms = fixedFilter.predicate.kind === "and"
+    ? fixedFilter.predicate.terms
+    : [fixedFilter.predicate];
+  const endpoints: ExplorerRelationEndpoint[] = [];
+  const remainder: Expression[] = [];
+  for (const term of terms) {
+    if (
+      term.kind !== "compare" || term.operator !== "eq" ||
+      term.left.kind !== "field" || term.left.field !== "ref" ||
+      term.right.kind !== "literal" || typeof term.right.value !== "string"
+    ) {
+      remainder.push(term);
+      continue;
+    }
+    const fixedBinding = term.left.binding;
+    const role = Object.entries(match.roles)
+      .find(([, roleBinding]) => roleBinding === fixedBinding)?.[0];
+    if (!role || role === candidateRole) {
+      remainder.push(term);
+      continue;
+    }
+    let related: ReturnType<typeof parseEntityRef>;
+    try {
+      related = parseEntityRef(term.right.value);
+    } catch {
+      return null;
+    }
+    if (
+      fact.roles[role] !== related.owner ||
+      endpoints.some((endpoint) => endpoint.role === role)
+    ) return null;
+    endpoints.push({
+      role,
+      related: term.right.value as ExplorerRelationEndpoint["related"],
+    });
+  }
+  if (!endpoints.length) return null;
+  const source = query.operators[match.input];
+  const primaryBinding = source?.kind === "values" ? source.columns[0] : undefined;
+  const primaryIndex = primaryBinding
+    ? endpoints.findIndex((endpoint) => match.roles[endpoint.role] === primaryBinding)
+    : 0;
+  if (primaryIndex < 0) return null;
+  const [primary] = endpoints.splice(primaryIndex, 1);
+  if (!primary) return null;
+  let condition: ExplorerCondition | undefined;
+  if (remainder.length) {
+    const expression: Expression = remainder.length === 1
+      ? remainder[0]!
+      : { kind: "and", terms: remainder };
+    const restored = explorerConditionWithParameters(
+      expression,
+      match.factBinding,
+      parameterValues,
+    );
+    if (!restored || !editableRelationCondition(restored)) return null;
+    condition = restored;
+  }
   return {
     factKind: match.factKind,
     candidateRole,
-    relatedRole,
-    related: relatedRef as ExplorerRelation["related"],
+    relatedRole: primary.role,
+    related: primary.related,
+    ...(endpoints.length ? { additionalEndpoints: endpoints } : {}),
     exists: operator.kind === "exists",
+    ...(condition ? { condition } : {}),
   };
 }
 
@@ -976,7 +1078,7 @@ export function decompileExplorerQuery(bundle: QueryBundle): ExplorerQuery | nul
     current = possibleAggregate.input;
   } else {
     if (root?.kind !== "project") return null;
-    const fields = root.columns.map((column) =>
+    const fields = root.columns.filter((column) => !column.hidden).map((column) =>
       column.value.kind === "field" ? column.value : null
     );
     if (fields.some((field) => field === null)) return null;
@@ -987,6 +1089,7 @@ export function decompileExplorerQuery(bundle: QueryBundle): ExplorerQuery | nul
   }
   const conditions: ExplorerCondition[] = [];
   const relations: ExplorerRelation[] = [];
+  let fullText: ExplorerQuery["fullText"];
   while (true) {
     const operator = query.operators[current];
     if (!operator) return null;
@@ -1002,6 +1105,26 @@ export function decompileExplorerQuery(bundle: QueryBundle): ExplorerQuery | nul
       continue;
     }
     if (operator.kind === "exists" || operator.kind === "notExists") {
+      const textSource = query.operators[operator.match];
+      if (
+        operator.kind === "exists" &&
+        textSource?.kind === "fullText" &&
+        textSource.target === "entity" &&
+        operator.columns.length === 1 &&
+        operator.columns[0]?.outer === binding &&
+        operator.columns[0].inner === textSource.binding &&
+        !fullText
+      ) {
+        const value = textInput(textSource.text, parameterValues);
+        if (value === null) return null;
+        fullText = {
+          value: value.value,
+          field: textSource.field,
+          ...(value.parameter ? { parameter: value.parameter } : {}),
+        };
+        current = operator.input;
+        continue;
+      }
       const matchProject = query.operators[operator.match];
       if (matchProject?.kind === "project" && matchProject.columns.length === 1) {
         const candidate = matchProject.columns[0]?.value;
@@ -1011,18 +1134,36 @@ export function decompileExplorerQuery(bundle: QueryBundle): ExplorerQuery | nul
           : possibleFilter;
         if (candidate?.kind !== "column" || match?.kind !== "matchFact") return null;
         const values = query.operators[match.input];
-        if (values?.kind !== "values" || values.columns.length !== 1 || values.rows.length !== 1)
-          return null;
-        const fixed = values.columns[0] as string;
-        const related = values.rows[0]?.[0];
+        if (
+          values?.kind !== "values" || !values.columns.length ||
+          values.rows.length !== 1 ||
+          values.rows[0]?.length !== values.columns.length
+        ) return null;
         const candidateRole = Object.entries(match.roles)
           .find(([, roleBinding]) => roleBinding === candidate.name)?.[0];
-        const relatedRole = Object.entries(match.roles)
-          .find(([, roleBinding]) => roleBinding === fixed)?.[0];
-        if (
-          !candidateRole || !relatedRole || typeof related !== "string" ||
-          !related.includes(":")
-        ) return null;
+        if (!candidateRole) return null;
+        const endpoints: ExplorerRelationEndpoint[] = [];
+        for (const [endpointIndex, fixed] of values.columns.entries()) {
+          const role = Object.entries(match.roles)
+            .find(([, roleBinding]) => roleBinding === fixed)?.[0];
+          const related = values.rows[0]?.[endpointIndex];
+          if (!role || role === candidateRole || typeof related !== "string")
+            return null;
+          let parsed: ReturnType<typeof parseEntityRef>;
+          try {
+            parsed = parseEntityRef(related);
+          } catch {
+            return null;
+          }
+          if (QUERY_CONTRACT.facts[match.factKind].roles[role] !== parsed.owner)
+            return null;
+          endpoints.push({
+            role,
+            related: related as ExplorerRelationEndpoint["related"],
+          });
+        }
+        const [primary, ...additionalEndpoints] = endpoints;
+        if (!primary) return null;
         let factCondition: ExplorerCondition | undefined;
         if (possibleFilter?.kind === "filter") {
           const condition = explorerConditionWithParameters(
@@ -1036,13 +1177,19 @@ export function decompileExplorerQuery(bundle: QueryBundle): ExplorerQuery | nul
         relations.push({
           factKind: match.factKind,
           candidateRole,
-          relatedRole,
-          related: related as ExplorerRelation["related"],
+          relatedRole: primary.role,
+          related: primary.related,
+          ...(additionalEndpoints.length ? { additionalEndpoints } : {}),
           exists: operator.kind === "exists",
           ...(factCondition ? { condition: factCondition } : {}),
         });
       } else {
-        const relation = sourceExplorerRelation(query, operator, binding);
+        const relation = sourceExplorerRelation(
+          query,
+          operator,
+          binding,
+          parameterValues,
+        );
         if (!relation) return null;
         relations.push(relation);
       }
@@ -1065,9 +1212,9 @@ export function decompileExplorerQuery(bundle: QueryBundle): ExplorerQuery | nul
       const value = textInput(operator.text, parameterValues);
       if (value === null) return null;
       owner = operator.owner;
-      text = {
+      if (fullText) return null;
+      fullText = {
         value: value.value,
-        capability: "fullText",
         field: operator.field,
         ...(value.parameter ? { parameter: value.parameter } : {}),
       };
@@ -1079,6 +1226,7 @@ export function decompileExplorerQuery(bundle: QueryBundle): ExplorerQuery | nul
     return {
       owner,
       ...(text ? { text } : {}),
+      ...(fullText ? { fullText } : {}),
       ...(conditions.length
         ? { condition: conditions.length === 1 ? conditions[0] : { kind: "all", terms: conditions } }
         : {}),

@@ -3,15 +3,19 @@ import {
   combineConditions,
   compileQueryDraft,
   createQueryHistory,
-  DEFAULT_ENTITY_SCOPE,
   draftOwner,
   draftQuery,
   draftScope,
+  ENTITY_SCOPE_ORDER,
+  normalizeFullTextValue,
+  normalizeEntityScope,
   redoQueryHistory,
   type EntityRef,
+  type EntityScope,
   type QueryAction,
   type QueryDraft,
   type QueryHistory,
+  type ScopedOrderTerm,
   undoQueryHistory,
   updateQueryHistory,
 } from "./draft";
@@ -28,11 +32,9 @@ import type {
   ExplorerRelation,
 } from "./explorer";
 import {
-  completionActions,
+  describeFactCondition,
   queryInputValue,
   queryTokens,
-  type CompletionAction,
-  type CompletionActionId,
   type QueryToken,
 } from "./presenter";
 import {
@@ -48,28 +50,48 @@ import {
   defaultSortDirection,
   enumValuesFor,
   FACT_FIELD_LABEL,
+  FACT_LABEL,
   factEnumValues,
   FIELD_LABEL,
-  INTERNAL_FIELDS,
   OPERATOR_LABEL,
   OWNER_LABEL,
+  parseExplorerLimit,
+  queryAddFilterFields,
   queryAggregateFields,
+  queryConditionOperatorLabel,
   queryConditionOperators,
-  queryFactConditionOperators,
+  queryFactDiscriminatorField,
   queryFactFields,
+  queryFilterFields,
   queryFieldsFor,
   queryGroupFields,
   queryProjectFields,
+  queryReferenceOwner,
   queryRelationOptions,
+  queryRelationContextRoles,
   queryRelationTargetOwner,
+  queryScalarInputType,
   querySortFields,
   queryStatisticColumns,
-  queryTextScopes,
+  type QueryScalarInputType,
+  sameFilterFieldSemantics,
+  sameSortFieldSemantics,
+  splitFactDiscriminatorCondition,
 } from "./workbench-model";
-import type { AggregateFunction, OrderTerm } from "./document";
-import type { Mappings } from "../types";
+import type { AggregateFunction } from "./document";
+import {
+  attachValueAutocomplete,
+  type ValueSuggester,
+} from "./value-autocomplete";
+import {
+  setQueryIconButton,
+  type QueryIconName,
+} from "./icons";
+import type { Mappings, TagVocabularyField } from "../types";
 
 let queryBarSequence = 0;
+let queryControlSequence = 0;
+const ENTITY_SUGGESTION_RENDER_BATCH = 80;
 
 export interface SelectedQueryEntity {
   ref: EntityRef;
@@ -80,6 +102,11 @@ export interface EntitySuggestion extends SelectedQueryEntity {
   owner: Owner;
   detail?: string;
   match?: string;
+}
+
+export interface EntitySuggestionBatch {
+  items: readonly EntitySuggestion[];
+  complete: boolean;
 }
 
 export interface NameSuggestion {
@@ -94,7 +121,7 @@ export interface NameSuggestion {
 
 export function queryNameSuggestionOwners(draft: QueryDraft): Owner[] {
   const query = draftQuery(draft);
-  if (!query || query.text?.capability === "fullText") return [];
+  if (!query) return [];
   return [...(draftScope(draft) ?? [])];
 }
 
@@ -123,16 +150,11 @@ export function rankEntitySuggestions(
     .map(({ item }) => item);
 }
 
-export function fullTextScopeOptions(owner?: Owner): Array<{
-  value: string;
-  label: string;
-}> {
-  return [
-    ...(owner
-      ? queryTextScopes(owner).filter((scope) => scope.value !== "lookup")
-      : []),
-    { value: "all", label: "所有正文与关系备注" },
-  ];
+export function createScopedFullTextAction(value: string): QueryAction {
+  return {
+    type: "setFullText",
+    fullText: { value: normalizeFullTextValue(value) },
+  };
 }
 
 export function moveSuggestionIndex(
@@ -146,10 +168,57 @@ export function moveSuggestionIndex(
   return (start + delta + count) % count;
 }
 
+export function tagVocabularyField(
+  owner: Owner,
+  field: string,
+): TagVocabularyField | null {
+  if (owner === "subject" && (field === "tags" || field === "metaTags"))
+    return field;
+  return null;
+}
+
+export function featuredMetaTagValuesFor(
+  field: TagVocabularyField | null,
+  values: readonly string[] | undefined,
+): readonly string[] | undefined {
+  return field === "metaTags" ? values : undefined;
+}
+
+export function conditionEditorOperatorChoices(
+  allowed: readonly string[],
+  inputType: QueryScalarInputType,
+  current: string,
+  valueCount = 0,
+): string[] {
+  const scalar = new Set([
+    "eq", "ne", "lt", "lte", "gt", "gte",
+    "isNull", "isNotNull", "isMissing", "isPresent",
+  ]);
+  const closedChoice = new Set([
+    "eq", "ne", "contains", "notContains", "in", "notIn",
+    "isNull", "isNotNull", "isMissing", "isPresent",
+  ]);
+  const binaryChoice = new Set([
+    "eq", "contains", "notContains",
+    "isNull", "isNotNull", "isMissing", "isPresent",
+  ]);
+  const visible = valueCount
+    ? allowed.filter((operator) =>
+        (valueCount <= 2 ? binaryChoice : closedChoice).has(operator)
+      )
+    : inputType === "number" || inputType === "date"
+      ? allowed.filter((operator) => scalar.has(operator))
+      : [...allowed];
+  if (allowed.includes(current) && !visible.includes(current))
+    visible.push(current);
+  return visible;
+}
+
 export interface QueryBarOptions {
   draft: QueryDraft;
   onChange(draft: QueryDraft): void;
   onSubmit(): void;
+  onCancel(): void;
   reportError(error: unknown): void;
   selectedEntity?(): Promise<SelectedQueryEntity | null>;
   resolveEntityLabel?(ref: string): Promise<string>;
@@ -157,35 +226,513 @@ export interface QueryBarOptions {
     text: string,
     owners: readonly Owner[],
     signal: AbortSignal,
-  ): Promise<EntitySuggestion[]>;
+  ): AsyncIterable<EntitySuggestionBatch>;
   suggestNames?(
     text: string,
     owners: readonly Owner[],
     signal: AbortSignal,
   ): Promise<NameSuggestion[]>;
+  suggestTagValues?(
+    field: TagVocabularyField,
+    text: string,
+    signal: AbortSignal,
+  ): Promise<readonly string[]>;
+  featuredMetaTagValues?: readonly string[];
   onNameSuggestion?(suggestion: NameSuggestion): void;
   mappings?(): Promise<Mappings>;
 }
 
-interface LeafConfig {
+export interface QueryRunState {
+  running: boolean;
+  runnable: boolean;
+}
+
+export interface QueryRunPresentation {
+  icon: QueryIconName;
+  ariaLabel: string;
+  disabled: boolean;
+  busy: boolean;
+}
+
+export function queryRunPresentation(
+  state: QueryRunState,
+): QueryRunPresentation {
+  if (state.running) return {
+    icon: "stop",
+    ariaLabel: "正在查询，点击停止",
+    disabled: false,
+    busy: true,
+  };
+  if (!state.runnable) return {
+    icon: "search",
+    ariaLabel: "当前查询不可执行",
+    disabled: true,
+    busy: false,
+  };
+  return {
+    icon: "search",
+    ariaLabel: "执行查询",
+    disabled: false,
+    busy: false,
+  };
+}
+
+interface QueryAddChoiceBase {
+  id: string;
+  label: string;
+  detail: string;
+}
+
+export type QueryAddChoice =
+  | QueryAddChoiceBase & {
+      kind: "condition";
+      owners: Owner[];
+      field: string;
+    }
+  | QueryAddChoiceBase & { kind: "relation"; owner?: Owner }
+  | QueryAddChoiceBase & { kind: "fullText" }
+  | QueryAddChoiceBase & { kind: "sort" };
+
+function orderedFields(owner: Owner, fields: string[]): string[] {
+  return [
+    ...[...COMMON_FIELDS[owner]].filter((field) => fields.includes(field)),
+    ...fields.filter((field) => !COMMON_FIELDS[owner].has(field)),
+  ];
+}
+
+function orderedFilterFields(owner: Owner): string[] {
+  return orderedFields(owner, queryAddFilterFields(owner));
+}
+
+function ownerListLabel(owners: readonly Owner[]): string {
+  return owners.map((owner) => OWNER_LABEL[owner]).join("、");
+}
+
+function sameOwnerScope(left: readonly Owner[], right: readonly Owner[]): boolean {
+  return left.length === right.length &&
+    left.every((owner, index) => owner === right[index]);
+}
+
+export function toggleEntityScope(
+  scope: readonly Owner[],
+  owner: Owner,
+): EntityScope {
+  const selected = new Set(scope);
+  if (selected.has(owner)) selected.delete(owner);
+  else selected.add(owner);
+  return normalizeEntityScope(selected);
+}
+
+export function queryEditorFilterFields(
+  owners: readonly Owner[],
+  restoredFields: readonly string[] = [],
+): string[] {
+  const [first, ...rest] = owners;
+  if (!first) return [];
+  const available = queryFilterFields(first);
+  const fields = [
+    ...queryAddFilterFields(first),
+    ...restoredFields.filter((field) => available.includes(field)),
+  ];
+  return orderedFields(first, [...new Set(fields)]).filter((field) =>
+    rest.every((owner) => sameFilterFieldSemantics(first, owner, field))
+  );
+}
+
+export interface QuerySortChoice {
+  id: string;
+  field: string;
+  owners: Owner[];
+  label: string;
+}
+
+export function querySortChoicesForScope(
+  scope: readonly Owner[],
+): QuerySortChoice[] {
+  const choices: Array<Omit<QuerySortChoice, "id" | "label">> = [];
+  for (const owner of scope) {
+    for (const field of querySortFields(owner)) {
+      const existing = choices.find((choice) =>
+        choice.field === field &&
+        sameSortFieldSemantics(choice.owners[0]!, owner, field)
+      );
+      if (existing) existing.owners.push(owner);
+      else choices.push({ field, owners: [owner] });
+    }
+  }
+  return choices.map(({ field, owners }) => ({
+    id: `${owners.join("+")}:${field}`,
+    field,
+    owners,
+    label: sameOwnerScope(owners, scope)
+      ? FIELD_LABEL[field] ?? field
+      : `${ownerListLabel(owners)} · ${FIELD_LABEL[field] ?? field}`,
+  }));
+}
+
+function fieldNeedsOwnerLabel(field: string): boolean {
+  const owners = ENTITY_SCOPE_ORDER.filter((owner) =>
+    queryFilterFields(owner).includes(field)
+  );
+  const [first, ...rest] = owners;
+  return Boolean(first && rest.some((owner) =>
+    !sameFilterFieldSemantics(first, owner, field)
+  ));
+}
+
+export interface ScopedRelationChoice {
+  owner: Owner;
+  value: string;
+  topology: string;
+  label: string;
+  displayLabel: string;
+  detailLabel: string;
+  factKind: QueryFactKind;
+  candidateRole: string;
+  relatedRole: string;
+  discriminatorField?: string;
+  discriminatorLabel?: string;
+  discriminatorValues?: string[];
+}
+
+function relationChoiceDetail(
+  owner: Owner,
+  factKind: QueryFactKind,
+  candidateRole: string,
+  relatedRole: string,
+): string {
+  const relatedOwner = QUERY_CONTRACT.facts[factKind].roles[relatedRole]!;
+  const arrow = candidateRole === "target" && relatedRole === "source"
+    ? "←"
+    : "→";
+  return `${OWNER_LABEL[owner]} ${arrow} ${OWNER_LABEL[relatedOwner]}`;
+}
+
+export function relationChoicesForScope(
+  scope: readonly Owner[],
+  mappings?: Mappings,
+): ScopedRelationChoice[] {
+  const choices = scope.flatMap((owner) =>
+    queryRelationOptions(owner).flatMap((relation) => {
+      const generic: ScopedRelationChoice = {
+        owner,
+        ...relation,
+        topology: relation.value,
+        displayLabel: `任意${FACT_LABEL[relation.factKind]}`,
+        detailLabel: relationChoiceDetail(
+          owner,
+          relation.factKind,
+          relation.candidateRole,
+          relation.relatedRole,
+        ),
+      };
+      const field = queryFactDiscriminatorField(relation.factKind);
+      const values = field ? factEnumValues(relation.factKind, field, mappings) : null;
+      if (!field || !values) return [generic];
+      const grouped = new Map<string, string[]>();
+      for (const [value, label] of Object.entries(values)) {
+        const codes = grouped.get(label) ?? [];
+        codes.push(value);
+        grouped.set(label, codes);
+      }
+      return [
+        generic,
+        ...[...grouped].map(([label, codes]): ScopedRelationChoice => ({
+          owner,
+          value: JSON.stringify([relation.value, field, codes]),
+          topology: relation.value,
+          label,
+          displayLabel: label,
+          detailLabel: relationChoiceDetail(
+            owner,
+            relation.factKind,
+            relation.candidateRole,
+            relation.relatedRole,
+          ),
+          factKind: relation.factKind,
+          candidateRole: relation.candidateRole,
+          relatedRole: relation.relatedRole,
+          discriminatorField: field,
+          discriminatorLabel: label,
+          discriminatorValues: codes,
+        })),
+      ];
+    })
+  );
+  const duplicateLabels = new Map<string, number>();
+  for (const choice of choices)
+    duplicateLabels.set(
+      `${choice.displayLabel}|${choice.detailLabel}`,
+      (duplicateLabels.get(`${choice.displayLabel}|${choice.detailLabel}`) ?? 0) + 1,
+    );
+  return choices.map((choice) =>
+    duplicateLabels.get(`${choice.displayLabel}|${choice.detailLabel}`)! > 1
+      ? {
+          ...choice,
+          detailLabel: `${choice.detailLabel} · ${FACT_LABEL[choice.factKind]}`,
+        }
+      : choice
+  );
+}
+
+function comparableRelationText(value: string): string {
+  return value.trim().normalize("NFKC").toLocaleLowerCase();
+}
+
+export function filterRelationChoices(
+  choices: readonly ScopedRelationChoice[],
+  input: string,
+): ScopedRelationChoice[] {
+  const needle = comparableRelationText(input);
+  if (!needle) return [...choices];
+  const terms = needle.split(/\s+/).filter(Boolean);
+  return choices
+    .map((choice, index) => ({ choice, index }))
+    .filter(({ choice }) => {
+      const text = comparableRelationText(
+        `${choice.displayLabel} ${choice.detailLabel} ${FACT_LABEL[choice.factKind]}`,
+      );
+      return terms.every((term) => text.includes(term));
+    })
+    .sort((left, right) => {
+      const leftLabel = comparableRelationText(
+        left.choice.discriminatorLabel ?? left.choice.label,
+      );
+      const rightLabel = comparableRelationText(
+        right.choice.discriminatorLabel ?? right.choice.label,
+      );
+      const rank = (label: string): number =>
+        label === needle ? 0 : label.startsWith(needle) ? 1 : 2;
+      return rank(leftLabel) - rank(rightLabel) || left.index - right.index;
+    })
+    .map(({ choice }) => choice);
+}
+
+export function relationChoiceCondition(
+  choice: ScopedRelationChoice,
+): ExplorerCondition | undefined {
+  const field = choice.discriminatorField;
+  const values = choice.discriminatorValues;
+  if (!field || !values?.length) return undefined;
+  return createFactCondition(
+    choice.factKind,
+    field,
+    values.length === 1 ? "eq" : "in",
+    values.join("、"),
+  );
+}
+
+export interface ResolvedRelationChoice {
+  choice: ScopedRelationChoice;
+  discriminator?: ExplorerCondition;
+  remainder?: ExplorerCondition;
+}
+
+export function resolveRelationChoice(
+  choices: readonly ScopedRelationChoice[],
+  relation?: ExplorerRelation,
+): ResolvedRelationChoice {
+  if (!choices.length) throw new TypeError("当前实体类型没有可用关系");
+  if (!relation) return { choice: choices[0]! };
+  const topology =
+    `${relation.factKind}|${relation.candidateRole}|${relation.relatedRole}`;
+  const generic = choices.find((choice) => choice.value === topology);
+  if (!generic) throw new TypeError("关联类型无效");
+  const split = splitFactDiscriminatorCondition(
+    relation.factKind,
+    relation.condition,
+  );
+  const selected = split.discriminator
+    ? choices.find((choice) =>
+        choice.topology === topology &&
+        choice.discriminatorValues &&
+        split.values.every((value) =>
+          choice.discriminatorValues!.includes(String(value))
+        )
+      )
+    : undefined;
+  if (!selected) {
+    return {
+      choice: generic,
+      ...(relation.condition ? { remainder: relation.condition } : {}),
+    };
+  }
+  return {
+    choice: selected,
+    discriminator: split.discriminator,
+    remainder: split.remainder,
+  };
+}
+
+export function factConditionSelections(
+  condition?: ExplorerCondition,
+  fields: readonly string[] = [],
+): Record<string, string> | null {
+  if (!condition) return {};
+  const terms = condition.kind === "all" ? condition.terms : [condition];
+  const selections: Record<string, string> = {};
+  for (const term of terms) {
+    if (
+      term.kind !== "compare" || term.operator !== "eq" || term.negated ||
+      term.parameter || !fields.includes(term.field) ||
+      Object.hasOwn(selections, term.field) || term.value === null
+    ) return null;
+    selections[term.field] = String(term.value);
+  }
+  return selections;
+}
+
+export function updateFactConditionSelection(
+  kind: QueryFactKind,
+  condition: ExplorerCondition | undefined,
+  fields: readonly string[],
+  field: string,
+  raw: string,
+): ExplorerCondition | undefined {
+  if (!fields.includes(field)) throw new TypeError("关系属性不在可选范围内");
+  const selections = factConditionSelections(condition, fields);
+  if (!selections) throw new TypeError("旧关系条件不能用简化选项修改");
+  if (raw) selections[field] = raw;
+  else delete selections[field];
+  return combineConditions(fields.flatMap((candidate) => {
+    const value = selections[candidate];
+    return value === undefined
+      ? []
+      : [createFactCondition(kind, candidate, "eq", value)];
+  }));
+}
+
+export function queryAddChoices(draft: QueryDraft): QueryAddChoice[] {
+  if (draft.kind !== "list" || !draft.query) return [];
+  const query = draft.query;
+
+  const conditionSeeds: Array<{
+    field: string;
+    label: string;
+    owners: Owner[];
+  }> = [];
+  for (const owner of query.scope) {
+    for (const field of orderedFilterFields(owner)) {
+      const existing = conditionSeeds.find((choice) =>
+        choice.field === field &&
+        sameFilterFieldSemantics(choice.owners[0]!, owner, field)
+      );
+      if (existing) existing.owners.push(owner);
+      else conditionSeeds.push({
+        field,
+        label: FIELD_LABEL[field] ?? field,
+        owners: [owner],
+      });
+    }
+  }
+
+  const labelCounts = new Map<string, number>();
+  for (const choice of conditionSeeds)
+    labelCounts.set(choice.label, (labelCounts.get(choice.label) ?? 0) + 1);
+  const choices: QueryAddChoice[] = conditionSeeds.map((choice) => ({
+    id: `condition:${choice.owners.join("+")}:${choice.field}`,
+    kind: "condition",
+    label: (labelCounts.get(choice.label) ?? 0) > 1 ||
+        fieldNeedsOwnerLabel(choice.field)
+      ? `${ownerListLabel(choice.owners)}${choice.label}`
+      : choice.label,
+    detail: !sameOwnerScope(choice.owners, query.scope)
+      ? `仅${ownerListLabel(choice.owners)}`
+      : "",
+    owners: choice.owners,
+    field: choice.field,
+  }));
+
+  if (
+    !query.fullText &&
+    query.scope.every((owner) => queryFieldsFor(owner, "fullText").length === 1)
+  ) choices.push({
+    id: "fullText",
+    kind: "fullText",
+    label: scopedFullTextLabel(query.scope),
+    detail: "内容包含关键词",
+  });
+
+  if (relationChoicesForScope(query.scope).length) choices.push({
+    id: "relation",
+    kind: "relation",
+    label: "按关联筛选",
+    detail: "作品、人物或角色",
+  });
+
+  if (!query.orderBy?.length && querySortChoicesForScope(query.scope).length)
+    choices.push({
+      id: "sort",
+      kind: "sort",
+      label: "排序",
+      detail: "选择排序字段",
+    });
+  return choices;
+}
+
+export function scopedFullTextLabel(scope: readonly Owner[]): string {
+  const fields = new Set(scope.flatMap((owner) =>
+    queryFieldsFor(owner, "fullText")
+  ));
+  if (fields.size > 1) return "简介与分集介绍";
+  return fields.has("description") ? "分集介绍" : "简介";
+}
+
+export function addConditionForOwners(
+  draft: QueryDraft,
+  owners: readonly Owner[],
+  condition: ExplorerCondition,
+): QueryDraft {
+  const currentScope = draftScope(draft);
+  if (!currentScope) throw new TypeError("当前查询不能添加筛选条件");
+  if (
+    !owners.length ||
+    owners.some((owner) => !currentScope.includes(owner))
+  ) throw new TypeError("条件适用的实体不在当前范围内");
+  const nextScope = currentScope.filter((owner) => owners.includes(owner));
+  const scoped = sameOwnerScope(nextScope, currentScope)
+    ? draft
+    : applyQueryAction(draft, { type: "setScope", scope: nextScope });
+  return applyQueryAction(scoped, { type: "addCondition", condition });
+}
+
+interface LeafEditorConfig {
   fields(): string[];
   fieldLabel(field: string): string;
   operators(field: string): string[];
+  operatorLabel?(field: string, operator: string): string;
   values(field: string): Record<string, string> | null;
-  inputType(field: string): "text" | "number";
+  suggestions?(field: string): ValueSuggester | null;
+  featuredValues?(field: string): readonly string[] | undefined;
+  inputType(field: string): QueryScalarInputType;
+  referenceOwner?(field: string): Owner | null;
+}
+
+interface LeafConfig extends LeafEditorConfig {
   create(field: string, operator: string, raw: string): ExplorerCondition;
 }
 
 export type EditCondition =
   | { kind: "leaf"; field: string; operator: string; raw: string }
-  | { kind: "all" | "any" | "not"; terms: EditCondition[] };
+  | { kind: "all" | "any"; terms: EditCondition[] }
+  | { kind: "not"; terms: EditCondition[] };
+
+function editConditionFields(node: EditCondition): string[] {
+  return node.kind === "leaf"
+    ? [node.field]
+    : node.terms.flatMap(editConditionFields);
+}
+
+export function conditionGroupControlsVisible(root: EditCondition): boolean {
+  return root.kind !== "leaf" && (root.kind !== "all" || root.terms.length > 1);
+}
 
 type PanelRenderer = (body: HTMLElement) => void;
 
-interface ActionMenuItem {
-  label: string;
-  description: string;
-  choose(): void;
+interface ConditionEditorOptions {
+  compact?: boolean;
+  submitLabel?: string;
+  focusNode?: EditCondition;
 }
 
 export interface ControlFocus {
@@ -220,11 +767,44 @@ export function restoreControlFocus(
   return matches[focus.index] ?? matches.at(-1) ?? null;
 }
 
+export function findPrimaryEditorControl(
+  controls: readonly HTMLElement[],
+): HTMLElement | null {
+  return controls.find((control) => control.dataset.queryFocus === "true") ??
+    controls.find((control) => control.dataset.queryPrimary === "true") ??
+    controls.find((control) => control.getAttribute("aria-label") === "字段") ??
+    controls[0] ?? null;
+}
+
 function button(label: string, className = ""): HTMLButtonElement {
   const result = document.createElement("button");
   result.type = "button";
   result.className = className;
   result.textContent = label;
+  return result;
+}
+
+function scopeChoiceButton(owner: Owner): HTMLButtonElement {
+  const result = button("", "query-choice-chip query-scope-choice");
+  result.dataset.owner = owner;
+  const check = document.createElement("span");
+  check.className = "query-scope-check";
+  check.textContent = "✓";
+  check.setAttribute("aria-hidden", "true");
+  const label = document.createElement("span");
+  label.textContent = OWNER_LABEL[owner];
+  result.append(check, label);
+  return result;
+}
+
+function iconButton(
+  icon: QueryIconName,
+  label: string,
+  className = "",
+  title = label,
+): HTMLButtonElement {
+  const result = button("", className);
+  setQueryIconButton(result, icon, label, title);
   return result;
 }
 
@@ -237,6 +817,7 @@ function option(value: string, label: string): HTMLOptionElement {
 
 function select(label: string): HTMLSelectElement {
   const result = document.createElement("select");
+  result.id = `query-popover-control-${++queryControlSequence}`;
   result.className = "query-popover-control";
   result.setAttribute("aria-label", label);
   return result;
@@ -244,6 +825,7 @@ function select(label: string): HTMLSelectElement {
 
 function input(label: string, type = "text"): HTMLInputElement {
   const result = document.createElement("input");
+  result.id = `query-popover-control-${++queryControlSequence}`;
   result.className = "query-popover-control";
   result.type = type;
   result.autocomplete = "off";
@@ -252,7 +834,7 @@ function input(label: string, type = "text"): HTMLInputElement {
 }
 
 export function createQueryNameInput(): HTMLInputElement {
-  const result = input("名称关键词");
+  const result = input("按名称、中文名或别名查找");
   result.className = "query-name-input";
   return result;
 }
@@ -307,6 +889,15 @@ export function createConditionEditRoot(
   return edit.kind === "leaf" ? { kind: "all", terms: [edit] } : edit;
 }
 
+export function conditionEditFocusTerm(
+  root: EditCondition,
+  index: number,
+): EditCondition | undefined {
+  if (index < 0) return undefined;
+  if (root.kind === "all" || root.kind === "any") return root.terms[index];
+  return index === 0 ? root : undefined;
+}
+
 export function finishConditionEdit(
   root: EditCondition,
   config: LeafConfig,
@@ -320,9 +911,11 @@ export function createDefaultConditionEdit(config: {
   fields(): string[];
   operators(field: string): string[];
   values(field: string): Record<string, string> | null;
-}): Extract<EditCondition, { kind: "leaf" }> {
+}, preferredField?: string): Extract<EditCondition, { kind: "leaf" }> {
   const fields = config.fields();
-  const field = fields[0] ?? "";
+  const field = preferredField && fields.includes(preferredField)
+    ? preferredField
+    : fields[0] ?? "";
   const operator = config.operators(field)[0] ?? "";
   const values = isNoValueOperator(operator) ? null : config.values(field);
   return {
@@ -355,8 +948,48 @@ function isMultiValueOperator(operator: string): boolean {
   return operator === "in" || operator === "notIn";
 }
 
+export function conditionValueInputType(
+  inputType: QueryScalarInputType,
+  operator: string,
+): QueryScalarInputType {
+  return isMultiValueOperator(operator) ? "text" : inputType;
+}
+
+export function conditionValueInputStep(
+  inputType: QueryScalarInputType,
+  operator: string,
+): string | null {
+  return conditionValueInputType(inputType, operator) === "number" ? "any" : null;
+}
+
 function refOwner(ref: EntityRef): Owner {
   return parseEntityRef(ref).owner;
+}
+
+export function conditionEntityRefs(
+  owner: Owner,
+  condition: ExplorerCondition | undefined,
+): EntityRef[] {
+  if (!condition) return [];
+  if ("terms" in condition)
+    return condition.terms.flatMap((term) => conditionEntityRefs(owner, term));
+  if (condition.kind === "not") return conditionEntityRefs(owner, condition.term);
+  const field = condition.field;
+  const referenceOwner = queryReferenceOwner(owner, field);
+  if (!referenceOwner) return [];
+  const values = condition.kind === "compare"
+    ? [condition.value]
+    : condition.kind === "in" ? condition.values : [];
+  return values.flatMap((value) => {
+    if (typeof value !== "string") return [];
+    try {
+      return parseEntityRef(value).owner === referenceOwner
+        ? [value as EntityRef]
+        : [];
+    } catch {
+      return [];
+    }
+  });
 }
 
 export function createQueryTokenControl(
@@ -390,9 +1023,12 @@ export function createQueryTokenControl(
 
   const shell = document.createElement("span");
   shell.className = "query-token-shell";
-  const remove = button("×", "query-token-remove");
-  remove.title = "删除";
-  remove.setAttribute("aria-label", `删除：${item.label}`);
+  const remove = iconButton(
+    "close",
+    `删除：${item.label}`,
+    "query-token-remove",
+    "删除",
+  );
   remove.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -430,7 +1066,7 @@ export function visibleNameAction(
 ): QueryAction | null {
   if (draft.kind !== "list" && draft.kind !== "aggregate") return null;
   const query = draftQuery(draft);
-  if (!query || query.text?.capability === "fullText") return null;
+  if (!query) return null;
   if (queryInputValue(draft) === value) return null;
   return {
     type: "setText",
@@ -438,63 +1074,142 @@ export function visibleNameAction(
   };
 }
 
-export function createSortTerm(column: string): OrderTerm {
+export function createSortTerm(
+  column: string,
+  owners?: readonly Owner[],
+): ScopedOrderTerm {
   const direction = defaultSortDirection(column);
   return {
     column,
+    ...(owners?.length ? { owners: [...owners] } : {}),
     direction,
-    nulls: direction === "asc" ? "first" : "last",
+    nulls: owners?.length ? "last" : direction === "asc" ? "first" : "last",
   };
+}
+
+export function sortTermWithDirection(
+  order: ScopedOrderTerm,
+  direction: "asc" | "desc",
+): ScopedOrderTerm {
+  return {
+    ...order,
+    direction,
+    nulls: order.owners?.length ? "last" : direction === "asc" ? "first" : "last",
+  };
+}
+
+export function createSortTermForChoice(
+  choice: QuerySortChoice,
+  scope: readonly Owner[],
+): ScopedOrderTerm {
+  return createSortTerm(
+    choice.field,
+    sameOwnerScope(choice.owners, scope) ? undefined : choice.owners,
+  );
+}
+
+function scopedSortTermId(
+  order: ScopedOrderTerm,
+  scope: readonly Owner[],
+): string {
+  return `${(order.owners ?? scope).join("+")}:${order.column}`;
+}
+
+export function applyOrderAndLimit(
+  draft: QueryDraft,
+  orderBy: ScopedOrderTerm[] | undefined,
+  limit: number | undefined,
+): QueryDraft {
+  return applyQueryAction(
+    applyQueryAction(draft, { type: "setOrder", orderBy }),
+    { type: "setLimit", limit },
+  );
+}
+
+export function queryPanelMaxHeight(
+  panelTop: number,
+  viewportHeight: number,
+  cssMaxHeight: number,
+  margin: number,
+): number {
+  return Math.max(
+    0,
+    Math.min(cssMaxHeight, viewportHeight - panelTop - margin),
+  );
 }
 
 export class QueryBar {
   readonly dom = document.createElement("div");
   private readonly line = document.createElement("div");
   private readonly tokens = document.createElement("span");
+  private readonly commandGroup = document.createElement("span");
   private readonly inputGroup = document.createElement("span");
   private readonly text = createQueryNameInput();
-  private readonly add = button("＋", "query-add");
+  private readonly add = iconButton("plus", "添加查询内容", "query-add");
+  private readonly submit = iconButton("search", "执行查询", "query-submit");
   private readonly panel = document.createElement("section");
   private readonly panelTitle = document.createElement("h2");
   private readonly panelBody = document.createElement("div");
-  private readonly panelClose = button("×", "query-popover-close");
+  private readonly panelBack = iconButton("back", "返回上一页", "query-popover-back");
+  private readonly panelClose = iconButton("close", "关闭查询面板", "query-popover-close");
   private history: QueryHistory;
   private mappings: Mappings | undefined;
   private composing = false;
-  private actionIndex = 0;
   private nameIndex = -1;
   private suggestionController: AbortController | null = null;
   private suggestionTimer: ReturnType<typeof setTimeout> | null = null;
   private suggestionListSerial = 0;
   private panelReturnFocus: HTMLElement | null = null;
+  private panelBackAction: (() => void) | null = null;
   private readonly labels = new Map<string, string>();
+  private readonly valueAutocompleteCleanups = new Set<() => void>();
+  private runState: QueryRunState = {
+    running: false,
+    runnable: true,
+  };
+  private readonly fitPanelToViewport = (): void => {
+    if (this.panel.hidden) return;
+    const view = this.panel.ownerDocument.defaultView;
+    if (!view) return;
+    this.panel.style.maxHeight = "";
+    const panelStyle = view.getComputedStyle(this.panel);
+    const pageInset = Number.parseFloat(
+      view.getComputedStyle(this.dom).getPropertyValue("--page-inset"),
+    ) || 0;
+    const maxHeight = queryPanelMaxHeight(
+      this.panel.getBoundingClientRect().top,
+      view.innerHeight,
+      Number.parseFloat(panelStyle.maxHeight),
+      pageInset,
+    );
+    this.panel.style.maxHeight = `${maxHeight}px`;
+  };
 
   constructor(private readonly options: QueryBarOptions) {
     this.history = createQueryHistory(options.draft);
     this.dom.className = "query-bar";
     this.line.className = "query-bar-line";
     this.tokens.className = "query-token-run";
+    this.commandGroup.className = "query-command-group";
     this.inputGroup.className = "query-input-group";
     this.text.name = "query-command";
-    this.text.placeholder = "输入名称，或按 / 添加条件";
     this.text.setAttribute("role", "combobox");
     this.text.setAttribute("aria-autocomplete", "list");
     this.text.setAttribute("aria-haspopup", "listbox");
     this.text.setAttribute("aria-expanded", "false");
-    this.add.setAttribute("aria-label", "添加查询条件或切换答案");
-    this.add.title = "添加查询条件或切换答案";
-    this.add.setAttribute("aria-haspopup", "listbox");
+    this.add.setAttribute("aria-haspopup", "dialog");
     this.add.setAttribute("aria-expanded", "false");
 
     this.panel.className = "query-popover";
     this.panel.hidden = true;
-    this.panel.setAttribute("aria-label", "查询补全");
+    this.panel.setAttribute("aria-label", "查询面板");
     const panelHeader = document.createElement("header");
-    this.panelClose.setAttribute("aria-label", "关闭查询补全");
-    panelHeader.append(this.panelTitle, this.panelClose);
+    this.panelBack.hidden = true;
+    panelHeader.append(this.panelBack, this.panelTitle, this.panelClose);
     this.panel.append(panelHeader, this.panelBody);
     this.inputGroup.append(this.text, this.add);
-    this.line.append(this.tokens, this.inputGroup);
+    this.commandGroup.append(this.inputGroup, this.submit);
+    this.line.append(this.tokens, this.commandGroup);
     this.dom.append(this.line, this.panel);
 
     this.text.addEventListener("compositionstart", () => this.composing = true);
@@ -508,10 +1223,17 @@ export class QueryBar {
     this.text.addEventListener("keydown", (event) => this.inputKeydown(event));
     this.add.addEventListener("click", () => {
       this.closePanel();
-      this.openActions("");
+      this.openAddPicker();
+    });
+    this.submit.addEventListener("click", () => {
+      this.closePanel();
+      this.activateSubmit();
     });
     this.panelClose.addEventListener("click", () => {
       this.closePanel(true);
+    });
+    this.panelBack.addEventListener("click", () => {
+      this.panelBackAction?.();
     });
     this.line.addEventListener("pointerdown", (event) => {
       if (
@@ -526,8 +1248,10 @@ export class QueryBar {
       if (!this.panel.hidden && !this.dom.contains(event.target as Node))
         this.closePanel();
     });
+    document.defaultView?.addEventListener("resize", this.fitPanelToViewport);
 
     this.render();
+    this.setExecutionState(this.runState);
     void options.mappings?.().then((mappings) => {
       this.mappings = mappings;
       this.renderTokens();
@@ -545,7 +1269,21 @@ export class QueryBar {
   }
 
   focus(): void {
-    (this.text.hidden ? this.add : this.text).focus();
+    this.trailingFocusTarget().focus();
+  }
+
+  private trailingFocusTarget(): HTMLElement {
+    if (!this.text.hidden) return this.text;
+    if (!this.add.hidden) return this.add;
+    return this.submit;
+  }
+
+  setExecutionState(state: QueryRunState): void {
+    this.runState = { ...state };
+    const presentation = queryRunPresentation(state);
+    setQueryIconButton(this.submit, presentation.icon, presentation.ariaLabel);
+    this.submit.setAttribute("aria-busy", String(presentation.busy));
+    this.submit.disabled = presentation.disabled;
   }
 
   dismissCompletion(): boolean {
@@ -573,6 +1311,18 @@ export class QueryBar {
     this.closePanel();
     this.dispatch(action);
     this.focus();
+  }
+
+  private commitPanelDraft(update: (draft: QueryDraft) => QueryDraft): void {
+    try {
+      this.synchronizeNameInput();
+      const draft = update(this.history.current);
+      this.closePanel();
+      this.dispatch({ type: "replace", draft });
+      this.focus();
+    } catch (error) {
+      this.options.reportError(error);
+    }
   }
 
   private synchronizeNameInput(): void {
@@ -604,20 +1354,27 @@ export class QueryBar {
     this.renderTokens();
     const expected = queryInputValue(this.history.current);
     const query = draftQuery(this.history.current);
-    const hasNameInput = query !== null && query.text?.capability !== "fullText";
+    const hasNameInput = query !== null;
     if (!hasNameInput || shouldSyncQueryInput(
       document.activeElement === this.text,
       this.text.value,
       forceInput,
     )) this.text.value = expected;
     this.text.hidden = !hasNameInput;
+    const hasAddableFragments = queryAddChoices(this.history.current).length > 0;
+    this.add.hidden = !hasAddableFragments;
+    this.inputGroup.hidden = !hasNameInput && !hasAddableFragments;
+    this.commandGroup.classList.toggle(
+      "query-command-group-action-only",
+      this.inputGroup.hidden,
+    );
     this.inputGroup.classList.toggle("query-input-group-action-only", !hasNameInput);
     this.text.placeholder = hasNameInput
-      ? "输入名称"
+      ? "按名称查找"
       : "";
     this.text.setAttribute(
       "aria-label",
-      hasNameInput ? "名称关键词" : "当前查询不接受名称关键词",
+      hasNameInput ? "按名称、中文名或别名查找" : "当前查询不接受名称查找",
     );
   }
 
@@ -628,6 +1385,7 @@ export class QueryBar {
     });
     this.tokens.replaceChildren(...tokens.map((item) => this.tokenButton(item)));
     this.resolveTokenEntities();
+    this.fitPanelToViewport();
   }
 
   private tokenButton(item: QueryToken): HTMLElement {
@@ -652,10 +1410,18 @@ export class QueryBar {
   private resolveTokenEntities(): void {
     if (!this.options.resolveEntityLabel) return;
     const draft = this.history.current;
+    const query = draftQuery(draft);
+    const owner = draftOwner(draft);
     const refs: EntityRef[] = draft.kind === "comparison" || draft.kind === "path"
       ? [draft.from, draft.to]
-      : draftQuery(draft)?.relations?.map((relation) => relation.related) ?? [];
-    for (const ref of refs) {
+      : [
+          ...(owner ? conditionEntityRefs(owner, query?.condition) : []),
+          ...(query?.relations ?? []).flatMap((relation) => [
+            relation.related,
+            ...(relation.additionalEndpoints ?? []).map((endpoint) => endpoint.related),
+          ]),
+        ];
+    for (const ref of new Set(refs)) {
       if (this.labels.has(ref)) continue;
       this.labels.set(ref, "读取名称…");
       void this.options.resolveEntityLabel(ref).then((label) => {
@@ -672,7 +1438,7 @@ export class QueryBar {
     const committed = queryInputValue(this.history.current);
     if (isActionShortcut(this.text.value, committed)) {
       this.text.value = committed;
-      this.openActions("");
+      this.openAddPicker();
       return;
     }
     this.closePanel();
@@ -689,47 +1455,26 @@ export class QueryBar {
   private inputKeydown(event: KeyboardEvent): void {
     if (event.isComposing) return;
     const panelKind = this.panelBody.dataset.kind;
-    if (!this.panel.hidden && (panelKind === "actions" || panelKind === "names")) {
+    if (!this.panel.hidden && panelKind === "names") {
       const choices = [...this.panelBody.querySelectorAll<HTMLButtonElement>("[role=option]")];
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
-        if (panelKind === "names") {
-          this.nameIndex = moveSuggestionIndex(this.nameIndex, choices.length, event.key);
-          this.syncActiveName(choices, true);
-        } else {
-          const delta = event.key === "ArrowDown" ? 1 : -1;
-          this.actionIndex = choices.length
-            ? (this.actionIndex + delta + choices.length) % choices.length
-            : 0;
-          this.syncActiveAction(choices);
-        }
+        this.nameIndex = moveSuggestionIndex(this.nameIndex, choices.length, event.key);
+        this.syncActiveName(choices, true);
         return;
       }
-      const active = panelKind === "names" ? this.nameIndex : this.actionIndex;
-      if (event.key === "Enter" && choices[active]) {
+      if (event.key === "Enter" && choices[this.nameIndex]) {
         event.preventDefault();
-        choices[active]!.click();
+        choices[this.nameIndex]!.click();
         return;
       }
       if (
-        event.key === "Enter" && panelKind === "names" && active < 0 &&
+        event.key === "Enter" && this.nameIndex < 0 &&
         literalCount(this.text.value) < QUERY_CONTRACT.search.lookup.minNormalizedCharacters
       ) {
         event.preventDefault();
         return;
       }
-    }
-    if (event.key === "Escape" && !this.panel.hidden) {
-      event.preventDefault();
-      this.text.value = queryInputValue(this.history.current);
-      this.closePanel(true);
-      return;
-    }
-    if (event.key === "Enter") {
-      event.preventDefault();
-      this.closePanel();
-      this.options.onSubmit();
-      return;
     }
     if (
       (event.key === "Backspace" || event.key === "ArrowLeft") &&
@@ -746,6 +1491,13 @@ export class QueryBar {
 
   private keydown(event: KeyboardEvent): void {
     if (event.isComposing || event.defaultPrevented) return;
+    if (event.key === "Escape" && !this.panel.hidden) {
+      event.preventDefault();
+      this.text.value = queryInputValue(this.history.current);
+      if (this.panelBackAction) this.panelBackAction();
+      else this.closePanel(true);
+      return;
+    }
     const token = event.target instanceof HTMLElement && event.target.matches(".query-token")
       ? event.target
       : null;
@@ -754,7 +1506,7 @@ export class QueryBar {
       const index = tokens.indexOf(token);
       const target = event.key === "ArrowLeft"
         ? tokens[index - 1]
-        : tokens[index + 1] ?? (this.text.hidden ? this.add : this.text);
+        : tokens[index + 1] ?? this.trailingFocusTarget();
       if (target) {
         event.preventDefault();
         target.focus();
@@ -766,13 +1518,20 @@ export class QueryBar {
       if (event.shiftKey ? this.redo() : this.undo()) event.preventDefault();
     } else if (modified && event.key.toLowerCase() === "y") {
       if (this.redo()) event.preventDefault();
-    } else if (modified && event.key === "Enter") {
-      event.preventDefault();
-      this.options.onSubmit();
     }
   }
 
-  private openPanel(title: string, renderer: PanelRenderer, kind = "editor"): void {
+  private activateSubmit(): void {
+    if (this.runState.running) this.options.onCancel();
+    else if (this.runState.runnable) this.options.onSubmit();
+  }
+
+  private openPanel(
+    title: string,
+    renderer: PanelRenderer,
+    kind = "editor",
+    back?: () => void,
+  ): void {
     const controlSelector =
       "input:not([hidden]):not([disabled]), select:not([hidden]):not([disabled]), " +
       "button:not([hidden]):not([disabled])";
@@ -784,33 +1543,48 @@ export class QueryBar {
       document.activeElement,
       [...this.panelBody.querySelectorAll<HTMLElement>(controlSelector)],
     );
+    this.clearValueAutocompletes();
     this.cancelSuggestions();
+    this.panelBackAction = back ?? null;
+    this.panelBack.hidden = !back;
     this.panelTitle.textContent = title;
     this.panelBody.dataset.kind = kind;
     this.panelBody.id ||= `query-bar-options-${++queryBarSequence}`;
+    this.panel.id ||= `${this.panelBody.id}-panel`;
+    this.panelTitle.id ||= `${this.panelBody.id}-title`;
     this.text.setAttribute("aria-controls", this.panelBody.id);
-    this.add.setAttribute("aria-controls", this.panelBody.id);
-    const listboxOpen = kind === "actions" || kind === "names";
+    const listboxOpen = kind === "names";
+    this.add.setAttribute("aria-controls", listboxOpen ? this.panelBody.id : this.panel.id);
+    if (kind === "editor") {
+      this.panel.setAttribute("role", "dialog");
+      this.panel.setAttribute("aria-labelledby", this.panelTitle.id);
+    } else {
+      this.panel.removeAttribute("role");
+      this.panel.removeAttribute("aria-labelledby");
+    }
     this.text.setAttribute("aria-expanded", String(listboxOpen));
-    this.add.setAttribute("aria-expanded", String(kind === "actions"));
+    this.add.setAttribute("aria-expanded", String(this.panelReturnFocus === this.add));
     if (!listboxOpen) this.text.removeAttribute("aria-activedescendant");
     this.panelBody.className = "";
     this.panelBody.removeAttribute("role");
     this.panelBody.replaceChildren();
     renderer(this.panelBody);
     this.panel.hidden = false;
+    this.fitPanelToViewport();
     if (kind === "editor") queueMicrotask(() => {
       if (this.panel.hidden || this.panel.contains(document.activeElement)) return;
       const controls = [...this.panelBody.querySelectorAll<HTMLElement>(controlSelector)];
       const preferred = restoreControlFocus(previousFocus, controls);
-      const primary = controls.find((control) => control.getAttribute("aria-label") === "字段");
-      (preferred ?? primary ?? controls[0])?.focus();
+      (preferred ?? findPrimaryEditorControl(controls))?.focus();
     });
   }
 
   private closePanel(restoreFocus = false): void {
     const returnFocus = this.panelReturnFocus;
     this.panelReturnFocus = null;
+    this.panelBackAction = null;
+    this.panelBack.hidden = true;
+    this.clearValueAutocompletes();
     this.cancelSuggestions();
     this.panel.hidden = true;
     this.panelBody.replaceChildren();
@@ -822,105 +1596,61 @@ export class QueryBar {
       returnFocus.focus();
   }
 
-  private openActions(filter: string): void {
-    const actions = completionActions(this.history.current, filter);
-    const groups = new Map<Owner, CompletionAction[]>();
-    for (const item of actions) {
-      if (!item.owner) continue;
-      const group = groups.get(item.owner) ?? [];
-      group.push(item);
-      groups.set(item.owner, group);
+  private openAddPicker(): void {
+    const choices = queryAddChoices(this.history.current);
+    if (!choices.length) {
+      this.options.reportError(new TypeError("当前查询没有可添加的条件"));
+      return;
     }
-    const added = new Set<Owner>();
-    const menu: ActionMenuItem[] = [];
-    for (const item of actions) {
-      if (!item.owner) {
-        menu.push({
-          label: item.label,
-          description: item.description,
-          choose: () => this.chooseAction(item),
-        });
-        continue;
-      }
-      if (added.has(item.owner)) continue;
-      added.add(item.owner);
-      const owner = item.owner;
-      const children = groups.get(owner) ?? [];
-      menu.push({
-        label: `${OWNER_LABEL[owner]}查询`,
-        description: children.map((child) =>
-          child.label.replace(`${OWNER_LABEL[owner]} · `, "")
-        ).join("、"),
-        choose: () => this.openScopedActions(owner, children),
-      });
-    }
-    this.openActionMenu("添加到查询", menu);
-  }
-
-  private openScopedActions(owner: Owner, actions: CompletionAction[]): void {
-    this.openActionMenu(`${OWNER_LABEL[owner]}查询`, [
-      {
-        label: "返回全部操作",
-        description: "选择其他实体或答案",
-        choose: () => this.openActions(""),
-      },
-      ...actions.map((item) => ({
-        label: item.label.replace(`${OWNER_LABEL[owner]} · `, ""),
-        description: item.description,
-        choose: () => this.chooseAction(item),
-      })),
-    ]);
-  }
-
-  private openActionMenu(title: string, actions: readonly ActionMenuItem[]): void {
-    this.actionIndex = 0;
-    this.openPanel(title, (body) => {
-      body.className = "query-action-list";
-      body.setAttribute("role", "listbox");
-      for (const [index, item] of actions.entries()) {
-        const choice = button("", "query-action");
-        choice.setAttribute("role", "option");
-        choice.dataset.index = String(index);
-        choice.id = `${body.id}-option-${index}`;
+    this.openPanel("添加", (body) => {
+      const list = document.createElement("div");
+      list.className = "query-add-list";
+      list.id = `${this.panelBody.id}-add-list`;
+      list.append(...choices.map((choice) => {
+        const control = button(
+          "",
+          choice.kind === "condition"
+            ? "query-add-choice query-add-choice-condition"
+            : "query-add-choice",
+        );
         const label = document.createElement("strong");
-        label.textContent = item.label;
-        const description = document.createElement("span");
-        description.textContent = item.description;
-        choice.append(label, description);
-        choice.addEventListener("pointermove", () => {
-          this.actionIndex = index;
-          this.syncActiveAction([...body.querySelectorAll<HTMLButtonElement>("[role=option]")]);
-        });
-        choice.addEventListener("click", () => {
-          this.synchronizeNameInput();
-          this.text.value = queryInputValue(this.history.current);
-          item.choose();
-        });
-        body.append(choice);
-      }
-      if (!actions.length) {
-        const empty = document.createElement("p");
-        empty.className = "query-popover-empty";
-        empty.textContent = "没有匹配的操作";
-        body.append(empty);
-      }
-      this.syncActiveAction([...body.querySelectorAll<HTMLButtonElement>("[role=option]")]);
-    }, "actions");
-    queueMicrotask(() => {
-      if (!this.panel.hidden && this.panelBody.dataset.kind === "actions")
-        (this.text.hidden ? this.add : this.text).focus();
+        label.textContent = choice.label;
+        control.append(label);
+        if (choice.detail) {
+          const detail = document.createElement("span");
+          if (choice.kind === "condition") detail.className = "query-choice-scope";
+          detail.textContent = choice.detail;
+          control.append(detail);
+        }
+        control.addEventListener("click", () => this.activateAddChoice(choice));
+        return control;
+      }));
+      list.addEventListener("keydown", (event) => {
+        if (!(event.target instanceof HTMLButtonElement)) return;
+        if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+        const controls = [...list.querySelectorAll<HTMLButtonElement>("button")];
+        const index = controls.indexOf(event.target);
+        const offset = event.key === "ArrowDown" ? 1 : -1;
+        const next = controls[index + offset];
+        if (!next) return;
+        event.preventDefault();
+        next.focus();
+      });
+      body.append(list);
     });
   }
 
-  private syncActiveAction(choices: HTMLButtonElement[]): void {
-    choices.forEach((choice, index) => {
-      const active = index === this.actionIndex;
-      choice.classList.toggle("active", active);
-      choice.setAttribute("aria-selected", String(active));
-    });
-    const active = choices[this.actionIndex];
-    if (active) this.text.setAttribute("aria-activedescendant", active.id);
-    else this.text.removeAttribute("aria-activedescendant");
+  private activateAddChoice(choice: QueryAddChoice): void {
+    const backToAdd = () => this.openAddPicker();
+    if (choice.kind === "condition") {
+      this.openNewEntityCondition(choice.owners, choice.field, backToAdd);
+    } else if (choice.kind === "relation") {
+      this.openRelationEditor(undefined, undefined, choice.owner, backToAdd);
+    } else if (choice.kind === "fullText") {
+      this.openBodyTextEditor(backToAdd);
+    } else if (choice.kind === "sort") {
+      this.openSortEditor(backToAdd);
+    }
   }
 
   private requestNameSuggestions(value: string): void {
@@ -991,30 +1721,13 @@ export class QueryBar {
     if (!items.length) {
       const empty = document.createElement("p");
       empty.className = "query-popover-empty";
-      empty.textContent = `没有名称建议；仍可查看“${text}”的完整匹配`;
+      empty.textContent = `没有名称建议；可点击查询查找“${text}”`;
       body.append(empty);
     }
-    if (literalCount(text) >= QUERY_CONTRACT.search.lookup.minNormalizedCharacters) {
-      const all = button("查看全部匹配", "query-view-all");
-      all.setAttribute("role", "option");
-      all.setAttribute("aria-selected", "false");
-      all.id = `${body.id}-name-all`;
-      all.addEventListener("pointermove", () => {
-        this.nameIndex = items.length;
-        this.syncActiveName(
-          [...body.querySelectorAll<HTMLButtonElement>("[role=option]")],
-        );
-      });
-      all.addEventListener("pointerdown", (event) => event.preventDefault());
-      all.addEventListener("click", () => {
-        this.closePanel();
-        this.options.onSubmit();
-      });
-      body.append(all);
-    } else {
+    if (literalCount(text) < QUERY_CONTRACT.search.lookup.minNormalizedCharacters) {
       const hint = document.createElement("p");
       hint.className = "query-popover-hint";
-      hint.textContent = "再输入一个字即可查看全部匹配";
+      hint.textContent = "再输入一个字即可查询完整结果";
       body.append(hint);
     }
     this.syncActiveName(
@@ -1050,63 +1763,18 @@ export class QueryBar {
     else this.text.removeAttribute("aria-activedescendant");
   }
 
-  private chooseAction(action: CompletionAction | CompletionActionId): void {
-    this.synchronizeNameInput();
-    const id = typeof action === "string" ? action : action.id;
-    const owner = typeof action === "string" ? undefined : action.owner;
-    switch (id) {
-      case "fullText":
-        this.openTextEditor();
-        break;
-      case "condition":
-        this.openEntityConditions(owner);
-        break;
-      case "relation":
-        this.openRelationEditor(undefined, undefined, owner);
-        break;
-      case "columns":
-        this.openColumnsEditor(owner);
-        break;
-      case "sort":
-        this.openSortEditor(owner);
-        break;
-      case "limit":
-        this.openLimitEditor();
-        break;
-      case "aggregate":
-        this.openAggregateEditor(owner);
-        break;
-      case "list": {
-        const draft = this.history.current;
-        const owner = draft.kind === "comparison" || draft.kind === "path"
-          ? refOwner(draft.from)
-          : undefined;
-        this.commitPanelAction({ type: "setList", ...(owner ? { owner } : {}) });
-        break;
-      }
-      case "comparison":
-        this.openPairEditor("comparison");
-        break;
-      case "path":
-        this.openPairEditor("path");
-        break;
-    }
-  }
-
   private editToken(item: QueryToken): void {
     switch (item.target.type) {
-      case "head":
-      case "intent":
-        this.openShapeEditor();
-        break;
       case "owner":
         this.openOwnerEditor();
         break;
       case "text":
-        this.openTextEditor();
+        if (this.history.current.kind === "list" && !this.history.current.query)
+          this.openAllTextEditor();
+        else this.openBodyTextEditor();
         break;
       case "condition":
-        this.openEntityConditions();
+        this.openEntityConditions(undefined, item.target.index);
         break;
       case "relation":
         this.openRelationEditor(item.target.index);
@@ -1122,9 +1790,11 @@ export class QueryBar {
         this.openSortEditor();
         break;
       case "limit":
+        this.openSortEditor();
+        break;
       case "maxHops":
       case "maxPaths":
-        this.openLimitEditor();
+        this.openPathLimitEditor();
         break;
       case "endpoint": {
         const draft = this.history.current;
@@ -1157,7 +1827,7 @@ export class QueryBar {
       case "text":
         if (this.history.current.kind === "list" && !this.history.current.query)
           this.dispatch({ type: "setList" });
-        else this.dispatch({ type: "setText", text: undefined });
+        else this.dispatch({ type: "setFullText", fullText: undefined });
         break;
       case "condition":
         this.dispatch({ type: "removeCondition", index: item.target.index });
@@ -1169,7 +1839,10 @@ export class QueryBar {
         this.dispatch({ type: "setColumns", columns: undefined });
         break;
       case "order":
-        this.dispatch({ type: "setOrder", orderBy: undefined });
+        this.dispatch({
+          type: "replace",
+          draft: applyOrderAndLimit(this.history.current, undefined, undefined),
+        });
         break;
       case "limit":
         this.dispatch({ type: "setLimit", limit: undefined });
@@ -1188,39 +1861,8 @@ export class QueryBar {
     }
   }
 
-  private openShapeEditor(): void {
-    this.openPanel("选择答案", (body) => {
-      body.className = "query-choice-list";
-      const choices: Array<[CompletionActionId, string, string]> = [
-        ["list", "查找条目", "得到可以继续筛选和排序的列表"],
-        ["aggregate", "统计", "分组并计算条数、合计或平均值"],
-        ["comparison", "比较", "查看两个条目的共同关联与差异"],
-        ["path", "路径", "寻找两个条目之间的最短关联"],
-      ];
-      for (const [id, label, description] of choices) {
-        const choice = button("", "query-choice");
-        const strong = document.createElement("strong");
-        strong.textContent = label;
-        const note = document.createElement("span");
-        note.textContent = description;
-        choice.append(strong, note);
-        choice.addEventListener("click", () => this.chooseAction(id));
-        body.append(choice);
-      }
-      if ((this.history.current.kind === "list" && this.history.current.query) ||
-          this.history.current.kind === "aggregate") {
-        const heading = document.createElement("h4");
-        heading.textContent = "查询范围";
-        const scopes = document.createElement("div");
-        scopes.className = "query-choice-row";
-        this.appendScopeChoices(scopes);
-        body.append(heading, scopes);
-      }
-    });
-  }
-
   private openOwnerEditor(): void {
-    this.openPanel("查找什么", (body) => {
+    this.openPanel("查找范围", (body) => {
       body.className = "query-choice-row";
       this.appendScopeChoices(body);
     });
@@ -1228,120 +1870,158 @@ export class QueryBar {
 
   private appendScopeChoices(body: HTMLElement): void {
     const draft = this.history.current;
-    const current = draftScope(draft);
-    const choices: Array<{ label: string; owners: readonly Owner[] }> = draft.kind === "aggregate"
-      ? (Object.entries(OWNER_LABEL) as [Owner, string][]).map(([owner, label]) => ({
-          label,
-          owners: [owner],
-        }))
-      : [
-          { label: "全部", owners: DEFAULT_ENTITY_SCOPE },
-          ...(Object.entries(OWNER_LABEL) as [Owner, string][]).map(([owner, label]) => ({
-            label,
-            owners: [owner],
-          })),
-        ];
-    for (const item of choices) {
-      const choice = button(item.label, "query-choice-chip");
-      const action: QueryAction = draft.kind === "aggregate"
-        ? { type: "setOwner", owner: item.owners[0]! }
-        : { type: "setScope", scope: item.owners };
-      const selected = Boolean(
-        current && current.length === item.owners.length &&
-        current.every((owner, index) => owner === item.owners[index]),
-      );
-      choice.setAttribute("aria-pressed", String(selected));
-      try {
-        applyQueryAction(draft, action);
-      } catch (error) {
-        choice.disabled = true;
-        choice.title = error instanceof Error ? error.message : "与当前查询不兼容";
-      }
-      choice.addEventListener("click", () => this.commitPanelAction(action));
-      body.append(choice);
-    }
-  }
-
-  private openTextEditor(): void {
-    const draft = this.history.current;
-    const query = draftQuery(draft);
-    const allText = draft.kind === "list" && !draft.query ? draft.allText : undefined;
-    if (!query && allText === undefined) return;
-    const scopes = fullTextScopeOptions(draftOwner(draft) ?? undefined);
-    const current = query?.text?.capability === "fullText" ? query.text : undefined;
-    this.openPanel("检索正文", (body) => {
-      const form = document.createElement("form");
-      form.className = "query-inline-form";
-      const scope = select("正文范围");
-      for (const item of scopes) scope.append(option(item.value, item.label));
-      scope.value = allText !== undefined
-        ? "all"
-        : current?.field ? `fullText:${current.field}` : scopes[0]?.value ?? "all";
-      const value = input("正文关键词");
-      value.placeholder = "至少两个字";
-      value.value = allText ?? current?.value ?? "";
-      const error = document.createElement("p");
-      error.className = "query-popover-error";
-      const save = button("应用", "query-primary");
-      save.type = "submit";
-      form.append(labeled("范围", scope), labeled("包含", value), save, error);
-      form.addEventListener("submit", (event) => {
-        event.preventDefault();
+    if (draft.kind === "aggregate") {
+      for (const owner of ENTITY_SCOPE_ORDER) {
+        const choice = scopeChoiceButton(owner);
+        choice.setAttribute("aria-pressed", String(draft.query.owner === owner));
+        const action: QueryAction = { type: "setOwner", owner };
         try {
-          if (literalCount(value.value) < 2) throw new TypeError("正文关键词至少需要两个字");
-          if (scope.value === "all") {
-            this.commitPanelAction({ type: "setAllText", text: value.value });
-            return;
-          }
-          const field = scope.value.replace(/^fullText:/, "") as "summary" | "description";
-          this.commitPanelAction({
-            type: "setText",
-            text: { value: value.value.trim(), capability: "fullText", field },
-          });
-        } catch (reason) {
-          error.textContent = reason instanceof Error ? reason.message : "正文条件无效";
+          applyQueryAction(draft, action);
+        } catch (error) {
+          choice.disabled = true;
+          choice.title = error instanceof Error ? error.message : "与当前查询不兼容";
+        }
+        choice.addEventListener("click", () => this.commitPanelAction(action));
+        body.append(choice);
+      }
+      return;
+    }
+
+    if (draft.kind !== "list" || !draft.query) return;
+    const controls = ENTITY_SCOPE_ORDER.map((owner) => {
+      const choice = scopeChoiceButton(owner);
+      body.append(choice);
+      return { owner, choice };
+    });
+    const refresh = (): void => {
+      const currentDraft = this.history.current;
+      const current = draftScope(currentDraft);
+      if (!current) return;
+      for (const { owner, choice } of controls) {
+        const selected = current.includes(owner);
+        choice.setAttribute("aria-pressed", String(selected));
+        choice.disabled = false;
+        choice.title = "";
+        if (selected && current.length === 1) {
+          choice.disabled = true;
+          choice.title = "至少选择一种实体";
+          continue;
+        }
+        try {
+          const scope = toggleEntityScope(current, owner);
+          applyQueryAction(currentDraft, { type: "setScope", scope });
+        } catch (error) {
+          choice.disabled = true;
+          choice.title = error instanceof Error ? error.message : "与当前查询不兼容";
+        }
+      }
+    };
+    for (const { owner, choice } of controls) {
+      choice.addEventListener("click", () => {
+        this.synchronizeNameInput();
+        const current = draftScope(this.history.current);
+        if (!current) return;
+        try {
+          this.dispatch({ type: "setScope", scope: toggleEntityScope(current, owner) });
+        } catch (error) {
+          this.options.reportError(error);
+        } finally {
+          refresh();
         }
       });
-      body.append(form);
-      queueMicrotask(() => value.focus());
-    });
+    }
+    refresh();
   }
 
-  private entityLeafConfig(owner: Owner): LeafConfig {
+  private openBodyTextEditor(back?: () => void): void {
+    const query = draftQuery(this.history.current);
+    const scope = draftScope(this.history.current);
+    if (!query || !scope) return;
+    const label = scopedFullTextLabel(scope);
+    const leaf: Extract<EditCondition, { kind: "leaf" }> = {
+      kind: "leaf",
+      field: "body",
+      operator: "contains",
+      raw: query.fullText?.value ?? "",
+    };
+    this.openConditionEditor(
+      label,
+      leaf,
+      this.textLeafConfig("body", label),
+      () => this.commitPanelAction(createScopedFullTextAction(leaf.raw)),
+      back,
+      {
+        compact: true,
+        submitLabel: "应用",
+      },
+    );
+  }
+
+  private openAllTextEditor(): void {
+    const draft = this.history.current;
+    if (draft.kind !== "list" || draft.query) return;
+    const leaf: Extract<EditCondition, { kind: "leaf" }> = {
+      kind: "leaf",
+      field: "allText",
+      operator: "contains",
+      raw: draft.allText,
+    };
+    this.openConditionEditor(
+      "搜索所有正文",
+      leaf,
+      this.textLeafConfig("allText", "所有正文与关系备注"),
+      () => this.commitPanelAction({
+        type: "setAllText",
+        text: normalizeFullTextValue(leaf.raw),
+      }),
+      undefined,
+      { compact: true, submitLabel: "应用" },
+    );
+  }
+
+  private textLeafConfig(field: string, label: string): LeafEditorConfig {
     return {
-      fields: () => {
-        const available = queryFieldsFor(owner, "filter")
-          .filter((field) => !INTERNAL_FIELDS.has(field));
-        return [
-          ...[...COMMON_FIELDS[owner]].filter((field) => available.includes(field)),
-          ...available.filter((field) => !COMMON_FIELDS[owner].has(field)),
-        ];
-      },
-      fieldLabel: (field) => FIELD_LABEL[field] ?? field,
-      operators: (field) => queryConditionOperators(owner, field),
-      values: (field) => enumValuesFor(owner, field, this.mappings),
-      inputType: (field) => {
-        const values = enumValuesFor(owner, field, this.mappings);
-        return values ? "text" : [
-          "score", "rank", "year", "wish", "done", "doing", "onHold",
-          "dropped", "comments", "collects", "disc", "duration", "sort",
-        ].includes(field) ? "number" : "text";
-      },
-      create: (field, operator, raw) =>
-        createEntityCondition(owner, field, operator, raw),
+      fields: () => [field],
+      fieldLabel: () => label,
+      operators: () => ["contains"],
+      operatorLabel: () => "包含",
+      values: () => null,
+      inputType: () => "text",
     };
   }
 
-  private factLeafConfig(kind: QueryFactKind): LeafConfig {
+  private entityLeafConfig(
+    owners: readonly Owner[],
+    restoredFields: readonly string[] = [],
+  ): LeafConfig {
+    const owner = owners[0];
+    if (!owner) throw new TypeError("至少选择一种实体");
     return {
-      fields: () => queryFactFields(kind, "filter"),
-      fieldLabel: (field) => FACT_FIELD_LABEL[field] ?? field,
-      operators: (field) => queryFactConditionOperators(kind, field),
-      values: (field) => factEnumValues(kind, field, this.mappings),
-      inputType: (field) => factEnumValues(kind, field, this.mappings)
-        ? "text"
-        : "number",
-      create: (field, operator, raw) => createFactCondition(kind, field, operator, raw),
+      fields: () => queryEditorFilterFields(owners, restoredFields),
+      fieldLabel: (field) => FIELD_LABEL[field] ?? field,
+      operators: (field) => queryConditionOperators(owner, field),
+      operatorLabel: (field, operator) =>
+        queryConditionOperatorLabel(owner, field, operator),
+      values: (field) => enumValuesFor(owner, field, this.mappings),
+      suggestions: (field) => {
+        const vocabularyField = tagVocabularyField(owner, field);
+        return vocabularyField && this.options.suggestTagValues
+          ? (text, signal) =>
+              this.options.suggestTagValues!(vocabularyField, text, signal)
+          : null;
+      },
+      featuredValues: (field) =>
+        featuredMetaTagValuesFor(
+          tagVocabularyField(owner, field),
+          this.options.featuredMetaTagValues,
+        ),
+      inputType: (field) => {
+        const values = enumValuesFor(owner, field, this.mappings);
+        return values ? "text" : queryScalarInputType(owner, field);
+      },
+      referenceOwner: (field) => queryReferenceOwner(owner, field),
+      create: (field, operator, raw) =>
+        createEntityCondition(owner, field, operator, raw),
     };
   }
 
@@ -1349,15 +2029,19 @@ export class QueryBar {
     owner: Owner,
     aggregate: ExplorerAggregate,
   ): LeafConfig {
-    const entity = this.entityLeafConfig(owner);
+    const entity = this.entityLeafConfig([owner]);
     return {
       fields: () => queryStatisticColumns(aggregate).map((column) => column.value),
       fieldLabel: (field) =>
         queryStatisticColumns(aggregate).find((column) => column.value === field)?.label ?? field,
       operators: (field) => statisticConditionOperators(owner, aggregate, field),
+      operatorLabel: (field, operator) => aggregate.groupBy.includes(field)
+        ? queryConditionOperatorLabel(owner, field, operator)
+        : OPERATOR_LABEL[operator] ?? operator,
       values: (field) => aggregate.groupBy.includes(field)
         ? enumValuesFor(owner, field, this.mappings)
         : null,
+      suggestions: () => null,
       inputType: (field) => aggregate.groupBy.includes(field)
         ? entity.inputType(field)
         : "number",
@@ -1366,41 +2050,98 @@ export class QueryBar {
     };
   }
 
-  private openEntityConditions(targetOwner?: Owner): void {
+  private openNewEntityCondition(
+    owners: readonly Owner[],
+    field?: string,
+    back?: () => void,
+  ): void {
+    if (!draftQuery(this.history.current)) {
+      this.options.reportError(new TypeError("当前查询不能添加筛选条件"));
+      return;
+    }
+    const config = this.entityLeafConfig(owners);
+    this.openConditionEditor(
+      "添加条件",
+      createDefaultConditionEdit(config, field),
+      config,
+      (root) => {
+        const condition = finishConditionEdit(root, config);
+        if (condition) this.commitPanelDraft((draft) =>
+          addConditionForOwners(draft, owners, condition)
+        );
+      },
+      back,
+      {
+        compact: true,
+        submitLabel: "添加条件",
+      },
+    );
+  }
+
+  private openEntityConditions(targetOwner?: Owner, focusIndex?: number): void {
     const query = draftQuery(this.history.current);
     if (!query) return;
-    const owner = targetOwner ?? draftOwner(this.history.current);
-    if (!owner) {
+    const owners = targetOwner
+      ? [targetOwner]
+      : draftScope(this.history.current);
+    if (!owners) {
       this.options.reportError(new TypeError("请先选择条件适用的实体类型"));
       return;
     }
-    const config = this.entityLeafConfig(owner);
     const root = createConditionEditRoot(query.condition);
+    const focusNode = focusIndex === undefined
+      ? undefined
+      : conditionEditFocusTerm(root, focusIndex);
+    const config = this.entityLeafConfig(owners, editConditionFields(root));
     this.openConditionEditor(
       "筛选条件",
       root,
       config,
-      (condition) => {
-        this.commitPanelAction({ type: "setCondition", condition, owner });
+      (edited) => {
+        const condition = finishConditionEdit(edited, config);
+        this.commitPanelAction({
+          type: "setCondition",
+          condition,
+          ...(targetOwner ? { owner: targetOwner } : {}),
+        });
       },
+      undefined,
+      { focusNode },
     );
   }
 
   private openConditionEditor(
     title: string,
     root: EditCondition,
-    config: LeafConfig,
-    commit: (condition: ExplorerCondition | undefined) => void,
+    config: LeafEditorConfig,
+    saveEdit: (root: EditCondition) => void,
     back?: () => void,
+    options: ConditionEditorOptions = {},
   ): void {
     if (root.kind === "all" && !root.terms.length)
       root.terms.push(createDefaultConditionEdit(config));
     const render = (): void => this.openPanel(title, (body) => {
-      body.className = "query-condition-editor";
+      body.className = options.compact
+        ? "query-condition-editor query-condition-editor-compact"
+        : "query-condition-editor";
       const tree = document.createElement("div");
       tree.className = "query-condition-tree";
       const error = document.createElement("p");
       error.className = "query-popover-error";
+
+      const renderAddRow = (
+        node: Extract<EditCondition, { kind: "all" | "any" }>,
+      ): HTMLElement => {
+        const addRow = document.createElement("div");
+        addRow.className = "query-condition-add";
+        const addCondition = button("＋ 条件", "query-inline-link");
+        addCondition.addEventListener("click", () => {
+          node.terms.push(createDefaultConditionEdit(config));
+          render();
+        });
+        addRow.append(addCondition);
+        return addRow;
+      };
 
       const renderNode = (
         node: EditCondition,
@@ -1410,64 +2151,206 @@ export class QueryBar {
         if (node.kind === "leaf") {
           const row = document.createElement("div");
           row.className = "query-condition-row";
-          const field = select("字段");
-          for (const name of config.fields())
-            field.append(option(name, config.fieldLabel(name)));
-          field.value = node.field;
-          const operator = select("比较方式");
-          const syncOperators = (): void => {
-            operator.replaceChildren(...config.operators(node.field).map((name) =>
-              option(name, OPERATOR_LABEL[name] ?? name)
-            ));
-            if (!config.operators(node.field).includes(node.operator))
-              node.operator = operator.value;
-            else operator.value = node.operator;
-          };
-          syncOperators();
+          let fieldSelect: HTMLSelectElement | null = null;
+          let fieldControl: HTMLElement;
+          if (options.compact) {
+            const field = document.createElement("span");
+            field.className = "query-condition-field-token";
+            field.textContent = config.fieldLabel(node.field);
+            fieldControl = field;
+          } else {
+            const field = select("字段");
+            for (const name of config.fields())
+              field.append(option(name, config.fieldLabel(name)));
+            field.value = node.field;
+            fieldSelect = field;
+            fieldControl = field;
+          }
+          const allowed = config.operators(node.field);
+          if (!allowed.includes(node.operator)) node.operator = allowed[0] ?? "";
+          const values = config.values(node.field);
+          const visible = conditionEditorOperatorChoices(
+            allowed,
+            config.inputType(node.field),
+            node.operator,
+            values ? Object.keys(values).length : 0,
+          );
+          const operatorText = (name: string): string =>
+            config.operatorLabel?.(node.field, name) ?? OPERATOR_LABEL[name] ?? name;
+          let operatorSelect: HTMLSelectElement | null = null;
+          let operatorControl: HTMLElement;
+          if (visible.length === 1) {
+            const label = document.createElement("span");
+            label.className = "query-condition-operator-label";
+            label.textContent = operatorText(visible[0]!);
+            operatorControl = label;
+          } else {
+            const operator = select("比较方式");
+            operator.append(...visible.map((name) => option(name, operatorText(name))));
+            operator.value = node.operator;
+            operatorSelect = operator;
+            operatorControl = operator;
+          }
           const valueHost = document.createElement("span");
           valueHost.className = "query-condition-value";
+          let releaseAutocomplete: (() => void) | null = null;
           const renderValue = (): void => {
+            releaseAutocomplete?.();
+            releaseAutocomplete = null;
             valueHost.replaceChildren();
             if (isNoValueOperator(node.operator)) return;
-            const values = config.values(node.field);
-            if (values) {
-              const control = select(config.fieldLabel(node.field));
+            const referenceOwner = config.referenceOwner?.(node.field) ?? null;
+            if (referenceOwner) {
               const multiple = isMultiValueOperator(node.operator);
-              control.multiple = multiple;
-              if (multiple) control.size = Math.min(5, Math.max(2, Object.keys(values).length));
-              for (const [value, label] of Object.entries(values))
-                control.append(option(value, label));
-              if (!multiple) node.raw = resolveSingleChoiceValue(node.raw, values);
-              const selected = new Set(node.raw.split(/[、,，]+/).filter(Boolean));
-              for (const item of control.options) item.selected = selected.has(item.value);
-              control.addEventListener("change", () => {
-                node.raw = [...control.selectedOptions].map((item) => item.value).join("、");
+              const refs = node.raw.split(/[、,，\n]+/).filter(Boolean);
+              if (!multiple && refs.length > 1) {
+                refs.splice(1);
+                node.raw = refs[0] ?? "";
+              }
+              const labels = refs.map((ref) => {
+                const known = this.labels.get(ref);
+                if (known) return known;
+                try {
+                  const parsed = parseEntityRef(ref);
+                  return `${OWNER_LABEL[parsed.owner]} #${parsed.archiveId}`;
+                } catch {
+                  return "未知条目";
+                }
+              });
+              const control = button(
+                labels.length > 1
+                  ? `已选 ${labels.length} 个${OWNER_LABEL[referenceOwner]}`
+                  : labels[0] ?? `选择${OWNER_LABEL[referenceOwner]}`,
+                "query-entity-picker-button query-reference-value",
+              );
+              control.dataset.queryPrimary = "true";
+              control.title = labels.join("、") || `选择${OWNER_LABEL[referenceOwner]}`;
+              control.setAttribute("aria-label", control.title);
+              control.addEventListener("click", () => {
+                this.openEntityPicker(
+                  `选择${OWNER_LABEL[referenceOwner]}`,
+                  [referenceOwner],
+                  (entity) => {
+                    this.labels.set(entity.ref, entity.label);
+                    node.raw = multiple
+                      ? [...new Set([...refs, entity.ref])].join("、")
+                      : entity.ref;
+                    render();
+                  },
+                  render,
+                );
               });
               valueHost.append(control);
+              if (refs.length) {
+                const clear = iconButton(
+                  "close",
+                  `清除${config.fieldLabel(node.field)}`,
+                  "query-reference-clear",
+                );
+                clear.addEventListener("click", () => {
+                  node.raw = "";
+                  render();
+                });
+                valueHost.append(clear);
+              }
+              return;
+            }
+            const values = config.values(node.field);
+            if (values) {
+              const multiple = isMultiValueOperator(node.operator);
+              if (multiple) {
+                const choices = document.createElement("div");
+                choices.className = "query-multi-choice";
+                choices.setAttribute("role", "group");
+                choices.setAttribute("aria-label", config.fieldLabel(node.field));
+                const selected = new Set(node.raw.split(/[、,，]+/).filter(Boolean));
+                const controls: HTMLInputElement[] = [];
+                for (const [value, label] of Object.entries(values)) {
+                  const choice = document.createElement("label");
+                  choice.className = "query-multi-choice-item";
+                  const control = input(label, "checkbox");
+                  control.className = "query-multi-choice-input";
+                  control.dataset.queryPrimary = "true";
+                  control.value = value;
+                  control.checked = selected.has(value);
+                  controls.push(control);
+                  choice.append(control, document.createTextNode(label));
+                  choices.append(choice);
+                }
+                for (const control of controls) {
+                  control.addEventListener("change", () => {
+                    node.raw = controls
+                      .filter((candidate) => candidate.checked)
+                      .map((candidate) => candidate.value)
+                      .join("、");
+                  });
+                }
+                valueHost.append(choices);
+              } else {
+                const control = select(config.fieldLabel(node.field));
+                control.dataset.queryPrimary = "true";
+                node.raw = resolveSingleChoiceValue(node.raw, values);
+                for (const [value, label] of Object.entries(values))
+                  control.append(option(value, label));
+                control.value = node.raw;
+                control.addEventListener("change", () => node.raw = control.value);
+                valueHost.append(control);
+              }
             } else {
-              const control = input(config.fieldLabel(node.field), config.inputType(node.field));
+              const inputType = config.inputType(node.field);
+              const control = input(
+                config.fieldLabel(node.field),
+                conditionValueInputType(inputType, node.operator),
+              );
+              const step = conditionValueInputStep(inputType, node.operator);
+              if (step) control.step = step;
+              control.dataset.queryPrimary = "true";
               control.value = node.raw;
-              control.placeholder = isMultiValueOperator(node.operator) ? "多个值用、分隔" : "值";
-              control.addEventListener("input", () => node.raw = control.value);
               valueHost.append(control);
+              const suggest = config.suggestions?.(node.field) ?? null;
+              if (suggest) {
+                control.placeholder = `输入${config.fieldLabel(node.field)}`;
+                releaseAutocomplete = this.trackValueAutocomplete(
+                  attachValueAutocomplete({
+                    host: valueHost,
+                    input: control,
+                    label: config.fieldLabel(node.field),
+                    featuredValues: config.featuredValues?.(node.field),
+                    suggest,
+                    onValue: (value) => node.raw = value,
+                  }),
+                );
+              } else {
+                control.placeholder = isMultiValueOperator(node.operator)
+                  ? "多个值用、分隔"
+                  : "值";
+                control.addEventListener("input", () => node.raw = control.value);
+              }
             }
           };
           renderValue();
-          field.addEventListener("change", () => {
-            node.field = field.value;
+          if (fieldSelect) fieldSelect.addEventListener("change", () => {
+            node.field = fieldSelect.value;
             node.operator = config.operators(node.field)[0] ?? "";
             node.raw = "";
             render();
           });
-          operator.addEventListener("change", () => {
-            node.operator = operator.value;
-            if (isNoValueOperator(node.operator)) node.raw = "";
-            renderValue();
-          });
-          row.append(field, operator, valueHost);
+          if (operatorSelect) {
+            operatorSelect.addEventListener("change", () => {
+              node.operator = operatorSelect.value;
+              if (isNoValueOperator(node.operator)) node.raw = "";
+              renderValue();
+            });
+          }
+          if (node === options.focusNode) {
+            const focus = valueHost.querySelector<HTMLElement>(
+              "[data-query-primary=true]",
+            ) ?? operatorSelect ?? fieldSelect;
+            if (focus) focus.dataset.queryFocus = "true";
+          }
+          row.append(fieldControl, operatorControl, valueHost);
           if (parent) {
-            const remove = button("×", "query-row-remove");
-            remove.setAttribute("aria-label", "删除条件");
+            const remove = iconButton("close", "删除条件", "query-row-remove");
             remove.addEventListener("click", () => {
               parent.terms.splice(index, 1);
               render();
@@ -1477,6 +2360,38 @@ export class QueryBar {
           return row;
         }
 
+        if (node.kind === "not") {
+          const group = document.createElement("fieldset");
+          group.className = "query-condition-group-editor query-condition-not-editor";
+          const head = document.createElement("legend");
+          head.textContent = "排除以下条件";
+          if (parent) {
+            const remove = button("删除组", "query-inline-link");
+            remove.addEventListener("click", () => {
+              parent.terms.splice(index, 1);
+              render();
+            });
+            head.append(remove);
+          }
+          group.append(head);
+          const children = document.createElement("div");
+          children.className = "query-condition-children";
+          const term = node.terms[0];
+          if (term) children.append(renderNode(term, node, 0));
+          group.append(children);
+          return group;
+        }
+
+        if (!parent && !conditionGroupControlsVisible(node)) {
+          const flat = document.createElement("div");
+          flat.className = "query-condition-flat";
+          node.terms.forEach((term, termIndex) =>
+            flat.append(renderNode(term, null, termIndex))
+          );
+          flat.append(renderAddRow(node));
+          return flat;
+        }
+
         const group = document.createElement("fieldset");
         group.className = "query-condition-group-editor";
         const head = document.createElement("legend");
@@ -1484,13 +2399,11 @@ export class QueryBar {
         mode.append(
           option("all", "全部满足"),
           option("any", "任一满足"),
-          option("not", "排除"),
         );
         mode.value = node.kind;
         mode.addEventListener("change", () => {
-          const next = mode.value as "all" | "any" | "not";
+          const next = mode.value as "all" | "any";
           node.kind = next;
-          if (next === "not" && node.terms.length > 1) node.terms.splice(1);
           render();
         });
         head.append(mode);
@@ -1508,44 +2421,40 @@ export class QueryBar {
         node.terms.forEach((term, termIndex) =>
           children.append(renderNode(term, node, termIndex))
         );
-        const addRow = document.createElement("div");
-        addRow.className = "query-condition-add";
-        const addCondition = button("＋ 条件", "query-inline-link");
-        addCondition.addEventListener("click", () => {
-          if (node.kind === "not" && node.terms.length) return;
-          node.terms.push(createDefaultConditionEdit(config));
-          render();
-        });
-        const addGroup = button("＋ 条件组", "query-inline-link");
-        addGroup.hidden = node.kind === "not";
-        addGroup.addEventListener("click", () => {
-          node.terms.push({ kind: "any", terms: [createDefaultConditionEdit(config)] });
-          render();
-        });
-        addRow.append(addCondition, addGroup);
-        children.append(addRow);
+        children.append(renderAddRow(node));
         group.append(children);
         return group;
       };
 
       tree.append(renderNode(root, null, 0));
       const actions = document.createElement("footer");
-      if (back) {
-        const backButton = button("返回", "query-secondary");
-        backButton.addEventListener("click", back);
-        actions.append(backButton);
-      }
-      const save = button("应用", "query-primary");
+      const save = options.compact
+        ? iconButton(
+            "check",
+            options.submitLabel ?? "应用",
+            "query-primary query-condition-submit",
+          )
+        : button(options.submitLabel ?? "应用", "query-primary");
       save.addEventListener("click", () => {
         try {
-          commit(finishConditionEdit(root, config));
+          saveEdit(root);
         } catch (reason) {
           error.textContent = reason instanceof Error ? reason.message : "条件无效";
         }
       });
+      body.addEventListener("keydown", (event) => {
+        if (
+          !options.compact || event.key !== "Enter" || event.isComposing ||
+          event.defaultPrevented || !(event.target instanceof HTMLElement) ||
+          event.target.dataset.queryPrimary !== "true" ||
+          event.target.getAttribute("aria-expanded") === "true"
+        ) return;
+        event.preventDefault();
+        save.click();
+      }, true);
       actions.append(save);
       body.append(tree, actions, error);
-    });
+    }, "editor", back);
     render();
   }
 
@@ -1553,108 +2462,335 @@ export class QueryBar {
     index?: number,
     session?: ExplorerRelation,
     targetOwner?: Owner,
+    back?: () => void,
   ): void {
     const query = draftQuery(this.history.current);
     if (!query) return;
-    const owner = targetOwner ?? draftOwner(this.history.current);
-    if (!owner) {
+    const scope = targetOwner ? [targetOwner] : draftScope(this.history.current);
+    if (!scope) {
       this.options.reportError(new TypeError("请先选择关联适用的实体类型"));
       return;
     }
     const current = session ?? (index === undefined ? undefined : query.relations?.[index]);
-    const choices = queryRelationOptions(owner);
-    const selectionValue = current
-      ? `${current.factKind}|${current.candidateRole}|${current.relatedRole}`
-      : choices[0]?.value ?? "";
+    const choices = relationChoicesForScope(scope, this.mappings);
+    if (!choices.length) {
+      this.options.reportError(new TypeError("当前实体类型没有可用关系"));
+      return;
+    }
+    const resolved = resolveRelationChoice(choices, current);
     const state = {
-      selection: selectionValue,
+      selection: (current ? resolved.choice.value : undefined) as string | undefined,
+      focusAfterRender: null as "target" | "save" | "exclude" | null,
       exists: current?.exists ?? true,
       related: current?.related,
-      condition: current?.condition ? cloneCondition(current.condition) : undefined,
+      additionalEndpoints: current?.additionalEndpoints?.map((endpoint) => ({
+        ...endpoint,
+      })) ?? [],
+      discriminator: resolved.discriminator
+        ? cloneCondition(resolved.discriminator)
+        : undefined,
+      condition: resolved.remainder
+        ? cloneCondition(resolved.remainder)
+        : undefined,
     };
-    const render = (): void => this.openPanel(index === undefined ? "添加关联" : "修改关联", (body) => {
-      const form = document.createElement("div");
-      form.className = "query-relation-editor";
-      const relation = select("关联类型");
-      for (const choice of choices) relation.append(option(choice.value, choice.label));
-      relation.value = state.selection;
-      const existence = select("是否存在");
-      existence.append(option("true", "存在"), option("false", "不存在"));
-      existence.value = String(state.exists);
-      const target = button(
-        state.related ? this.labels.get(state.related) ?? "读取名称…" : "选择关联条目",
-        "query-entity-picker-button",
-      );
-      target.addEventListener("click", () => {
-        const owner = queryRelationTargetOwner(state.selection);
-        this.openEntityPicker("选择关联条目", [owner], (entity) => {
-          state.related = entity.ref;
-          this.labels.set(entity.ref, entity.label);
-          render();
-        }, render);
-      });
-      relation.addEventListener("change", () => {
-        const previousOwner = state.related ? refOwner(state.related) : null;
-        state.selection = relation.value;
-        if (previousOwner !== queryRelationTargetOwner(state.selection)) {
-          state.related = undefined;
-          state.condition = undefined;
-        }
-        render();
-      });
-      existence.addEventListener("change", () => state.exists = existence.value === "true");
-      form.append(
-        labeled("关系", relation),
-        labeled("条目", target),
-        labeled("要求", existence),
-      );
-      const [kind] = state.selection.split("|") as [QueryFactKind];
-      if (kind && queryFactFields(kind, "filter").length) {
-        const attributes = button(
-          state.condition ? "修改关系属性条件" : "添加关系属性条件",
-          "query-secondary",
-        );
-        attributes.addEventListener("click", () => {
-          this.openConditionEditor(
-            "关系属性条件",
-            createConditionEditRoot(state.condition),
-            this.factLeafConfig(kind),
-            (condition) => {
-              state.condition = condition;
-              render();
-            },
-            render,
-          );
-        });
-        form.append(attributes);
+    const chooseRelation = (next: ScopedRelationChoice): void => {
+      const selected = choices.find(({ value }) => value === state.selection)
+        ?? choices[0]!;
+      const previousOwner = state.related ? refOwner(state.related) : null;
+      state.selection = next.value;
+      state.focusAfterRender = "target";
+      state.discriminator = relationChoiceCondition(next);
+      if (selected.topology !== next.topology) state.additionalEndpoints = [];
+      if (previousOwner !== queryRelationTargetOwner(next.topology)) {
+        state.related = undefined;
+        state.condition = undefined;
+      } else if (selected.factKind !== next.factKind) {
+        state.condition = undefined;
       }
-      const error = document.createElement("p");
-      error.className = "query-popover-error";
-      const save = button("应用", "query-primary");
-      save.addEventListener("click", () => {
-        try {
-          if (!state.related) throw new TypeError("请选择关联条目");
-          const [factKind, candidateRole, relatedRole] = state.selection.split("|");
-          if (!factKind || !candidateRole || !relatedRole)
-            throw new TypeError("请选择有效的关联类型");
-          const next: ExplorerRelation = {
-            factKind: factKind as QueryFactKind,
-            candidateRole,
-            relatedRole,
-            related: state.related,
-            exists: state.exists,
-            ...(state.condition ? { condition: state.condition } : {}),
+    };
+    let render: () => void;
+    const openRelationPicker = (pickerBack?: () => void): void => {
+      this.openPanel(
+        "选择关系",
+        (body) => {
+          body.className = "query-relation-picker";
+          const search = input("搜索关系");
+          search.classList.add("query-relation-search");
+          search.placeholder = "搜索关系名或两端类型";
+          const status = document.createElement("p");
+          status.className = "query-relation-picker-status";
+          status.setAttribute("role", "status");
+          status.setAttribute("aria-live", "polite");
+          const list = document.createElement("div");
+          list.className = "query-relation-picker-list";
+          list.setAttribute("role", "listbox");
+          list.setAttribute("aria-label", "关系");
+          const empty = document.createElement("p");
+          empty.className = "query-popover-empty";
+          empty.textContent = "没有匹配的关系";
+
+          const renderChoices = (): void => {
+            const filtered = filterRelationChoices(choices, search.value);
+            status.textContent = `${filtered.length} 个关系`;
+            empty.hidden = filtered.length > 0;
+            const controls = filtered.map((next, index) => {
+              const choice = button("", "query-relation-picker-choice");
+              const label = document.createElement("span");
+              const detail = document.createElement("span");
+              label.className = "query-relation-picker-label";
+              label.textContent = next.displayLabel;
+              detail.className = "query-relation-picker-detail";
+              detail.textContent = next.detailLabel;
+              choice.append(label, detail);
+              choice.setAttribute("role", "option");
+              choice.setAttribute(
+                "aria-selected",
+                String(next.value === state.selection),
+              );
+              choice.setAttribute(
+                "aria-label",
+                `${next.displayLabel}，${next.detailLabel}`,
+              );
+              choice.tabIndex = index === 0 ? 0 : -1;
+              choice.addEventListener("click", () => {
+                chooseRelation(next);
+                render();
+              });
+              choice.addEventListener("keydown", (event) => {
+                if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+                event.preventDefault();
+                const target = moveSuggestionIndex(
+                  controls.indexOf(choice),
+                  controls.length,
+                  event.key,
+                );
+                controls[target]?.focus();
+              });
+              return choice;
+            });
+            list.replaceChildren(...controls);
+            list.hidden = controls.length === 0;
           };
-          this.commitPanelAction(index === undefined
-            ? { type: "addRelation", relation: next, owner }
-            : { type: "replaceRelation", index, relation: next });
-        } catch (reason) {
-          error.textContent = reason instanceof Error ? reason.message : "关联条件无效";
+
+          search.addEventListener("input", renderChoices);
+          search.addEventListener("keydown", (event) => {
+            if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+            const controls = [
+              ...list.querySelectorAll<HTMLButtonElement>("[role=option]"),
+            ];
+            const target = event.key === "ArrowDown" ? controls[0] : controls.at(-1);
+            if (!target) return;
+            event.preventDefault();
+            target.focus();
+          });
+          body.append(search, status, list, empty);
+          renderChoices();
+        },
+        "editor",
+        pickerBack,
+      );
+    };
+    render = (): void => this.openPanel(
+      index === undefined ? "按关联筛选" : "修改关联筛选",
+      (body) => {
+        const form = document.createElement("form");
+        form.className = "query-relation-editor";
+        const selected = choices.find(({ value }) => value === state.selection)
+          ?? choices[0]!;
+        const relation = button("", "query-relation-selected");
+        const relationLabel = document.createElement("span");
+        const relationDetail = document.createElement("span");
+        relationLabel.className = "query-relation-selected-label";
+        relationLabel.textContent = selected.displayLabel;
+        relationDetail.className = "query-relation-selected-detail";
+        relationDetail.textContent = selected.detailLabel;
+        relation.append(relationLabel, relationDetail);
+        relation.setAttribute(
+          "aria-label",
+          `更换关系：${selected.displayLabel}，${selected.detailLabel}`,
+        );
+        relation.title = "更换关系";
+        relation.addEventListener("click", () => openRelationPicker(render));
+        const targetOwner = queryRelationTargetOwner(selected.topology);
+        const targetText = state.related
+          ? this.labels.get(state.related) ?? "读取名称…"
+          : `选择${OWNER_LABEL[targetOwner]}`;
+        const target = button(targetText, "query-entity-picker-button");
+        const targetLabel = state.related
+          ? `关联${OWNER_LABEL[targetOwner]}：${targetText}`
+          : `${targetText}（关联对象）`;
+        target.setAttribute("aria-label", targetLabel);
+        target.title = targetLabel;
+        target.addEventListener("click", () => {
+          this.openEntityPicker(`选择${OWNER_LABEL[targetOwner]}`, [targetOwner], (entity) => {
+            state.related = entity.ref;
+            this.labels.set(entity.ref, entity.label);
+            state.focusAfterRender = "save";
+            render();
+          }, render);
+        });
+        const error = document.createElement("p");
+        error.className = "query-popover-error";
+        const save = button("应用", "query-primary");
+        save.type = "submit";
+        form.append(relation, target);
+        const contexts = queryRelationContextRoles(
+          selected.factKind,
+          selected.candidateRole,
+          selected.relatedRole,
+        );
+        state.additionalEndpoints = state.additionalEndpoints.filter((endpoint) =>
+          contexts.some((context) =>
+            context.role === endpoint.role &&
+            refOwner(endpoint.related) === context.owner
+          )
+        );
+        for (const context of contexts) {
+          const endpoint = state.additionalEndpoints.find(({ role }) =>
+            role === context.role
+          );
+          const contextHost = document.createElement("span");
+          contextHost.className = "query-relation-context";
+          const contextText = endpoint
+            ? this.labels.get(endpoint.related) ?? "读取名称…"
+            : `限定${context.label}`;
+          const contextTarget = button(
+            contextText,
+            "query-entity-picker-button query-relation-context-target",
+          );
+          const contextLabel = endpoint
+            ? `${context.label}限定：${contextText}`
+            : `限定${context.label}（可选）`;
+          contextTarget.setAttribute("aria-label", contextLabel);
+          contextTarget.title = contextLabel;
+          contextTarget.addEventListener("click", () => {
+            this.openEntityPicker(`限定${context.label}`, [context.owner], (entity) => {
+              this.labels.set(entity.ref, entity.label);
+              state.additionalEndpoints = [
+                ...state.additionalEndpoints.filter(({ role }) => role !== context.role),
+                { role: context.role, related: entity.ref },
+              ];
+              state.focusAfterRender = "save";
+              render();
+            }, render);
+          });
+          contextHost.append(contextTarget);
+          if (endpoint) {
+            const clearContext = iconButton(
+              "close",
+              `取消${context.label}限定`,
+              "query-relation-context-clear",
+            );
+            clearContext.addEventListener("click", () => {
+              state.additionalEndpoints = state.additionalEndpoints
+                .filter(({ role }) => role !== context.role);
+              state.focusAfterRender = "save";
+              render();
+            });
+            contextHost.append(clearContext);
+          }
+          form.append(contextHost);
         }
-      });
-      body.append(form, save, error);
-    });
-    render();
+        const exclude = button(
+          "没有此关联",
+          "query-secondary query-relation-exclude",
+        );
+        exclude.type = "button";
+        exclude.setAttribute("aria-pressed", String(!state.exists));
+        const excludeLabel = state.exists
+          ? "只保留没有此关联的条目"
+          : "恢复为只保留有此关联的条目";
+        exclude.setAttribute("aria-label", excludeLabel);
+        exclude.title = excludeLabel;
+        exclude.addEventListener("click", () => {
+          state.exists = !state.exists;
+          state.focusAfterRender = "exclude";
+          render();
+        });
+        const kind = selected.factKind;
+        const discriminatorField = queryFactDiscriminatorField(kind);
+        const attributeFields = queryFactFields(kind, "filter")
+          .filter((field) => field !== discriminatorField);
+        const selections = factConditionSelections(state.condition, attributeFields);
+        const attributeValues = attributeFields.map((field) => ({
+          field,
+          values: factEnumValues(kind, field, this.mappings),
+        }));
+        if (selections && attributeValues.every(({ values }) => values !== null)) {
+          for (const { field, values } of attributeValues) {
+            const control = select(FACT_FIELD_LABEL[field] ?? field);
+            control.append(option("", "不限"));
+            for (const [value, label] of Object.entries(values!))
+              control.append(option(value, label));
+            control.value = selections[field] ?? "";
+            control.addEventListener("change", () => {
+              state.condition = updateFactConditionSelection(
+                kind,
+                state.condition,
+                attributeFields,
+                field,
+                control.value,
+              );
+              state.focusAfterRender = "save";
+              render();
+            });
+            form.append(labeled(FACT_FIELD_LABEL[field] ?? field, control));
+          }
+        } else if (state.condition) {
+          const legacy = button(
+            `移除旧关系条件 · ${describeFactCondition(kind, state.condition, this.mappings)}`,
+            "query-secondary query-relation-more-conditions",
+          );
+          legacy.addEventListener("click", () => {
+            state.condition = undefined;
+            state.focusAfterRender = "save";
+            render();
+          });
+          form.append(legacy);
+        }
+        form.append(exclude, save);
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          try {
+            if (!state.related) throw new TypeError("请选择关联对象");
+            const submitted = choices.find(({ value }) => value === state.selection);
+            if (!submitted) throw new TypeError("请选择有效的关联类型");
+            const condition = combineConditions([
+              ...(state.discriminator ? [state.discriminator] : []),
+              ...(state.condition ? [state.condition] : []),
+            ]);
+            const next: ExplorerRelation = {
+              factKind: submitted.factKind,
+              candidateRole: submitted.candidateRole,
+              relatedRole: submitted.relatedRole,
+              related: state.related,
+              ...(state.additionalEndpoints.length
+                ? { additionalEndpoints: state.additionalEndpoints }
+                : {}),
+              exists: state.exists,
+              ...(condition ? { condition } : {}),
+            };
+            this.commitPanelAction(index === undefined
+              ? { type: "addRelation", relation: next, owner: submitted.owner }
+              : { type: "replaceRelation", index, relation: next });
+          } catch (reason) {
+            error.textContent = reason instanceof Error ? reason.message : "关联条件无效";
+          }
+        });
+        body.append(form, error);
+        if (state.focusAfterRender) {
+          const focus = state.focusAfterRender === "target"
+            ? target
+            : state.focusAfterRender === "exclude" ? exclude : save;
+          state.focusAfterRender = null;
+          queueMicrotask(() => focus.focus());
+        }
+      },
+      "editor",
+      back,
+    );
+    if (current) render();
+    else openRelationPicker(back);
   }
 
   private openColumnsEditor(targetOwner?: Owner): void {
@@ -1702,139 +2838,175 @@ export class QueryBar {
     });
   }
 
-  private openSortEditor(targetOwner?: Owner): void {
+  private trackValueAutocomplete(cleanup: () => void): () => void {
+    let active = true;
+    const release = (): void => {
+      if (!active) return;
+      active = false;
+      cleanup();
+      this.valueAutocompleteCleanups.delete(release);
+    };
+    this.valueAutocompleteCleanups.add(release);
+    return release;
+  }
+
+  private clearValueAutocompletes(): void {
+    for (const cleanup of [...this.valueAutocompleteCleanups]) cleanup();
+  }
+
+  private openSortEditor(back?: () => void): void {
     const draft = this.history.current;
     const query = draftQuery(draft);
     if (!query) return;
-    const owner = targetOwner ?? draftOwner(draft);
-    if (!owner) {
-      this.options.reportError(new TypeError("请先选择排序适用的实体类型"));
+    const scope = draftScope(draft);
+    if (!scope) {
+      this.options.reportError(new TypeError("当前查询不能排序"));
       return;
     }
-    const available = draft.kind === "aggregate"
-      ? queryStatisticColumns(draft.query.aggregate)
-      : querySortFields(owner).map((field) => ({
-          value: field,
-          label: FIELD_LABEL[field] ?? field,
-        }));
-    const rows: OrderTerm[] = (query.orderBy ?? []).map((item) => ({ ...item }));
+    const aggregate = draft.kind === "aggregate";
+    const available: QuerySortChoice[] = aggregate
+      ? queryStatisticColumns(draft.query.aggregate).map((item) => ({
+          id: item.value,
+          field: item.value,
+          owners: [...scope],
+          label: item.label,
+        }))
+      : querySortChoicesForScope(scope);
+    if (!available.length) {
+      this.options.reportError(new TypeError("当前查询没有可用的排序字段"));
+      return;
+    }
+    const rows: ScopedOrderTerm[] = (query.orderBy ?? []).map((item) => ({ ...item }));
+    let limit = query.limit === undefined || query.limit === null ? "" : String(query.limit);
+    const canRemove = Boolean(query.orderBy?.length || query.limit !== undefined);
     if (!rows.length && available[0])
-      rows.push(createSortTerm(available[0].value));
+      rows.push(aggregate
+        ? createSortTerm(available[0].field)
+        : createSortTermForChoice(available[0], scope));
     const render = (): void => this.openPanel("排序", (body) => {
       const list = document.createElement("div");
       list.className = "query-sort-list";
       rows.forEach((row, index) => {
         const line = document.createElement("div");
         line.className = "query-sort-row";
-        const field = select("排序字段");
-        for (const item of available) field.append(option(item.value, item.label));
-        field.value = row.column;
-        const direction = select("排序方向");
+        const priority = document.createElement("span");
+        priority.className = "query-sort-priority";
+        priority.textContent = index === 0 ? "先按" : "再按";
+        const field = select(`第 ${index + 1} 排序字段`);
+        for (const item of available) field.append(option(item.id, item.label));
+        field.value = aggregate ? row.column : scopedSortTermId(row, scope);
+        const direction = select(`第 ${index + 1} 排序方向`);
         direction.append(option("asc", "升序"), option("desc", "降序"));
         direction.value = row.direction;
         field.addEventListener("change", () => {
-          Object.assign(row, createSortTerm(field.value));
+          const choice = available.find((item) => item.id === field.value);
+          if (!choice) return;
+          delete row.owners;
+          Object.assign(
+            row,
+            aggregate
+              ? createSortTerm(choice.field)
+              : createSortTermForChoice(choice, scope),
+          );
           direction.value = row.direction;
         });
         direction.addEventListener("change", () => {
-          row.direction = direction.value as "asc" | "desc";
-          row.nulls = row.direction === "asc" ? "first" : "last";
+          Object.assign(
+            row,
+            sortTermWithDirection(row, direction.value as "asc" | "desc"),
+          );
         });
-        const remove = button("×", "query-row-remove");
-        remove.setAttribute("aria-label", "删除排序");
+        const remove = iconButton("close", `删除第 ${index + 1} 项排序`, "query-row-remove");
         remove.addEventListener("click", () => {
           rows.splice(index, 1);
           render();
         });
-        line.append(field, direction, remove);
+        line.append(priority, field, direction, remove);
         list.append(line);
       });
-      const add = button("＋ 排序字段", "query-inline-link");
+      const add = button(
+        rows.length ? "＋ 添加次要排序" : "＋ 添加排序规则",
+        "query-inline-link",
+      );
       add.disabled = rows.length >= available.length;
       add.addEventListener("click", () => {
-        const next = available.find((field) => !rows.some((row) => row.column === field.value));
-        if (next) rows.push(createSortTerm(next.value));
+        const used = new Set(rows.map((row) =>
+          aggregate ? row.column : scopedSortTermId(row, scope)
+        ));
+        const next = available.find((choice) => !used.has(choice.id));
+        if (next) rows.push(aggregate
+          ? createSortTerm(next.field)
+          : createSortTermForChoice(next, scope));
         render();
       });
+      const top = input("前 N 条", "number");
+      top.min = "1";
+      top.placeholder = "全部";
+      top.value = limit;
+      top.addEventListener("input", () => limit = top.value);
+      const error = document.createElement("p");
+      error.className = "query-popover-error";
       const actions = document.createElement("footer");
-      const clear = button("不排序", "query-secondary");
+      const clear = button("移除排序", "query-secondary");
       clear.addEventListener("click", () => {
-        this.commitPanelAction({ type: "setOrder", orderBy: undefined, owner });
+        this.commitPanelDraft((draft) =>
+          applyOrderAndLimit(draft, undefined, undefined)
+        );
       });
       const save = button("应用", "query-primary");
       save.addEventListener("click", () => {
-        if (new Set(rows.map((row) => row.column)).size !== rows.length) {
-          this.options.reportError(new TypeError("排序字段不能重复"));
-          return;
+        try {
+          const keys = rows.map((row) =>
+            aggregate ? row.column : scopedSortTermId(row, scope)
+          );
+          if (new Set(keys).size !== rows.length)
+            throw new TypeError("排序字段不能重复");
+          const parsedLimit = limit.trim() ? parseExplorerLimit(limit) : undefined;
+          if (parsedLimit !== undefined && !rows.length)
+            throw new TypeError("前 N 条需要至少一个排序字段");
+          this.commitPanelDraft((draft) =>
+            applyOrderAndLimit(draft, rows, parsedLimit)
+          );
+        } catch (reason) {
+          error.textContent = reason instanceof Error ? reason.message : "排序无效";
         }
-        this.commitPanelAction({ type: "setOrder", orderBy: rows, owner });
       });
-      actions.append(clear, save);
-      body.append(list, add, actions);
-    });
+      if (canRemove) actions.append(clear);
+      actions.append(save);
+      body.append(list, add, labeled("只看前 N 条（可选）", top), actions, error);
+    }, "editor", back);
     render();
   }
 
-  private openLimitEditor(): void {
+  private openPathLimitEditor(): void {
     const draft = this.history.current;
-    if (draft.kind === "path") {
-      this.openPanel("路径范围", (body) => {
-        const form = document.createElement("form");
-        form.className = "query-inline-form";
-        const hops = input("最大跳数", "number");
-        hops.min = "1";
-        hops.value = String(draft.maxHops);
-        const paths = input("最多路径数", "number");
-        paths.min = "1";
-        paths.value = String(draft.maxPaths);
-        const error = document.createElement("p");
-        error.className = "query-popover-error";
-        const save = button("应用", "query-primary");
-        save.type = "submit";
-        form.append(labeled("最多跳数", hops), labeled("最多路径", paths), save, error);
-        form.addEventListener("submit", (event) => {
-          event.preventDefault();
-          const maxHops = Number(hops.value);
-          const maxPaths = Number(paths.value);
-          if (!Number.isSafeInteger(maxHops) || maxHops < 1 ||
-              !Number.isSafeInteger(maxPaths) || maxPaths < 1) {
-            error.textContent = "跳数和路径数必须是正整数";
-            return;
-          }
-          this.commitPanelAction({
-            type: "setPath", from: draft.from, to: draft.to, maxHops, maxPaths,
-          });
-        });
-        body.append(form);
-      });
-      return;
-    }
-    const query = draftQuery(draft);
-    if (!query) return;
-    this.openPanel("结果条数", (body) => {
+    if (draft.kind !== "path") return;
+    this.openPanel("路径范围", (body) => {
       const form = document.createElement("form");
       form.className = "query-inline-form";
-      const value = input("最多结果数", "number");
-      value.min = "1";
-      value.value = query.limit === undefined || query.limit === null ? "" : String(query.limit);
-      value.placeholder = "不限制";
+      const hops = input("最大跳数", "number");
+      hops.min = "1";
+      hops.value = String(draft.maxHops);
+      const paths = input("最多路径数", "number");
+      paths.min = "1";
+      paths.value = String(draft.maxPaths);
       const error = document.createElement("p");
       error.className = "query-popover-error";
-      const clear = button("不限制", "query-secondary");
-      clear.addEventListener("click", () => {
-        this.commitPanelAction({ type: "setLimit", limit: undefined });
-      });
       const save = button("应用", "query-primary");
       save.type = "submit";
-      form.append(labeled("最多显示", value), clear, save, error);
+      form.append(labeled("最多跳数", hops), labeled("最多路径", paths), save, error);
       form.addEventListener("submit", (event) => {
         event.preventDefault();
-        const limit = Number(value.value);
-        if (!Number.isSafeInteger(limit) || limit < 1) {
-          error.textContent = "结果条数必须是正整数";
+        const maxHops = Number(hops.value);
+        const maxPaths = Number(paths.value);
+        if (!Number.isSafeInteger(maxHops) || maxHops < 1 ||
+            !Number.isSafeInteger(maxPaths) || maxPaths < 1) {
+          error.textContent = "跳数和路径数必须是正整数";
           return;
         }
-        this.commitPanelAction({ type: "setLimit", limit });
+        this.commitPanelAction({
+          type: "setPath", from: draft.from, to: draft.to, maxHops, maxPaths,
+        });
       });
       body.append(form);
     });
@@ -1854,7 +3026,7 @@ export class QueryBar {
       : { groupBy: [], metrics: [{ function: "count" }] };
     const groupFields = queryGroupFields(owner);
     const metricFields = queryAggregateFields(owner);
-    const render = (): void => this.openPanel("统计", (body) => {
+    const render = (): void => this.openPanel("设置统计结果", (body) => {
       const groups = document.createElement("div");
       groups.className = "query-checkbox-grid";
       for (const field of groupFields) {
@@ -1890,8 +3062,7 @@ export class QueryBar {
         field.addEventListener("change", () => {
           if (field.value) metric.field = field.value;
         });
-        const remove = button("×", "query-row-remove");
-        remove.setAttribute("aria-label", "删除统计指标");
+        const remove = iconButton("close", "删除统计指标", "query-row-remove");
         remove.disabled = aggregate.metrics.length === 1;
         remove.addEventListener("click", () => {
           aggregate.metrics.splice(index, 1);
@@ -1910,12 +3081,13 @@ export class QueryBar {
         "query-secondary",
       );
       having.addEventListener("click", () => {
+        const config = this.statisticLeafConfig(owner, aggregate);
         this.openConditionEditor(
           "统计结果条件",
           createConditionEditRoot(aggregate.having),
-          this.statisticLeafConfig(owner, aggregate),
-          (condition) => {
-            aggregate.having = condition;
+          config,
+          (root) => {
+            aggregate.having = finishConditionEdit(root, config);
             render();
           },
           render,
@@ -1953,81 +3125,6 @@ export class QueryBar {
     render();
   }
 
-  private openPairEditor(kind: "comparison" | "path", state?: {
-    from?: SelectedQueryEntity;
-    to?: SelectedQueryEntity;
-    maxHops: number;
-    maxPaths: number;
-  }): void {
-    const draft = this.history.current;
-    const session = state ?? {
-      ...(draft.kind === "comparison" || draft.kind === "path"
-        ? {
-            from: { ref: draft.from, label: this.labels.get(draft.from) ?? "读取名称…" },
-            to: { ref: draft.to, label: this.labels.get(draft.to) ?? "读取名称…" },
-          }
-        : {}),
-      maxHops: draft.kind === "path" ? draft.maxHops : 6,
-      maxPaths: draft.kind === "path" ? draft.maxPaths : 10,
-    };
-    const render = (): void => this.openPanel(kind === "comparison" ? "比较两个条目" : "查找关系路径", (body) => {
-      const pair = document.createElement("div");
-      pair.className = "query-pair-editor";
-      const from = button(session.from?.label ?? "选择第一个条目", "query-entity-picker-button");
-      const to = button(session.to?.label ?? "选择第二个条目", "query-entity-picker-button");
-      const between = document.createElement("span");
-      between.textContent = kind === "comparison" ? "和" : "到";
-      from.addEventListener("click", () => this.openEntityPicker(
-        "选择第一个条目",
-        ["subject", "person", "character"],
-        (entity) => {
-          session.from = entity;
-          this.labels.set(entity.ref, entity.label);
-          render();
-        },
-        render,
-      ));
-      to.addEventListener("click", () => this.openEntityPicker(
-        "选择第二个条目",
-        ["subject", "person", "character"],
-        (entity) => {
-          session.to = entity;
-          this.labels.set(entity.ref, entity.label);
-          render();
-        },
-        render,
-      ));
-      pair.append(from, between, to);
-      const useSelected = button("使用星图中已选条目", "query-inline-link");
-      useSelected.hidden = !this.options.selectedEntity;
-      useSelected.addEventListener("click", () => void this.options.selectedEntity?.().then((entity) => {
-        if (!entity) throw new TypeError("星图中还没有选中条目");
-        if (refOwner(entity.ref) === "episode") throw new TypeError("分集不能用于关联比较或路径");
-        if (!session.from) session.from = entity;
-        else session.to = entity;
-        this.labels.set(entity.ref, entity.label);
-        render();
-      }).catch(this.options.reportError));
-      const error = document.createElement("p");
-      error.className = "query-popover-error";
-      const save = button(kind === "comparison" ? "比较" : "查找路径", "query-primary");
-      save.addEventListener("click", () => {
-        if (!session.from || !session.to) {
-          error.textContent = "请选择两个条目";
-          return;
-        }
-        this.commitPanelAction(kind === "comparison"
-          ? { type: "setComparison", from: session.from.ref, to: session.to.ref }
-          : {
-              type: "setPath", from: session.from.ref, to: session.to.ref,
-              maxHops: session.maxHops, maxPaths: session.maxPaths,
-            });
-      });
-      body.append(pair, useSelected, save, error);
-    });
-    render();
-  }
-
   private openEntityPicker(
     title: string,
     owners: readonly Owner[],
@@ -2050,11 +3147,6 @@ export class QueryBar {
       const hint = document.createElement("p");
       hint.className = "query-popover-hint";
       hint.textContent = `搜索${owners.map((owner) => OWNER_LABEL[owner]).join("、")}名称`;
-      if (back) {
-        const backButton = button("← 返回", "query-inline-link");
-        backButton.addEventListener("click", back);
-        body.append(backButton);
-      }
       if (this.options.selectedEntity) {
         const selected = button("使用星图中已选条目", "query-secondary");
         selected.addEventListener("click", () => void this.options.selectedEntity?.().then((entity) => {
@@ -2066,20 +3158,114 @@ export class QueryBar {
       }
       let choices: HTMLButtonElement[] = [];
       let activeIndex = -1;
+      let paintedActiveIndex = -1;
+      let buffered: EntitySuggestion[] = [];
+      let iterator: AsyncIterator<EntitySuggestionBatch> | null = null;
+      let streamController: AbortController | null = null;
+      let streamComplete = true;
+      let loading = false;
+      let failure = "";
       const syncActive = (scroll = false): void => {
-        choices.forEach((choice, index) => {
-          const active = index === activeIndex;
-          choice.setAttribute("aria-selected", String(active));
-          if (active && scroll) choice.scrollIntoView({ block: "nearest" });
-        });
+        if (paintedActiveIndex !== activeIndex)
+          choices[paintedActiveIndex]?.setAttribute("aria-selected", "false");
         const active = choices[activeIndex];
-        if (active) search.setAttribute("aria-activedescendant", active.id);
-        else search.removeAttribute("aria-activedescendant");
+        if (active) {
+          active.setAttribute("aria-selected", "true");
+          search.setAttribute("aria-activedescendant", active.id);
+          if (scroll) active.scrollIntoView({ block: "nearest" });
+        } else search.removeAttribute("aria-activedescendant");
+        paintedActiveIndex = activeIndex;
         search.setAttribute("aria-expanded", String(choices.length > 0));
+      };
+      const syncHint = (): void => {
+        const found = choices.length + buffered.length;
+        if (failure) hint.textContent = failure;
+        else if (loading) hint.textContent = found
+          ? `已找到 ${found} 个，正在继续查找…`
+          : "正在查找…";
+        else if (streamComplete) hint.textContent = found
+          ? `共 ${found} 个结果`
+          : "没有找到条目";
+        else hint.textContent = `已找到 ${found} 个，继续滚动查看`;
+      };
+      const appendBuffered = (): void => {
+        const items = buffered.splice(0, ENTITY_SUGGESTION_RENDER_BATCH);
+        for (const item of items) {
+          const index = choices.length;
+          const choice = button("", "query-entity-suggestion");
+          choice.setAttribute("role", "option");
+          choice.id = `${results.id}-option-${index}`;
+          const name = document.createElement("strong");
+          name.textContent = item.label;
+          const detail = document.createElement("span");
+          detail.textContent = item.detail || OWNER_LABEL[item.owner];
+          choice.append(name, detail);
+          choice.addEventListener("pointermove", () => {
+            activeIndex = index;
+            syncActive();
+          });
+          choice.addEventListener("focus", () => {
+            activeIndex = index;
+            syncActive();
+          });
+          choice.addEventListener("click", () => pick(item));
+          choices.push(choice);
+          results.append(choice);
+        }
+        if (activeIndex < 0 && choices.length) activeIndex = 0;
+        syncActive();
+        syncHint();
+      };
+      const loadNext = async (): Promise<void> => {
+        const controller = streamController;
+        const source = iterator;
+        if (
+          loading || streamComplete || !controller || !source ||
+          controller.signal.aborted
+        ) return;
+        loading = true;
+        syncHint();
+        try {
+          const next = await source.next();
+          if (
+            controller.signal.aborted ||
+            this.suggestionController !== controller ||
+            streamController !== controller
+          ) return;
+          if (next.done) streamComplete = true;
+          else {
+            buffered.push(...next.value.items);
+            streamComplete = next.value.complete;
+          }
+          appendBuffered();
+        } catch (error) {
+          if (!controller.signal.aborted) {
+            failure = error instanceof Error ? error.message : "条目搜索失败";
+            streamComplete = true;
+          }
+        } finally {
+          if (streamController === controller) {
+            loading = false;
+            syncHint();
+          }
+        }
+      };
+      const revealMore = (): void => {
+        if (buffered.length) appendBuffered();
+        else void loadNext();
       };
       search.addEventListener("keydown", (event) => {
         if (event.key === "ArrowDown" || event.key === "ArrowUp") {
           event.preventDefault();
+          if (
+            event.key === "ArrowDown" &&
+            activeIndex === choices.length - 1 &&
+            (buffered.length || !streamComplete)
+          ) {
+            const before = choices.length;
+            revealMore();
+            if (choices.length === before) return;
+          }
           activeIndex = moveSuggestionIndex(activeIndex, choices.length, event.key);
           syncActive(true);
           return;
@@ -2089,21 +3275,24 @@ export class QueryBar {
           choices[activeIndex]!.click();
           return;
         }
-        if (event.key === "Escape") {
-          event.preventDefault();
-          event.stopPropagation();
-          if (back) back();
-          else {
-            this.closePanel();
-            this.focus();
-          }
-        }
+      });
+      results.addEventListener("scroll", () => {
+        if (
+          results.scrollTop + results.clientHeight >= results.scrollHeight - 48
+        ) revealMore();
       });
       const update = (): void => {
         this.cancelSuggestions();
         results.replaceChildren();
         choices = [];
         activeIndex = -1;
+        paintedActiveIndex = -1;
+        buffered = [];
+        iterator = null;
+        streamController = null;
+        streamComplete = true;
+        loading = false;
+        failure = "";
         syncActive();
         const text = search.value.trim();
         if (literalCount(text) < 2) {
@@ -2117,45 +3306,28 @@ export class QueryBar {
         hint.textContent = "正在查找…";
         const controller = new AbortController();
         this.suggestionController = controller;
+        streamController = controller;
         this.suggestionTimer = setTimeout(() => {
           this.suggestionTimer = null;
-          void this.options.suggestEntities!(text, owners, controller.signal).then((items) => {
-            if (controller.signal.aborted) return;
-            hint.textContent = items.length ? "" : "没有找到条目";
-            for (const [index, item] of items.entries()) {
-              const choice = button("", "query-entity-suggestion");
-              choice.setAttribute("role", "option");
-              choice.id = `${results.id}-option-${index}`;
-              const name = document.createElement("strong");
-              name.textContent = item.label;
-              const detail = document.createElement("span");
-              detail.textContent = item.detail || OWNER_LABEL[item.owner];
-              choice.append(name, detail);
-              choice.addEventListener("pointermove", () => {
-                activeIndex = index;
-                syncActive();
-              });
-              choice.addEventListener("focus", () => {
-                activeIndex = index;
-                syncActive();
-              });
-              choice.addEventListener("click", () => pick(item));
-              results.append(choice);
-            }
-            choices = [...results.querySelectorAll<HTMLButtonElement>("[role=option]")];
-            activeIndex = choices.length ? 0 : -1;
-            syncActive();
-          }).catch((error) => {
-            if (!controller.signal.aborted) {
-              hint.textContent = error instanceof Error ? error.message : "条目搜索失败";
-            }
-          });
+          try {
+            iterator = this.options.suggestEntities!(
+              text,
+              owners,
+              controller.signal,
+            )[Symbol.asyncIterator]();
+            streamComplete = false;
+            void loadNext();
+          } catch (error) {
+            failure = error instanceof Error ? error.message : "条目搜索失败";
+            streamComplete = true;
+            syncHint();
+          }
         }, 120);
       };
       search.addEventListener("input", update);
       body.prepend(search, hint, results);
       queueMicrotask(() => search.focus());
-    });
+    }, "editor", back);
   }
 
   private cancelSuggestions(): void {

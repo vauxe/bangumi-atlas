@@ -113,6 +113,8 @@ export interface Geometry {
 
 export type EntityKind = 1 | 2 | 3;
 
+export type TagVocabularyField = "metaTags" | "tags";
+
 export type NameRow = [
   original: string,
   chinese: string | null,

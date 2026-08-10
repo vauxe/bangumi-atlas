@@ -19,6 +19,7 @@ import { esc, html, raw } from "./html";
 import { factLabel, factPrimaryOther } from "./neighbors";
 import { state } from "./store";
 import { bgmUrl, TYPE_NAMES, eid, etype } from "./types";
+import { careerValueLabel } from "./value-labels";
 import type {
   EpisodeRecord,
   Fact,
@@ -604,7 +605,7 @@ export class Drawer {
       if (e.collects) bits.push(`收藏 ${e.collects}`);
       if (e.comments) bits.push(`评论 ${e.comments}`);
       if (e.kind === "person" && e.career.length)
-        bits.push(e.career.join("/"));
+        bits.push(e.career.map(careerValueLabel).join("/"));
     }
     return bits;
   }
@@ -761,7 +762,7 @@ export class Drawer {
               ${raw(
                 entity?.kind === "person" && entity.career.length
                   ? html`<div class="fact-wide"><dt>职业</dt>
-                      <dd>${entity.career.join(" / ")}</dd></div>`
+                      <dd>${entity.career.map(careerValueLabel).join(" / ")}</dd></div>`
                   : "",
               )}
             </dl>

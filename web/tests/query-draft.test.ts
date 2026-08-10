@@ -20,6 +20,7 @@ import {
   undoQueryHistory,
   type QueryDraft,
 } from "../src/query/draft";
+import { validateQuery } from "../src/query/validate";
 
 test("starts with one canonical scope across works, people, and characters", () => {
   assert.deepEqual(DEFAULT_ENTITY_SCOPE, ["subject", "person", "character"]);
@@ -50,6 +51,28 @@ test("lowers and lifts a multi-entity name query without hidden limits", () => {
   assert.equal(section.query.operators[section.query.root]?.kind, "union");
   assert.deepEqual(queryDraftFromBundle(bundle), draft);
   assert.deepEqual(queryDraftFromBundle(normalizeBundle(bundle)), draft);
+});
+
+test("lowers one semantic body condition through each entity's own text field", () => {
+  const draft: QueryDraft = {
+    kind: "list",
+    query: {
+      scope: ["subject", "episode"],
+      text: { value: "机器人", capability: "lookup" },
+      fullText: { value: "未来" },
+    },
+  };
+
+  const bundle = compileQueryDraft(draft);
+  const section = bundle.sections.results;
+  assert.ok(section);
+  const fullTextFields = Object.values(section.query.operators)
+    .filter((operator) => operator.kind === "fullText")
+    .map((operator) => operator.field)
+    .sort();
+
+  assert.deepEqual(fullTextFields, ["description", "summary"]);
+  assert.deepEqual(queryDraftFromBundle(bundle), draft);
 });
 
 test("keeps original and Chinese names in a multi-entity result", async () => {
@@ -97,6 +120,142 @@ test("keeps original and Chinese names in a multi-entity result", async () => {
   });
   assert.equal(rows.get("person:2")?.nameCn, null);
   assert.equal(rows.get("character:3")?.nameCn, null);
+});
+
+test("sorts a multi-entity result without changing its entity scope", () => {
+  const draft: QueryDraft = {
+    kind: "list",
+    query: {
+      scope: ["subject", "episode"],
+      orderBy: [{ column: "year", direction: "desc", nulls: "last" }],
+    },
+  };
+
+  const bundle = compileQueryDraft(draft);
+  const section = bundle.sections.results;
+  assert.ok(section);
+  assert.doesNotThrow(() => validateQuery(section.query));
+  assert.deepEqual(queryDraftFromBundle(bundle), draft);
+});
+
+test("sorts a mixed result by an entity-specific field without filtering other entities", async () => {
+  const draft: QueryDraft = {
+    kind: "list",
+    query: {
+      scope: ["subject", "person", "character"],
+      orderBy: [{
+        column: "score",
+        owners: ["subject"],
+        direction: "desc",
+        nulls: "last",
+      }],
+    },
+  };
+  const entities: EntityValue[] = [
+    {
+      kind: "entity",
+      owner: "subject",
+      ref: "subject:1",
+      fields: { name: "作品 A", nameCn: null, score: 8 },
+    },
+    {
+      kind: "entity",
+      owner: "subject",
+      ref: "subject:2",
+      fields: { name: "作品 B", nameCn: null, score: 9 },
+    },
+    {
+      kind: "entity",
+      owner: "person",
+      ref: "person:3",
+      fields: { name: "人物" },
+    },
+    {
+      kind: "entity",
+      owner: "character",
+      ref: "character:4",
+      fields: { name: "角色" },
+    },
+  ];
+  const source: QueryDataSource = {
+    scan: async function* (owner) {
+      yield* entities.filter((entity) => entity.owner === owner);
+    },
+  };
+
+  const bundle = compileQueryDraft(draft);
+  const section = bundle.sections.results;
+  assert.ok(section);
+  assert.doesNotThrow(() => validateQuery(section.query));
+  const result = await executeQuery(
+    section.query,
+    section.parameterValues ?? {},
+    source,
+    { pageSize: 10 },
+  );
+
+  assert.deepEqual(result.rows.slice(0, 2).map((row) => row.ref), [
+    "subject:2",
+    "subject:1",
+  ]);
+  assert.deepEqual(
+    new Set(result.rows.slice(2).map((row) => row.ref)),
+    new Set(["person:3", "character:4"]),
+  );
+  assert.equal(result.rows.every((row) => Object.keys(row).every((key) => !key.startsWith("__sort:"))), true);
+  assert.deepEqual(queryDraftFromBundle(bundle), draft);
+});
+
+test("keeps sort intent valid while the entity scope changes", () => {
+  const subjectScore: QueryDraft = {
+    kind: "list",
+    query: {
+      scope: ["subject"],
+      orderBy: [{ column: "score", direction: "desc", nulls: "last" }],
+    },
+  };
+  const widened = applyQueryAction(subjectScore, {
+    type: "setScope",
+    scope: ["subject", "person", "character"],
+  });
+  assert.deepEqual(widened, {
+    kind: "list",
+    query: {
+      scope: ["subject", "person", "character"],
+      orderBy: [{
+        column: "score",
+        owners: ["subject"],
+        direction: "desc",
+        nulls: "last",
+      }],
+    },
+  });
+
+  assert.deepEqual(applyQueryAction(widened, {
+    type: "setScope",
+    scope: ["person", "character"],
+  }), {
+    kind: "list",
+    query: { scope: ["person", "character"] },
+  });
+
+  const sharedName: QueryDraft = {
+    kind: "list",
+    query: {
+      scope: ["subject"],
+      orderBy: [{ column: "name", direction: "asc", nulls: "first" }],
+    },
+  };
+  assert.deepEqual(applyQueryAction(sharedName, {
+    type: "setScope",
+    scope: ["subject", "person", "character"],
+  }), {
+    kind: "list",
+    query: {
+      scope: ["subject", "person", "character"],
+      orderBy: [{ column: "name", direction: "asc", nulls: "first" }],
+    },
+  });
 });
 
 test("narrows a multi-entity query and adds a type-specific condition atomically", () => {
@@ -323,6 +482,21 @@ test("changing entity scope keeps meaning or reports an incompatibility", () => 
     type: "setOwner",
     owner: "person",
   }), /人物不支持当前查询片段/);
+
+  const withBody: QueryDraft = {
+    kind: "list",
+    query: {
+      scope: ["subject"],
+      fullText: { value: "星空" },
+    },
+  };
+  assert.deepEqual(applyQueryAction(withBody, {
+    type: "setOwner",
+    owner: "episode",
+  }), {
+    kind: "list",
+    query: { scope: ["episode"], fullText: { value: "星空" } },
+  });
 });
 
 test("changing statistic entity keeps its complete meaning or reports a conflict", () => {
@@ -408,4 +582,21 @@ test("keeps all published long text in the list answer shape", () => {
     type: "setAllText",
     text: "星",
   }), /至少需要/);
+});
+
+test("validates scoped and standalone body text at the QueryDraft boundary", () => {
+  assert.throws(() => applyQueryAction(defaultQueryDraft(), {
+    type: "setFullText",
+    fullText: { value: "星" },
+  }), /至少需要/);
+  assert.deepEqual(applyQueryAction(defaultQueryDraft("subject"), {
+    type: "setFullText",
+    fullText: { value: "  星空  " },
+  }), {
+    kind: "list",
+    query: {
+      scope: ["subject"],
+      fullText: { value: "星空" },
+    },
+  });
 });

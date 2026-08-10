@@ -83,8 +83,10 @@ test("maps the existing complete structural entity to query fields", async () =>
       doing: 3,
       onHold: 4,
       dropped: 5,
+      totalCollections: 15,
       series: true,
       scoreDetails: subject.scoreDetails,
+      ratingCount: 6,
       metaTags: ["TV"],
       tags: [
         { name: "科幻", count: 100 },
@@ -95,6 +97,53 @@ test("maps the existing complete structural entity to query fields", async () =>
       hasInfobox: false,
     },
   }]);
+});
+
+test("derives Subject totals while projecting only their existing source fields", async () => {
+  let requested: readonly string[] = [];
+  const reader: SiteQueryReader = {
+    entities: async function* () {
+      throw new Error("full entity scan should not run");
+    },
+    projectEntities: async function* (_owner, fields) {
+      requested = fields;
+      yield {
+        kind: "subject",
+        key: key(1, 3),
+        fields: {
+          scoreDetails: subject.scoreDetails,
+          wish: 1,
+          done: 2,
+          doing: 3,
+          onHold: 4,
+          dropped: 5,
+        },
+      };
+    },
+    entity: async () => subject,
+    factsFor: async () => ({ items: [], total: 0, next: null }),
+  };
+  const source = new SiteQueryDataSource(reader);
+  const rows = [];
+
+  for await (const entity of source.scan(
+    "subject",
+    undefined,
+    ["ratingCount", "totalCollections"],
+  )) rows.push(entity);
+
+  assert.deepEqual(requested, [
+    "scoreDetails",
+    "wish",
+    "done",
+    "doing",
+    "onHold",
+    "dropped",
+  ]);
+  assert.deepEqual(rows[0]?.fields, {
+    ratingCount: 6,
+    totalCollections: 15,
+  });
 });
 
 test("decodes a projected platform without leaking its physical context fields", async () => {

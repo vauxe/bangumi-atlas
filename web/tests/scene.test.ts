@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { NodeStyleExtension, queryHighlightItems, Scene } from "../src/scene";
+import {
+  interactionHint,
+  NodeStyleExtension,
+  queryHighlightItems,
+  Scene,
+} from "../src/scene";
 import { FOCUS_ZOOM } from "../src/camera";
 import type { OrbitState } from "../src/camera";
 import { state } from "../src/store";
@@ -12,6 +18,65 @@ const projectedCommonPixels = (
   minPixels: number,
   maxPixels: number,
 ): number => Math.min(Math.max(value * 2 ** zoom, minPixels), maxPixels);
+
+test("keeps one desktop graph interaction model and documents its controls", () => {
+  const sceneSource = readFileSync("src/scene.ts", "utf8");
+  const mainSource = readFileSync("src/main.ts", "utf8");
+  const pageSource = readFileSync("../site/index.html", "utf8");
+
+  assert.doesNotMatch(sceneSource, /addEventListener\(\s*["']dblclick["']/);
+  assert.doesNotMatch(mainSource, /双击/);
+  for (const operation of [
+    "拖动平移",
+    "右键拖动旋转",
+    "滚轮缩放",
+    "单击查看",
+    "S 搜索",
+    "T 俯视",
+    "R 复位",
+  ]) assert.match(`${mainSource}\n${sceneSource}`, new RegExp(operation));
+  assert.doesNotMatch(sceneSource, /touchRotate/);
+  assert.doesNotMatch(mainSource, /coarsePointer|\(pointer:\s*coarse\)/);
+  assert.doesNotMatch(pageSource, /@media\s*\(max-width:/);
+  assert.equal(
+    interactionHint(true),
+    "拖动平移 · 右键拖动旋转 · 滚轮缩放 · 单击查看 · S 搜索 · T 俯视 · R 复位 · 单击空白或 Esc 取消选择",
+  );
+  assert.equal(
+    interactionHint(false),
+    "拖动平移 · 右键拖动旋转 · 滚轮缩放 · 单击查看 · S 搜索 · T 俯视 · R 复位",
+  );
+});
+
+test("keeps the desktop shell fluid without resolution-specific breakpoints", () => {
+  const pageSource = readFileSync("../site/index.html", "utf8");
+  const root = pageSource.match(/:root\s*\{(?<body>[^}]*)\}/s)
+    ?.groups?.body ?? "";
+  const drawerOpen = pageSource.match(
+    /body:has\(#drawer\.open\)\s*\{(?<body>[^}]*)\}/s,
+  )?.groups?.body ?? "";
+  const queryDock = pageSource.match(/#query-dock\s*\{(?<body>[^}]*)\}/s)
+    ?.groups?.body ?? "";
+  const drawer = pageSource.match(/#drawer\s*\{(?<body>[^}]*)\}/s)
+    ?.groups?.body ?? "";
+  const legend = pageSource.match(/#legend\s*\{(?<body>[^}]*)\}/s)
+    ?.groups?.body ?? "";
+
+  assert.match(root, /--drawer-width:\s*min\(100dvw,\s*clamp\(/);
+  assert.match(drawerOpen, /--occupied-right:\s*var\(--drawer-width\)/);
+  assert.match(queryDock, /display:\s*grid/);
+  assert.match(
+    queryDock,
+    /grid-template-columns:\s*minmax\(0,\s*var\(--query-max-width\)\)\s+var\(--floating-action-size\)/,
+  );
+  assert.match(
+    queryDock,
+    /100dvw\s*-\s*var\(--occupied-right\)\s*-\s*var\(--page-inset\)\s*-\s*var\(--page-inset\)/,
+  );
+  assert.match(drawer, /width:\s*var\(--drawer-width\)/);
+  assert.match(legend, /100dvw\s*-\s*var\(--occupied-right\)/);
+  assert.doesNotMatch(pageSource, /@media\s*\([^)]*(?:width|resolution)/);
+});
 
 test("commits the final camera frame after the view callback returns", async () => {
   const events: string[] = [];

@@ -198,6 +198,44 @@ test("executes typed scan, filter, project, order, and semantic limit", async ()
   }]);
 });
 
+test("uses hidden projection columns for sorting without leaking them to results", async () => {
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v2",
+    root: "project",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "subject", binding: "subject" },
+      project: {
+        kind: "project",
+        input: "scan",
+        columns: [
+          {
+            name: "ref",
+            value: { kind: "field", binding: "subject", field: "ref" },
+          },
+          {
+            name: "score",
+            value: { kind: "field", binding: "subject", field: "score" },
+            hidden: true,
+          },
+        ],
+      },
+    },
+    orderBy: [{ column: "score", direction: "desc", nulls: "last" }],
+    limit: 3,
+  };
+
+  const result = await executeQuery(query, {}, source, { pageSize: 20 });
+
+  assert.deepEqual(result.rows, [
+    { ref: "subject:4" },
+    { ref: "subject:3" },
+    { ref: "subject:1" },
+  ]);
+  assert.deepEqual(Object.keys(result.columns), ["ref"]);
+  assert.equal(result.evidence.some((row) => "score" in row), false);
+});
+
 test("accepts pagination offsets without an arbitrary product maximum", async () => {
   const result = await executeQuery(rankedSubjects, { minimum: 8 }, source, {
     pageSize: 1,
@@ -251,6 +289,40 @@ test("applies projection before distinct and semantic limit", async () => {
   assert.equal(result.totalMatches, 2);
   assert.equal(result.visibleMatches, 2);
   assert.equal(result.hasMore, false);
+});
+
+test("keeps hidden sort columns out of distinct result identity", async () => {
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v2",
+    root: "project",
+    parameters: {},
+    operators: {
+      values: {
+        kind: "values",
+        columns: ["n", "sortKey"],
+        rows: [[1, 2], [1, 1], [2, 0]],
+      },
+      project: {
+        kind: "project",
+        input: "values",
+        columns: [
+          { name: "n", value: { kind: "column", name: "n" } },
+          {
+            name: "sortKey",
+            value: { kind: "column", name: "sortKey" },
+            hidden: true,
+          },
+        ],
+      },
+    },
+    distinct: true,
+    orderBy: [{ column: "sortKey", direction: "asc", nulls: "last" }],
+  };
+
+  const result = await executeQuery(query, {}, source, { pageSize: 20 });
+
+  assert.deepEqual(result.rows, [{ n: 2 }, { n: 1 }]);
+  assert.equal(result.totalMatches, 2);
 });
 
 test("stops an unordered stable scan at the semantic result limit", async () => {

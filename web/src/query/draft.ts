@@ -4,8 +4,15 @@ import {
   type QueryBundle,
   type QuerySection,
 } from "./bundle";
-import { QUERY_CONTRACT, type Owner } from "./contract";
+import {
+  assertFieldCapability,
+  fieldsWithCapability,
+  QUERY_CONTRACT,
+  type Owner,
+} from "./contract";
 import type {
+  FullTextField,
+  OrderTerm,
   ParameterType,
   ParameterValues,
   QueryDocument,
@@ -26,7 +33,7 @@ import {
   fullTextRecipe,
   pathRecipe,
 } from "./recipes";
-import { FIELD_LABEL } from "./workbench-model";
+import { FIELD_LABEL, sameSortFieldSemantics } from "./workbench-model";
 import { OWNER_LABEL } from "./vocabulary";
 
 export type EntityRef = `${Owner}:${number}`;
@@ -57,9 +64,32 @@ export function normalizeEntityScope(owners: Iterable<Owner>): EntityScope {
   return scope as unknown as EntityScope;
 }
 
-export type ListQuery = Omit<ExplorerQuery, "owner" | "aggregate"> & {
+export interface ScopedOrderTerm extends OrderTerm {
+  /** Entity types for which this field has the stated meaning. Omitted means the whole scope. */
+  owners?: Owner[];
+}
+
+export interface ScopedFullText {
+  value: string;
+  parameter?: string;
+}
+
+export function normalizeFullTextValue(value: string): string {
+  const text = value.trim();
+  if (!text) throw new TypeError("请输入要查找的内容");
+  if ([...text].length < QUERY_CONTRACT.search.fullText.minNormalizedCharacters)
+    throw new TypeError("关键词至少需要两个字");
+  return text;
+}
+
+export type ListQuery = Omit<
+  ExplorerQuery,
+  "owner" | "aggregate" | "orderBy" | "fullText"
+> & {
   scope: EntityScope;
+  fullText?: ScopedFullText;
   aggregate?: undefined;
+  orderBy?: ScopedOrderTerm[];
 };
 
 export type AggregateQuery = Omit<ExplorerQuery, "aggregate"> & {
@@ -87,6 +117,7 @@ export type QueryAction =
   | { type: "setOwner"; owner: Owner }
   | { type: "setAllText"; text: string }
   | ({ type: "setText"; text: ExplorerQuery["text"] | undefined } & OwnerTarget)
+  | ({ type: "setFullText"; fullText: ScopedFullText | undefined } & OwnerTarget)
   | ({ type: "setCondition"; condition: ExplorerCondition | undefined } & OwnerTarget)
   | ({ type: "addCondition"; condition: ExplorerCondition } & OwnerTarget)
   | { type: "replaceCondition"; index: number; condition: ExplorerCondition }
@@ -96,7 +127,7 @@ export type QueryAction =
   | { type: "replaceRelation"; index: number; relation: ExplorerRelation }
   | { type: "removeRelation"; index: number }
   | ({ type: "setColumns"; columns: string[] | undefined } & OwnerTarget)
-  | ({ type: "setOrder"; orderBy: ExplorerQuery["orderBy"] } & OwnerTarget)
+  | { type: "setOrder"; orderBy: ExplorerQuery["orderBy"] }
   | { type: "setLimit"; limit: number | undefined }
   | ({ type: "setAggregate"; aggregate: ExplorerAggregate } & OwnerTarget)
   | { type: "setList"; owner?: Owner }
@@ -227,17 +258,87 @@ function queryFragmentLabels(query: ListQuery): string[] {
   const fields = [
     ...conditionFields(query.condition),
     ...(query.columns ?? []),
-    ...(query.orderBy ?? []).map((item) => item.column),
   ];
   const labels = fields.map((field) => FIELD_LABEL[field] ?? field);
+  for (const order of query.orderBy ?? []) {
+    const field = FIELD_LABEL[order.column] ?? order.column;
+    labels.push(order.owners?.length
+      ? `${order.owners.map((owner) => OWNER_LABEL[owner]).join("、")} · ${field}`
+      : field);
+  }
   if (query.relations?.length) labels.push("关联条件");
-  if (query.text?.capability === "fullText") labels.push("正文范围");
+  if (query.fullText) labels.push("简介或分集介绍");
   return [...new Set(labels)];
 }
 
+function fullTextField(owner: Owner): FullTextField {
+  const fields = fieldsWithCapability(owner, "fullText") as FullTextField[];
+  if (fields.length !== 1)
+    throw new TypeError(`${OWNER_LABEL[owner]}没有唯一的可检索内容字段`);
+  return fields[0]!;
+}
+
+function scopedOrderOwners(
+  order: ScopedOrderTerm,
+  scope: EntityScope,
+): Owner[] {
+  const requested = order.owners ?? [...scope];
+  if (!requested.length || new Set(requested).size !== requested.length)
+    throw new TypeError("排序字段的实体范围不能为空或重复");
+  const owners = scope.filter((owner) => requested.includes(owner));
+  if (owners.length !== requested.length)
+    throw new TypeError("排序字段的实体范围不在当前查询范围内");
+  for (const owner of owners) assertFieldCapability(owner, order.column, "sort");
+  if (owners.slice(1).some((owner) =>
+    !sameSortFieldSemantics(owners[0]!, owner, order.column)
+  )) throw new TypeError("排序字段在所选实体中含义不一致");
+  return owners;
+}
+
+function orderByForScope(
+  query: ListQuery,
+  scope: EntityScope,
+): ScopedOrderTerm[] {
+  return (query.orderBy ?? []).flatMap((order) => {
+    const previousOwners = order.owners ?? [...query.scope];
+    const owners = scope.filter((owner) => previousOwners.includes(owner));
+    if (!owners.length) return [];
+    if (!order.owners) {
+      try {
+        scopedOrderOwners({ ...order, owners: [...scope] }, scope);
+        return [{ ...order }];
+      } catch {
+        // A field that cannot cover newly added entity types keeps its old meaning.
+      }
+    }
+    const { owners: _previous, ...plain } = order;
+    return owners.length === scope.length
+      ? [plain]
+      : [{ ...plain, owners, nulls: "last" as const }];
+  });
+}
+
 function explorerOf(query: ListQuery, owner: Owner): ExplorerQuery {
-  const { scope: _scope, aggregate: _aggregate, ...rest } = query;
-  return { owner, ...rest };
+  const {
+    scope: _scope,
+    aggregate: _aggregate,
+    orderBy: scopedOrderBy,
+    fullText,
+    ...rest
+  } = query;
+  const orderBy = (scopedOrderBy ?? []).flatMap((order) => {
+    if (!scopedOrderOwners(order, query.scope).includes(owner)) return [];
+    const { owners: _owners, ...plain } = order;
+    return [plain];
+  });
+  return {
+    owner,
+    ...rest,
+    ...(fullText
+      ? { fullText: { ...fullText, field: fullTextField(owner) } }
+      : {}),
+    ...(orderBy.length ? { orderBy } : {}),
+  };
 }
 
 function assertScopeCompatible(query: ListQuery): void {
@@ -276,11 +377,7 @@ export function applyQueryAction(
 ): QueryDraft {
   if (action.type === "replace") return checked(action.draft);
   if (action.type === "setAllText") {
-    const text = action.text.trim();
-    if (!text) throw new TypeError("请输入要搜索的正文");
-    if ([...text].length < QUERY_CONTRACT.search.fullText.minNormalizedCharacters)
-      throw new TypeError("正文关键词至少需要两个字");
-    return { kind: "list", allText: text };
+    return { kind: "list", allText: normalizeFullTextValue(action.text) };
   }
   if (action.type === "setComparison")
     return { kind: "comparison", from: action.from, to: action.to };
@@ -295,9 +392,12 @@ export function applyQueryAction(
   if (action.type === "setScope") {
     if (draft.kind !== "list" || !draft.query)
       throw new TypeError("只有实体列表可以选择多个实体类型");
+    const scope = normalizeEntityScope(action.scope);
+    const { orderBy: _previous, ...query } = draft.query;
+    const orderBy = orderByForScope(draft.query, scope);
     return checked({
       kind: "list",
-      query: { ...draft.query, scope: normalizeEntityScope(action.scope) },
+      query: { ...query, scope, ...(orderBy.length ? { orderBy } : {}) },
     });
   }
   if (action.type === "setOwner") {
@@ -338,6 +438,35 @@ export function applyQueryAction(
         ...rest,
         ...(action.text ? { text: action.text } : {}),
       });
+      break;
+    }
+    case "setFullText": {
+      const fullText = action.fullText
+        ? {
+            ...action.fullText,
+            value: normalizeFullTextValue(action.fullText.value),
+          }
+        : undefined;
+      if (current.kind === "aggregate") {
+        const { fullText: _previous, ...rest } = query as AggregateQuery;
+        result = replaceListQuery(current, {
+          ...rest,
+          ...(fullText
+            ? {
+                fullText: {
+                  ...fullText,
+                  field: fullTextField(rest.owner),
+                },
+              }
+            : {}),
+        });
+      } else {
+        const { fullText: _previous, ...rest } = query as ListQuery;
+        result = replaceListQuery(current, {
+          ...rest,
+          ...(fullText ? { fullText } : {}),
+        });
+      }
       break;
     }
     case "setCondition":
@@ -421,10 +550,17 @@ export function applyQueryAction(
         orderBy: _orderBy,
         ...rest
       } = query;
-      const { scope: _scope, ...selection } = rest as ListQuery;
+      const { scope: _scope, fullText, ...selection } = rest as ListQuery;
       result = {
         kind: "aggregate",
-        query: { ...selection, owner, aggregate: action.aggregate },
+        query: {
+          ...selection,
+          owner,
+          ...(fullText
+            ? { fullText: { ...fullText, field: fullTextField(owner) } }
+            : {}),
+          aggregate: action.aggregate,
+        },
       };
       break;
     }
@@ -489,10 +625,25 @@ function compileScopedList(query: ListQuery): QueryBundle {
   if (query.scope.length === 1)
     return compileExplorerQuery(explorerOf(query, query.scope[0]!));
 
-  const fields = [...new Set([
+  const visibleFields = [...new Set([
     ...MULTI_SCOPE_FIELDS,
     ...(query.columns ?? []),
   ])];
+  const visible = new Set(visibleFields);
+  const sorts = (query.orderBy ?? []).map((order) => {
+    const owners = scopedOrderOwners(order, query.scope);
+    const output = owners.length === query.scope.length
+      ? order.column
+      : `__sort:${owners.join("+")}:${order.column}`;
+    return { order, owners, output };
+  });
+  if (new Set(sorts.map(({ output }) => output)).size !== sorts.length)
+    throw new TypeError("排序字段不能重复");
+  const hiddenSorts = sorts.filter(({ output }) => !visible.has(output));
+  const outputFields = [
+    ...visibleFields,
+    ...hiddenSorts.map(({ output }) => output),
+  ];
   const operators: Record<string, QueryOperator> = {};
   const parameters: Record<string, ParameterType> = {};
   const parameterValues: ParameterValues = {};
@@ -504,9 +655,15 @@ function compileScopedList(query: ListQuery): QueryBundle {
       QUERY_CONTRACT.owners[owner].fields,
       "nameCn",
     );
-    const ownerFields = hasNameCn
-      ? fields
-      : fields.filter((field) => field !== "nameCn");
+    const ownerVisibleFields = hasNameCn
+      ? visibleFields
+      : visibleFields.filter((field) => field !== "nameCn");
+    const ownerFields = [...new Set([
+      ...ownerVisibleFields,
+      ...sorts
+        .filter((sort) => sort.owners.includes(owner))
+        .map((sort) => sort.order.column),
+    ])];
     const branch = compileExplorerQuery({
       ...explorerOf(query, owner),
       columns: ownerFields,
@@ -522,11 +679,18 @@ function compileScopedList(query: ListQuery): QueryBundle {
       kind: "project",
       input: `${prefix}${branch.query.root}`,
       columns: [
-        ...fields.map((field) => ({
+        ...visibleFields.map((field) => ({
           name: field,
           value: field === "nameCn" && !hasNameCn
             ? { kind: "literal" as const, value: null }
             : { kind: "column" as const, name: field },
+        })),
+        ...hiddenSorts.map((sort) => ({
+          name: sort.output,
+          value: sort.owners.includes(owner)
+            ? { kind: "column" as const, name: sort.order.column }
+            : { kind: "literal" as const, value: null },
+          hidden: true,
         })),
         {
           name: "entityType",
@@ -536,7 +700,7 @@ function compileScopedList(query: ListQuery): QueryBundle {
     };
     branches.push({
       input: shaped,
-      columns: [...fields, "entityType"].map((field) => ({
+      columns: [...outputFields, "entityType"].map((field) => ({
         output: field,
         input: field,
       })),
@@ -549,7 +713,11 @@ function compileScopedList(query: ListQuery): QueryBundle {
       root: "results",
       parameters,
       operators,
-      orderBy: query.orderBy ?? [],
+      orderBy: sorts.map(({ order, output }) => ({
+        column: output,
+        direction: order.direction,
+        nulls: order.nulls,
+      })),
       limit: query.limit ?? null,
     },
     ...(Object.keys(parameterValues).length ? { parameterValues } : {}),
@@ -632,7 +800,7 @@ function decompileScopedList(bundle: QueryBundle): QueryDraft | null {
       : null;
     if (!owner || owners.includes(owner)) return null;
     const fields = outer.columns
-      .filter((column) => column.name !== "entityType")
+      .filter((column) => column.name !== "entityType" && !column.hidden)
       .map((column) =>
         column.value.kind === "column" && column.value.name === column.name
           ? column.name
@@ -673,6 +841,31 @@ function decompileScopedList(bundle: QueryBundle): QueryDraft | null {
     branches.push(restored);
   }
   if (owners.length < 2 || !sharedFields) return null;
+  const orderBy: ScopedOrderTerm[] = [];
+  for (const order of section.query.orderBy ?? []) {
+    if (!order.column.startsWith("__sort:")) {
+      orderBy.push({ ...order });
+      continue;
+    }
+    const separator = order.column.indexOf(":", "__sort:".length);
+    if (separator < 0) return null;
+    const targeted = order.column
+      .slice("__sort:".length, separator)
+      .split("+") as Owner[];
+    if (
+      !targeted.length ||
+      targeted.some((owner) => !owners.includes(owner)) ||
+      normalizeEntityScope(targeted).join("+") !== targeted.join("+")
+    ) return null;
+    const column = order.column.slice(separator + 1);
+    if (!column) return null;
+    orderBy.push({
+      column,
+      owners: targeted,
+      direction: order.direction,
+      nulls: order.nulls,
+    });
+  }
   const first = branches[0];
   if (!first) return null;
   const comparable = (query: ExplorerQuery): unknown => {
@@ -682,9 +875,12 @@ function decompileScopedList(bundle: QueryBundle): QueryDraft | null {
       orderBy: _orderBy,
       limit: _limit,
       aggregate: _aggregate,
+      fullText,
       ...selection
     } = query;
-    return selection;
+    if (!fullText) return selection;
+    const { field: _field, ...scopedFullText } = fullText;
+    return { ...selection, fullText: scopedFullText };
   };
   if (branches.some((branch) => canonicalJson(comparable(branch)) !== canonicalJson(comparable(first))))
     return null;
@@ -694,17 +890,24 @@ function decompileScopedList(bundle: QueryBundle): QueryDraft | null {
     orderBy: _orderBy,
     limit: _limit,
     aggregate: _aggregate,
+    fullText,
     ...selection
   } = first;
+  const scopedSelection = fullText
+    ? (() => {
+        const { field: _field, ...scopedFullText } = fullText;
+        return { ...selection, fullText: scopedFullText };
+      })()
+    : selection;
   const implicitColumns = sharedFields.length === MULTI_SCOPE_FIELDS.length &&
     sharedFields.every((field, index) => field === MULTI_SCOPE_FIELDS[index]);
   const candidate: QueryDraft = {
     kind: "list",
     query: {
       scope: normalizeEntityScope(owners),
-      ...selection,
+      ...scopedSelection,
       ...(implicitColumns ? {} : { columns: sharedFields }),
-      ...(section.query.orderBy?.length ? { orderBy: section.query.orderBy } : {}),
+      ...(orderBy.length ? { orderBy } : {}),
       ...(section.query.limit === null || section.query.limit === undefined
         ? {}
         : { limit: section.query.limit }),
@@ -718,10 +921,19 @@ export function queryDraftFromBundle(bundle: QueryBundle): QueryDraft | null {
   if (scoped) return scoped;
   const restored = decompileExplorerQuery(bundle);
   if (restored) {
-    const { owner, orderBy, relations, limit, aggregate, ...base } = restored;
+    const {
+      owner,
+      orderBy,
+      relations,
+      limit,
+      aggregate,
+      fullText,
+      ...base
+    } = restored;
     const query: ExplorerQuery = {
       owner,
       ...base,
+      ...(fullText ? { fullText } : {}),
       ...(aggregate ? { aggregate } : {}),
       ...(relations?.length ? { relations } : {}),
       ...(orderBy?.length ? { orderBy } : {}),
@@ -734,6 +946,14 @@ export function queryDraftFromBundle(bundle: QueryBundle): QueryDraft | null {
           query: {
             ...base,
             scope: [owner],
+            ...(fullText
+              ? {
+                  fullText: {
+                    value: fullText.value,
+                    ...(fullText.parameter ? { parameter: fullText.parameter } : {}),
+                  },
+                }
+              : {}),
             ...(relations?.length ? { relations } : {}),
             ...(orderBy?.length ? { orderBy } : {}),
             ...(limit === undefined || limit === null ? {} : { limit }),
