@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -14,8 +13,6 @@ import ladybug as lb
 import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from scripts import build_db, site_release
 
@@ -143,6 +140,33 @@ class ParquetProjectionTests(unittest.TestCase):
                     side_effect=RuntimeError("interrupted"),
                 ),
                 self.assertRaisesRegex(RuntimeError, "interrupted"),
+            ):
+                build_db.build_parquet()
+
+            self.assertTrue(
+                (parquet / build_db.PARQUET_BUILD_MARKER).is_file()
+            )
+
+    def test_failed_generation_finalizer_leaves_blocking_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parquet = Path(directory) / "parquet"
+
+            def reject(_stats: dict[str, int]) -> None:
+                raise RuntimeError("semantic publication rejected")
+
+            with (
+                patch.object(
+                    build_db,
+                    "_build_parquet_unlocked",
+                    return_value={"Subject": 1},
+                ),
+                patch.object(build_db, "PARQUET", parquet),
+                patch.object(
+                    build_db,
+                    "finalize_parquet_generation",
+                    side_effect=reject,
+                ),
+                self.assertRaisesRegex(RuntimeError, "publication rejected"),
             ):
                 build_db.build_parquet()
 
@@ -278,6 +302,11 @@ class ParquetProjectionTests(unittest.TestCase):
                 patch.object(build_db, "DUMP", dump),
                 patch.object(build_db, "PARQUET", parquet),
                 patch.object(build_db, "load_mappings", return_value=mappings),
+                patch.object(
+                    build_db,
+                    "finalize_parquet_generation",
+                    return_value=None,
+                ),
             ):
                 build_db.build_parquet()
 
@@ -341,6 +370,11 @@ class ParquetProjectionTests(unittest.TestCase):
                 patch.object(build_db, "DUMP", dump),
                 patch.object(build_db, "PARQUET", parquet),
                 patch.object(build_db, "load_mappings", return_value=mappings),
+                patch.object(
+                    build_db,
+                    "finalize_parquet_generation",
+                    return_value=None,
+                ),
             ):
                 build_db.build_parquet()
                 first = build_db.unknown_codes.copy()
@@ -394,6 +428,33 @@ class EnumAnomalyGateTests(unittest.TestCase):
                 ):
                     build_db.report_unknown_codes()
 
+    def test_generation_is_semantically_verified_before_manifest(self) -> None:
+        stats = {"Subject": 1}
+        fingerprints = {"Subject": (1, "a" * 32, "b" * 32)}
+        with (
+            patch.object(build_db, "report_unknown_codes") as enum_gate,
+            patch.object(
+                build_db.source_projection,
+                "require_projection_matches",
+                return_value=fingerprints,
+            ) as semantic_gate,
+            patch.object(
+                build_db.parquet_provenance, "publish_generation"
+            ) as publish,
+        ):
+            build_db.finalize_parquet_generation(stats)
+
+        enum_gate.assert_called_once_with()
+        semantic_gate.assert_called_once_with(
+            dump=build_db.DUMP,
+            mappings=build_db.MAPPINGS,
+            parquet=build_db.PARQUET,
+        )
+        self.assertEqual(
+            publish.call_args.kwargs["projection_fingerprints"],
+            fingerprints,
+        )
+
 
 class DatabaseReplacementTests(unittest.TestCase):
     def test_failed_rebuild_preserves_live_database(self) -> None:
@@ -426,6 +487,51 @@ class DatabaseReplacementTests(unittest.TestCase):
 
             self.assertEqual(target.read_text(), "new")
             self.assertFalse((Path(directory) / ".bangumi.lb.build").exists())
+
+
+class PipelineGenerationLockTests(unittest.TestCase):
+    def test_main_holds_one_lock_through_projection_and_database(self) -> None:
+        events: list[str] = []
+
+        @contextmanager
+        def lock(_parquet: Path):
+            events.append("lock-enter")
+            try:
+                yield
+            finally:
+                events.append("lock-exit")
+
+        with (
+            patch.object(build_db, "parquet_layout_lock", lock),
+            patch.object(
+                build_db,
+                "fetch_mappings",
+                side_effect=lambda: events.append("mappings") or "revision",
+            ),
+            patch.object(
+                build_db,
+                "_build_parquet_locked",
+                side_effect=lambda: events.append("parquet") or {},
+            ),
+            patch.object(
+                build_db,
+                "build_db",
+                side_effect=lambda: events.append("database"),
+            ),
+            patch("sys.argv", ["build_db.py"]),
+        ):
+            build_db.main()
+
+        self.assertEqual(
+            events,
+            [
+                "lock-enter",
+                "mappings",
+                "parquet",
+                "database",
+                "lock-exit",
+            ],
+        )
 
 
 if __name__ == "__main__":

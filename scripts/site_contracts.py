@@ -15,6 +15,12 @@ from typing import Any
 
 import orjson
 
+from . import parquet_provenance
+from .layout import (
+    layout_cache_matches,
+    layout_input_digest_from_generation,
+)
+
 
 def validate_layout_report(
     report: Any, *, shape_digest: str
@@ -108,30 +114,40 @@ def validate_name_pack(
                 raise ValueError(f"names block {block}: invalid row")
 
 
-def read_dump_version(path: Path) -> str:
-    """Read required source provenance without a wall-clock fallback."""
+def require_current_release_inputs(
+    *,
+    dump: Path,
+    dump_zip: Path,
+    mappings: Path,
+    parquet: Path,
+    layout_dir: Path,
+    shape_digest: str,
+) -> dict[str, Any]:
+    """Require one exact Parquet generation and its intact layout cache."""
 
-    try:
-        version = path.read_text().strip()
-    except FileNotFoundError:
-        version = ""
-    if not version:
-        raise ValueError(f"{path}: dump VERSION is missing or empty")
-    return version
-
-
-def require_parquet_matches_dump(
-    dump_version: str, parquet_version: str
-) -> None:
-    """Reject baking a Parquet projection that predates the current dump.
-
-    The bake reads `data/parquet` but stamps the release with the dump
-    version, so a stale projection would be published under a version
-    string it was never built from.
-    """
-
-    if parquet_version != dump_version:
+    generation = parquet_provenance.require_valid_generation(
+        dump=dump,
+        dump_zip=dump_zip,
+        mappings=mappings,
+        parquet=parquet,
+    )
+    input_digest = layout_input_digest_from_generation(generation)
+    if not layout_cache_matches(layout_dir, input_digest, shape_digest):
         raise ValueError(
-            f"parquet VERSION {parquet_version} != dump VERSION "
-            f"{dump_version}; rerun build_db.py before baking"
+            "layout cache does not match the current Parquet generation; "
+            "rerun layout.py"
         )
+    try:
+        cache = orjson.loads((layout_dir / "cache.json").read_bytes())
+    except (OSError, orjson.JSONDecodeError) as error:
+        raise ValueError(
+            f"cannot read validated layout cache: {error}"
+        ) from error
+    return {
+        "dump_version": generation["source"]["dump_version"],
+        "dump_sha256": generation["source"]["archive"]["sha256"],
+        "parquet_generation": generation["version"],
+        "layout_input_digest": input_digest,
+        "layout_cache_identity": cache["cache_identity"],
+        "layout_artifacts": cache["artifacts"],
+    }

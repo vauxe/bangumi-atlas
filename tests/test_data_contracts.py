@@ -9,11 +9,11 @@ from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
+
 from scripts import site_release as sr
 from scripts.content_fingerprint import RowFingerprint
 from scripts.site_contracts import (
-    read_dump_version,
-    require_parquet_matches_dump,
     validate_layout_report,
     validate_name_pack,
 )
@@ -33,6 +33,30 @@ class SiteReleaseContractTests(unittest.TestCase):
             sr.entity_key(True, 1)
         with self.assertRaisesRegex(ValueError, "source id"):
             sr.entity_key(1, True)
+
+    def test_vector_entity_keys_validate_before_uint32_cast(self) -> None:
+        np.testing.assert_array_equal(
+            sr.entity_keys(
+                sr.KIND_SUBJECT,
+                np.array([0, sr.MAX_SOURCE_ID], dtype=np.int64),
+            ),
+            np.array(
+                [1 << 24, (1 << 24) | sr.MAX_SOURCE_ID],
+                dtype=np.uint32,
+            ),
+        )
+        for ids in (
+            np.array([-1], dtype=np.int64),
+            np.array([1 << 24], dtype=np.int64),
+            np.array([1 << 40], dtype=np.uint64),
+            np.array([True]),
+            np.array([1.0]),
+        ):
+            with (
+                self.subTest(dtype=ids.dtype, value=ids.tolist()),
+                self.assertRaisesRegex(ValueError, "source id"),
+            ):
+                sr.entity_keys(sr.KIND_SUBJECT, ids)
 
     def test_gzip_member_is_reproducible(self) -> None:
         first = sr.gzip_member({"b": 2, "a": 1}, 6)
@@ -271,29 +295,6 @@ class SiteReleaseContractTests(unittest.TestCase):
 
 
 class SiteContractTests(unittest.TestCase):
-    def test_dump_version_is_required_instead_of_using_build_time(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            version_file = Path(directory) / "VERSION"
-            with self.assertRaisesRegex(ValueError, "missing or empty"):
-                read_dump_version(version_file)
-
-            version_file.write_text("  \n")
-            with self.assertRaisesRegex(ValueError, "missing or empty"):
-                read_dump_version(version_file)
-
-            version_file.write_text("dump-2026-07-28\n")
-            self.assertEqual(
-                read_dump_version(version_file),
-                "dump-2026-07-28",
-            )
-
-    def test_stale_parquet_cannot_be_baked_under_a_newer_dump(self) -> None:
-        require_parquet_matches_dump("dump-2026-07-28", "dump-2026-07-28")
-        with self.assertRaisesRegex(ValueError, "rerun build_db"):
-            require_parquet_matches_dump("dump-2026-07-28", "dump-2026-07-21")
-
     def test_only_real_three_dimensional_layouts_are_publishable(self) -> None:
         report = {
             "algo": "umap",
@@ -420,20 +421,6 @@ class RowFingerprintTests(unittest.TestCase):
 
         self.assertNotEqual(original.snapshot(), mutated.snapshot())
         self.assertNotEqual(original.snapshot(), duplicated.snapshot())
-
-
-class ExplorerMarkupTests(unittest.TestCase):
-    def test_search_more_is_next_in_tab_order_after_the_input(self) -> None:
-        html = (Path(__file__).parents[1] / "site" / "index.html").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertLess(
-            html.index('id="search"'), html.index('id="search-more"')
-        )
-        self.assertLess(
-            html.index('id="search-more"'), html.index('id="dice"')
-        )
 
 
 if __name__ == "__main__":

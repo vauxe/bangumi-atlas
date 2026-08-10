@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import sys
 import tempfile
 import unittest
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from scripts import verify_db
 
@@ -46,7 +44,42 @@ class SourceEnumCoverageTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(growth, {"Person.type": 1, "Episode.type": 1})
+        self.assertEqual(
+            growth,
+            {"Person.type code=0": 1, "Episode.type code=7": 1},
+        )
+
+    def test_anomaly_baseline_is_enforced_per_exact_code(self) -> None:
+        growth = verify_db.enum_anomaly_growth(
+            {"Person.type": Counter({999: 1})}
+        )
+
+        self.assertEqual(growth, {"Person.type code=999": 1})
+
+
+class GenerationLockTests(unittest.TestCase):
+    def test_main_holds_lock_during_complete_verification(self) -> None:
+        events: list[str] = []
+
+        @contextmanager
+        def lock(_parquet: Path):
+            events.append("enter")
+            try:
+                yield
+            finally:
+                events.append("exit")
+
+        with (
+            patch.object(verify_db, "parquet_layout_lock", lock),
+            patch.object(
+                verify_db,
+                "_verify",
+                side_effect=lambda: events.append("verify"),
+            ),
+        ):
+            verify_db.main()
+
+        self.assertEqual(events, ["enter", "verify", "exit"])
 
 
 if __name__ == "__main__":

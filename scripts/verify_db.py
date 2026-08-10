@@ -16,10 +16,15 @@ from typing import Any, cast
 import ladybug as lb
 import orjson
 import pyarrow.parquet as pq
-from content_fingerprint import RowFingerprint
+
+from . import parquet_provenance, source_projection
+from .build_lock import parquet_layout_lock
+from .content_fingerprint import RowFingerprint
 
 ROOT = Path(__file__).resolve().parent.parent
 DUMP = ROOT / "data" / "dump"
+DUMP_ZIP = ROOT / "data" / "dump.zip"
+MAPPINGS = ROOT / "data" / "mappings"
 DB_PATH = ROOT / "db" / "bangumi.lb"
 PARQUET = ROOT / "data" / "parquet"
 
@@ -59,8 +64,10 @@ SOURCE_ENUM_CONTRACTS = (
     ),
     ("person-characters", "type", "VOICED.type", frozenset(range(7))),
 )
-ENUM_ANOMALY_BASELINES = {
-    "Person.type": 1,  # Archive 中保留的历史脏记录 id=22, type=0
+ENUM_ANOMALY_BASELINES: dict[tuple[str, int | None], int] = {
+    # Archive 中保留的历史脏记录 id=22, type=0. 预算绑定具体码，
+    # 不能让一个已消失的旧码替另一个新码腾出名额。
+    ("Person.type", 0): 1,
 }
 
 
@@ -107,24 +114,12 @@ def enum_anomaly_growth(
     anomalies: dict[str, Counter[int | None]],
 ) -> dict[str, int]:
     return {
-        label: total - ENUM_ANOMALY_BASELINES.get(label, 0)
+        f"{label} code={code}": count
+        - ENUM_ANOMALY_BASELINES.get((label, code), 0)
         for label, counts in anomalies.items()
-        if (total := sum(counts.values()))
-        > ENUM_ANOMALY_BASELINES.get(label, 0)
+        for code, count in counts.items()
+        if count > ENUM_ANOMALY_BASELINES.get((label, code), 0)
     }
-
-
-def parquet_fingerprint(name: str) -> RowFingerprint:
-    path = PARQUET / f"{name}.parquet"
-    parquet = pq.ParquetFile(path)
-    fingerprint = RowFingerprint()
-    for batch in parquet.iter_batches(batch_size=32_768):
-        columns = [
-            batch.column(i).to_pylist() for i in range(batch.num_columns)
-        ]
-        for row in zip(*columns, strict=True):
-            fingerprint.add(row)
-    return fingerprint
 
 
 def query_fingerprint(conn: lb.Connection, query: str) -> RowFingerprint:
@@ -159,7 +154,28 @@ def content_queries() -> Iterator[tuple[str, str, str]]:
         )
 
 
-def main() -> None:
+def _verify() -> None:
+    failures.clear()
+    print("[1/5] exact generation + raw-to-Parquet semantics")
+    generation = parquet_provenance.require_valid_generation(
+        dump=DUMP,
+        dump_zip=DUMP_ZIP,
+        mappings=MAPPINGS,
+        parquet=PARQUET,
+    )
+    projection_fingerprints = source_projection.require_projection_matches(
+        dump=DUMP,
+        mappings=MAPPINGS,
+        parquet=PARQUET,
+    )
+    recorded_fingerprints = generation["semantic"]["raw_projection"]
+    for table in source_projection.PROJECTED_FILES:
+        check_true(
+            f"{table} generation semantic fingerprint",
+            tuple(recorded_fingerprints[table])
+            == projection_fingerprints[table],
+        )
+
     db = lb.Database(str(DB_PATH), read_only=True)
     conn = lb.Connection(db)
 
@@ -168,7 +184,7 @@ def main() -> None:
         # stub says get_next() yields a dict; at runtime it is a list
         return cast("list[Any]", res.get_next())[0]
 
-    print("[1/4] entity counts")
+    print("[2/5] entity counts")
     subject_ids = ids_of("subject")
     person_ids = ids_of("person")
     character_ids = ids_of("character")
@@ -197,7 +213,7 @@ def main() -> None:
     )
 
     print(
-        "[2/4] edge counts (source rows minus dangling, recounted "
+        "[3/5] edge counts (source rows minus dangling, recounted "
         "independently)"
     )
 
@@ -269,20 +285,33 @@ def main() -> None:
         count("MATCH ()-[e:CHARACTER_REL]->() RETURN count(e)"),
     )
 
-    print("[3/4] decode coverage + smoke queries")
+    print("[4/5] decode coverage + smoke queries")
     enum_anomalies = source_enum_anomalies()
     enum_growth = enum_anomaly_growth(enum_anomalies)
     for _, _, label, _ in SOURCE_ENUM_CONTRACTS:
         counts = enum_anomalies.get(label, Counter())
         total = sum(counts.values())
-        baseline = ENUM_ANOMALY_BASELINES.get(label, 0)
+        baseline = sum(
+            count
+            for (baseline_label, _code), count in (
+                ENUM_ANOMALY_BASELINES.items()
+            )
+            if baseline_label == label
+        )
+        label_growth = {
+            key: count
+            for key, count in enum_growth.items()
+            if key.startswith(f"{label} code=")
+        }
         if total == 0:
             level = "ok"
-        elif label not in enum_growth:
+        elif not label_growth:
             level = "info"
         else:
             level = "MISMATCH"
-            failures.append(f"{label} enum anomaly growth")
+            failures.extend(
+                f"{key} enum anomaly growth" for key in label_growth
+            )
         details = ", ".join(
             f"{code}={count:,}"
             for code, count in sorted(
@@ -322,9 +351,9 @@ def main() -> None:
     )
     check_true("宮崎駿 x 久石譲 collaborations > 0", collab > 0)
 
-    print("[4/4] full-content fingerprints (Parquet -> LadybugDB)")
-    for table, parquet_name, query in content_queries():
-        expected = parquet_fingerprint(parquet_name).snapshot()
+    print("[5/5] full-content fingerprints (Parquet -> LadybugDB)")
+    for table, _parquet_name, query in content_queries():
+        expected = projection_fingerprints[table]
         actual = query_fingerprint(conn, query).snapshot()
         ok = expected == actual
         if not ok:
@@ -348,6 +377,11 @@ def main() -> None:
     if failures:
         sys.exit(f"FAILED: {len(failures)} mismatch(es): {failures}")
     print("all checks passed")
+
+
+def main() -> None:
+    with parquet_layout_lock(PARQUET):
+        _verify()
 
 
 if __name__ == "__main__":

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import gzip
-import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,10 +12,50 @@ import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-
 from scripts import site_release as sr
 from scripts import verify_site
+
+
+class InputGenerationTests(unittest.TestCase):
+    def test_main_holds_generation_lock_for_validation_and_verify(
+        self,
+    ) -> None:
+        events: list[str] = []
+
+        @contextmanager
+        def lock(_parquet: Path):
+            events.append("lock-enter")
+            try:
+                yield
+            finally:
+                events.append("lock-exit")
+
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory) / "site"
+            with (
+                patch.object(verify_site, "parquet_layout_lock", lock),
+                patch.object(
+                    verify_site,
+                    "require_current_release_inputs",
+                    side_effect=lambda **_kwargs: (
+                        events.append("validate")
+                        or {"parquet_generation": "v1"}
+                    ),
+                ),
+                patch.object(
+                    verify_site,
+                    "verify_release",
+                    side_effect=lambda _site, _identity: events.append(
+                        "verify"
+                    ),
+                ),
+                patch("sys.argv", ["verify_site.py", "--site", str(site)]),
+            ):
+                verify_site.main()
+
+        self.assertEqual(
+            events, ["lock-enter", "validate", "verify", "lock-exit"]
+        )
 
 
 class ParquetStreamingTests(unittest.TestCase):
@@ -49,6 +89,58 @@ class ParquetStreamingTests(unittest.TestCase):
                 [value for batch in batches for value in batch["id"]],
                 list(range(5)),
             )
+
+
+class ArtifactPathSafetyTests(unittest.TestCase):
+    def test_site_data_directory_cannot_be_a_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            site = root / "site"
+            outside = root / "outside"
+            site.mkdir()
+            outside.mkdir()
+            (site / "data").symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaisesRegex(ValueError, "site/data.*symlink"):
+                verify_site.validated_site_data_root(site)
+
+    def test_manifest_physical_name_cannot_escape_site_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            site = root / "site" / "data"
+            site.mkdir(parents=True)
+            payload = b"outside"
+            digest = sr.sha256_hex(payload)
+            outside = root / "outside.bin"
+            outside.write_bytes(payload)
+            files = {"safe.bin": [len(payload), digest, "../../outside.bin"]}
+
+            with (
+                patch.object(verify_site, "SITE", site),
+                patch.object(verify_site, "artifact_files", files),
+                self.assertRaisesRegex(ValueError, "physical name"),
+            ):
+                verify_site.site_file("safe.bin")
+
+    def test_content_addressed_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            site = root / "site" / "data"
+            site.mkdir(parents=True)
+            payload = b"outside"
+            digest = sr.sha256_hex(payload)
+            physical = sr.published_object_name("safe.bin", digest)
+            outside = root / "outside.bin"
+            outside.write_bytes(payload)
+            (site / physical).symlink_to(outside)
+            files = {"safe.bin": [len(payload), digest, physical]}
+
+            with (
+                patch.object(verify_site, "SITE", site),
+                patch.object(verify_site, "artifact_files", files),
+                self.assertRaisesRegex(ValueError, "symlink"),
+            ):
+                verify_site.site_file("safe.bin")
 
 
 class ExpectedFactStoreTests(unittest.TestCase):

@@ -13,23 +13,19 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
-import enum_mappings
 import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
-import site_release as sr
 
-if TYPE_CHECKING:
-    from build_lock import PARQUET_BUILD_MARKER, parquet_layout_lock
-elif __package__:
-    from scripts.build_lock import PARQUET_BUILD_MARKER, parquet_layout_lock
-else:
-    from build_lock import PARQUET_BUILD_MARKER, parquet_layout_lock
+from . import enum_mappings, parquet_provenance, source_projection
+from . import site_release as sr
+from .build_lock import PARQUET_BUILD_MARKER, parquet_layout_lock
 
 ROOT = Path(__file__).resolve().parent.parent
 DUMP = ROOT / "data" / "dump"
+DUMP_ZIP = ROOT / "data" / "dump.zip"
 MAPPINGS = ROOT / "data" / "mappings"
 PARQUET = ROOT / "data" / "parquet"
 DB_PATH = ROOT / "db" / "bangumi.lb"
@@ -608,14 +604,26 @@ def _build_parquet_unlocked() -> dict[str, int]:
 
 
 def build_parquet() -> dict[str, int]:
-    """Build one complete Parquet generation while layout readers wait."""
+    """Build and finalize one generation while all consumers wait."""
+
     with parquet_layout_lock(PARQUET):
-        PARQUET.mkdir(parents=True, exist_ok=True)
-        marker = PARQUET / PARQUET_BUILD_MARKER
-        marker.write_text("Parquet publication did not complete.\n")
-        stats = _build_parquet_unlocked()
-        marker.unlink()
-        return stats
+        return _build_parquet_locked()
+
+
+def _build_parquet_locked(
+    *,
+    finalize: Callable[[dict[str, int]], None] | None = None,
+) -> dict[str, int]:
+    """Build while the caller holds the shared generation lock."""
+
+    finalizer = finalize or finalize_parquet_generation
+    PARQUET.mkdir(parents=True, exist_ok=True)
+    marker = PARQUET / PARQUET_BUILD_MARKER
+    marker.write_text("Parquet publication did not complete.\n")
+    stats = _build_parquet_unlocked()
+    finalizer(stats)
+    marker.unlink()
+    return stats
 
 
 DDL = """
@@ -774,7 +782,26 @@ def report_unknown_codes() -> None:
         )
 
 
-if __name__ == "__main__":
+def finalize_parquet_generation(stats: dict[str, int]) -> None:
+    """Run semantic gates and publish provenance before clearing the marker."""
+
+    report_unknown_codes()
+    fingerprints = source_projection.require_projection_matches(
+        dump=DUMP,
+        mappings=MAPPINGS,
+        parquet=PARQUET,
+    )
+    parquet_provenance.publish_generation(
+        dump=DUMP,
+        dump_zip=DUMP_ZIP,
+        mappings=MAPPINGS,
+        parquet=PARQUET,
+        projected_rows=stats,
+        projection_fingerprints=fingerprints,
+    )
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Rebuild db/bangumi.lb from data/dump/*.jsonlines"
     )
@@ -793,8 +820,8 @@ if __name__ == "__main__":
     cli = parser.parse_args()
 
     t0 = time.time()
-    if not cli.skip_parquet:
-        if cli.offline:
+    with parquet_layout_lock(PARQUET):
+        if not cli.skip_parquet and cli.offline:
             try:
                 revision = validate_mapping_snapshot()
             except ValueError as error:
@@ -806,34 +833,30 @@ if __name__ == "__main__":
                 "[阶段 0] mappings: --offline, using verified "
                 f"bangumi/common revision {revision}"
             )
-        else:
+        elif not cli.skip_parquet:
             print("[阶段 0] refresh enum mappings from bangumi/common")
             fetch_mappings()
-        print("[阶段 1] jsonlines -> parquet")
-        for name, n in build_parquet().items():
-            print(f"  {name}: {n:,} rows")
-        report_unknown_codes()
-        # parquet 记录来源 dump 版本,供 --skip-parquet 护栏比对
-        dump_ver = DUMP / "VERSION"
-        if dump_ver.exists():
-            (PARQUET / "VERSION").write_text(dump_ver.read_text())
-    else:
-        # 护栏:--skip-parquet 复用旧 parquet,版本与当前 dump 不一致
-        # 会建出口径漂移的库
-        dump_ver = DUMP / "VERSION"
-        pq_ver = PARQUET / "VERSION"
-        if dump_ver.exists() and pq_ver.exists():
-            if dump_ver.read_text() != pq_ver.read_text():
-                sys.exit(
-                    f"--skip-parquet 版本不匹配:dump="
-                    f"{dump_ver.read_text().strip()} vs parquet="
-                    f"{pq_ver.read_text().strip()};去掉 --skip-parquet 重建"
-                )
+        if not cli.skip_parquet:
+            print("[阶段 1] jsonlines -> parquet")
+            for name, n in _build_parquet_locked().items():
+                print(f"  {name}: {n:,} rows")
         else:
-            sys.exit(
-                "--skip-parquet 缺 VERSION 标记,无法核对 parquet 与 dump "
-                "是否同版本;去掉 --skip-parquet 重建"
-            )
-    print("[阶段 2] parquet -> ladybug db")
-    build_db()
+            try:
+                parquet_provenance.require_valid_generation(
+                    dump=DUMP,
+                    dump_zip=DUMP_ZIP,
+                    mappings=MAPPINGS,
+                    parquet=PARQUET,
+                )
+            except (RuntimeError, ValueError) as error:
+                sys.exit(
+                    f"--skip-parquet 无法证明制品同代: {error};"
+                    "去掉 --skip-parquet 重建"
+                )
+        print("[阶段 2] parquet -> ladybug db")
+        build_db()
     print(f"done in {time.time() - t0:.0f}s -> {DB_PATH}")
+
+
+if __name__ == "__main__":
+    main()

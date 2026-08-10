@@ -49,17 +49,17 @@ jobs:
           uv run mypy scripts
 
       - name: Fetch dump (SHA256 verified)
-        run: uv run python scripts/fetch_dump.py
+        run: uv run python -m scripts.fetch_dump
 
       - name: Build graph database
-        run: uv run python scripts/build_db.py
+        run: uv run python -m scripts.build_db
 
       - name: Verify database against dump
-        run: uv run python scripts/verify_db.py
+        run: uv run python -m scripts.verify_db
 
       - name: Layout current snapshot
         run: |
-          uv run python scripts/layout.py
+          uv run python -m scripts.layout
           echo "layout report:"
           cat data/layout/report.json
 
@@ -69,10 +69,10 @@ jobs:
           cp site/index.html "$ATLAS_SITE_DIR/index.html"
 
       - name: Bake site data (row-level reconciliation inside)
-        run: uv run python scripts/bake_site.py --output "$ATLAS_SITE_DIR/data"
+        run: uv run python -m scripts.bake_site --output "$ATLAS_SITE_DIR/data"
 
       - name: Verify SiteRelease against parquet (independent)
-        run: uv run python scripts/verify_site.py --site "$ATLAS_SITE_DIR"
+        run: uv run python -m scripts.verify_site --site "$ATLAS_SITE_DIR"
 
       - name: Install client dependencies
         run: npm ci

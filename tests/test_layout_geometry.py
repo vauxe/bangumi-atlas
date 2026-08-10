@@ -31,6 +31,10 @@ from scripts.layout import (
 
 
 class TopologyLayoutTests(unittest.TestCase):
+    def test_node_key_rejects_ids_that_would_alias_after_cast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "24-bit"):
+            layout.node_key("subject", np.array([1 << 24], dtype=np.int64))
+
     def test_node_keys_map_to_compact_indices(self) -> None:
         keys = np.array([0x01000001, 0x01000004, 0x02000002], dtype=np.uint32)
         endpoint_keys = np.array(
@@ -432,6 +436,36 @@ class ShapeIdentityTests(unittest.TestCase):
 
 
 class LayoutCacheTests(unittest.TestCase):
+    def test_cache_identity_follows_every_implementation_dependency(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            layout_source = root / "layout.py"
+            entity_key_source = root / "entity_key.py"
+            layout_source.write_text("layout-v1\n")
+            entity_key_source.write_text("entity-key-v1\n")
+            dependencies = {
+                "layout.py": layout_source,
+                "entity_key.py": entity_key_source,
+            }
+
+            with mock.patch.object(
+                layout,
+                "LAYOUT_CACHE_DEPENDENCIES",
+                dependencies,
+                create=True,
+            ):
+                before = layout.layout_cache_identity()
+                layout_source.write_text("layout-v2\n")
+                after_layout_change = layout.layout_cache_identity()
+                layout_source.write_text("layout-v1\n")
+                entity_key_source.write_text("entity-key-v2\n")
+                after_entity_key_change = layout.layout_cache_identity()
+
+            self.assertNotEqual(before, after_layout_change)
+            self.assertNotEqual(before, after_entity_key_change)
+
     def write_inputs(self, parquet: Path) -> None:
         parquet.mkdir()
         for index, name in enumerate(layout.LAYOUT_INPUT_FILES):
@@ -467,6 +501,26 @@ class LayoutCacheTests(unittest.TestCase):
             )
         )
 
+    def generation_for(self, parquet: Path) -> dict[str, object]:
+        return {
+            "parquet": {
+                name: {"sha256": layout._file_sha256(parquet / name)}
+                for name in layout.LAYOUT_INPUT_FILES
+            }
+        }
+
+    def test_generation_digest_matches_the_same_verified_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parquet = Path(directory) / "parquet"
+            self.write_inputs(parquet)
+
+            self.assertEqual(
+                layout.layout_input_digest_from_generation(
+                    self.generation_for(parquet)
+                ),
+                layout.layout_input_digest(parquet),
+            )
+
     def write_valid_cache(self, root: Path) -> tuple[Path, Path]:
         parquet = root / "parquet"
         output = root / "layout"
@@ -477,13 +531,6 @@ class LayoutCacheTests(unittest.TestCase):
             output, layout.layout_input_digest(parquet), shape
         )
         return parquet, output
-
-    def test_input_digest_requires_an_explicit_root(self) -> None:
-        with (
-            mock.patch.object(layout, "_file_sha256", return_value="digest"),
-            self.assertRaises(TypeError),
-        ):
-            layout.layout_input_digest()  # type: ignore[call-arg]
 
     def test_cache_hit_requires_exact_inputs_and_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -559,6 +606,11 @@ class LayoutCacheTests(unittest.TestCase):
                 mock.patch.object(layout, "PARQUET", parquet),
                 mock.patch.object(layout, "OUT", output),
                 mock.patch.object(
+                    layout.parquet_provenance,
+                    "require_valid_generation",
+                    return_value=self.generation_for(parquet),
+                ),
+                mock.patch.object(
                     layout,
                     "load_nodes",
                     side_effect=AssertionError("cache hit loaded nodes"),
@@ -591,6 +643,11 @@ class LayoutCacheTests(unittest.TestCase):
                 mock.patch.object(layout, "PARQUET", parquet),
                 mock.patch.object(layout, "OUT", output),
                 mock.patch.object(
+                    layout.parquet_provenance,
+                    "require_valid_generation",
+                    return_value=self.generation_for(parquet),
+                ),
+                mock.patch.object(
                     layout,
                     "layout_cache_matches",
                     side_effect=AssertionError("force checked cache"),
@@ -615,6 +672,11 @@ class LayoutCacheTests(unittest.TestCase):
             with (
                 mock.patch.object(layout, "PARQUET", parquet),
                 mock.patch.object(layout, "OUT", output),
+                mock.patch.object(
+                    layout.parquet_provenance,
+                    "require_valid_generation",
+                    return_value=self.generation_for(parquet),
+                ),
                 mock.patch.object(
                     layout,
                     "load_nodes",
@@ -643,6 +705,28 @@ class LayoutCacheTests(unittest.TestCase):
             ):
                 layout.main()
 
+    def test_layout_requires_a_content_valid_parquet_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parquet = root / "parquet"
+            output = root / "layout"
+            parquet.mkdir()
+
+            with (
+                mock.patch.object(layout, "PARQUET", parquet),
+                mock.patch.object(layout, "OUT", output),
+                mock.patch.object(
+                    layout.parquet_provenance,
+                    "require_valid_generation",
+                    side_effect=ValueError("generation rejected"),
+                ) as validate,
+                mock.patch("sys.argv", ["layout.py"]),
+                self.assertRaisesRegex(ValueError, "generation rejected"),
+            ):
+                layout.main()
+
+            validate.assert_called_once()
+
     def test_input_or_implementation_drift_is_not_published(self) -> None:
         for drift in ("inputs", "implementation"):
             with self.subTest(drift=drift), tempfile.TemporaryDirectory() as d:
@@ -661,16 +745,15 @@ class LayoutCacheTests(unittest.TestCase):
                     "n_community_islands": 0,
                     "n_satellite_islands": 0,
                 }
-                input_digest = (
-                    mock.patch.object(
-                        layout,
-                        "layout_input_digest",
-                        side_effect=["before", "after"],
-                    )
-                    if drift == "inputs"
-                    else mock.patch.object(
-                        layout, "layout_input_digest", return_value="stable"
-                    )
+                recorded_input_digest = mock.patch.object(
+                    layout,
+                    "layout_input_digest_from_generation",
+                    return_value="before" if drift == "inputs" else "stable",
+                )
+                current_input_digest = mock.patch.object(
+                    layout,
+                    "layout_input_digest",
+                    return_value="after" if drift == "inputs" else "stable",
                 )
                 cache_identity = (
                     mock.patch.object(
@@ -687,7 +770,13 @@ class LayoutCacheTests(unittest.TestCase):
                 with (
                     mock.patch.object(layout, "PARQUET", parquet),
                     mock.patch.object(layout, "OUT", output),
-                    input_digest,
+                    mock.patch.object(
+                        layout.parquet_provenance,
+                        "require_valid_generation",
+                        return_value=self.generation_for(parquet),
+                    ),
+                    recorded_input_digest,
+                    current_input_digest,
                     cache_identity,
                     mock.patch.object(
                         layout,

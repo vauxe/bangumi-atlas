@@ -26,20 +26,27 @@ from typing import Any
 import numpy as np
 import orjson
 import pyarrow.parquet as pq
-import site_release as sr
-from content_fingerprint import RowFingerprint
-from enum_mappings import load_mappings
 from opencc import OpenCC
-from query_contracts import (
+from scipy.spatial import cKDTree
+
+from . import site_release as sr
+from .build_lock import parquet_layout_lock
+from .content_fingerprint import RowFingerprint
+from .enum_mappings import load_mappings
+from .layout import shape_digest
+from .query_contracts import (
     load_query_contract,
     query_schema_digest,
     validate_query_contract,
 )
-from scipy.spatial import cKDTree
+from .site_contracts import require_current_release_inputs
 
 ROOT = Path(__file__).resolve().parent.parent
+DUMP = ROOT / "data" / "dump"
+DUMP_ZIP = ROOT / "data" / "dump.zip"
 PARQUET = ROOT / "data" / "parquet"
-LAYOUT = ROOT / "data" / "layout" / "coords.parquet"
+LAYOUT_DIR = ROOT / "data" / "layout"
+LAYOUT = LAYOUT_DIR / "coords.parquet"
 SITE = ROOT / "site" / "data"
 SITE_ROOT = ROOT / "site"
 MAPPING_SNAPSHOT = ROOT / "data" / "mappings"
@@ -316,13 +323,54 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
+def validated_artifact_path(logical_name: str, meta: Any) -> Path:
+    """Resolve one manifest artifact without trusting a manifest path."""
+
+    if not isinstance(logical_name, str) or not isinstance(meta, list):
+        raise ValueError("manifest artifact entry has invalid types")
+    if len(meta) != 3:
+        raise ValueError(f"invalid artifact metadata for {logical_name}")
+    size, digest, physical_name = meta
+    if not _natural(size):
+        raise ValueError(f"invalid artifact size for {logical_name}")
+    if not isinstance(digest, str) or not isinstance(physical_name, str):
+        raise ValueError(f"invalid artifact identity for {logical_name}")
+    expected_name = sr.published_object_name(logical_name, digest)
+    if physical_name != expected_name:
+        raise ValueError(
+            f"{logical_name}: physical name must be {expected_name}, "
+            f"got {physical_name}"
+        )
+    path = SITE / expected_name
+    if path.is_symlink():
+        raise ValueError(f"{logical_name}: artifact must not be a symlink")
+    if not path.is_file():
+        raise ValueError(f"{logical_name}: artifact is not a regular file")
+    return path
+
+
+def validated_site_data_root(site_root: Path) -> Path:
+    """Require a real direct ``data`` directory below the selected site."""
+
+    root = site_root.resolve()
+    candidate = root / "data"
+    if candidate.is_symlink():
+        raise ValueError("site/data must not be a symlink")
+    if not candidate.is_dir():
+        raise ValueError("site/data must be an existing directory")
+    resolved = candidate.resolve()
+    if resolved.parent != root or resolved.name != "data":
+        raise ValueError("site/data must be a direct child of the site root")
+    return resolved
+
+
 def site_file(logical_name: str) -> Path:
     meta = artifact_files.get(logical_name)
-    if meta is None or len(meta) != 3:
+    if meta is None:
         raise ValueError(
             f"manifest missing physical object for {logical_name}"
         )
-    return SITE / meta[2]
+    return validated_artifact_path(logical_name, meta)
 
 
 def read_member_bytes(logical_name: str, off: int, length: int) -> bytes:
@@ -902,23 +950,22 @@ def expected_charmap() -> dict[str, str]:
     return charmap
 
 
-def main() -> None:  # noqa: PLR0915
+def verify_release(  # noqa: PLR0915
+    site_root: Path, input_identity: dict[str, Any]
+) -> None:
     global SITE, SITE_ROOT, artifact_files  # noqa: PLW0603
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--site",
-        type=Path,
-        default=SITE_ROOT,
-        help="staging site root (default: site)",
-    )
-    args = parser.parse_args()
-    SITE_ROOT = args.site.resolve()
-    SITE = SITE_ROOT / "data"
+    SITE_ROOT = site_root.resolve()
+    SITE = validated_site_data_root(SITE_ROOT)
+    failures.clear()
+    member_spans.clear()
     t0 = time.time()
     validate_query_contract(
         load_query_contract(), sr.FACT_ROLES, sr.FACT_ATTRS
     )
-    manifest = orjson.loads((SITE / "manifest.json").read_bytes())
+    manifest_path = SITE / "manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ValueError("site/data/manifest.json must be a regular file")
+    manifest = orjson.loads(manifest_path.read_bytes())
     artifact_files = manifest["files"]
 
     # ---- manifest 自身:版本、schema、文件摘要 ----
@@ -933,6 +980,11 @@ def main() -> None:  # noqa: PLR0915
     reconcile("profile", sr.PROFILE, manifest["profile"])
     reconcile("schema_digest", sr.schema_digest(), manifest["schema_digest"])
     reconcile("field_policy", sr.FIELD_POLICY, manifest["field_policy"])
+    reconcile(
+        "source generation identity",
+        input_identity,
+        manifest.get("source"),
+    )
     query_release = manifest.get("query", {})
     check(
         "查询能力合同完整",
@@ -958,27 +1010,35 @@ def main() -> None:  # noqa: PLR0915
         sr.release_limits(search_alias_block_ranks=alias_block_size),
         manifest["limits"],
     )
-    listed = {meta[2] for meta in artifact_files.values()}
-    on_disk = {
-        p.name
-        for p in SITE.iterdir()
-        if p.is_file() and p.name != "manifest.json"
-    }
-    reconcile("manifest.files 覆盖全部数据文件", on_disk, listed)
-    total = 0
-    for fname, (size, digest, physical_name) in sorted(artifact_files.items()):
-        reconcile(
-            f"{fname} 内容寻址物理名",
-            sr.published_object_name(fname, digest),
-            physical_name,
+    if not isinstance(artifact_files, dict):
+        raise ValueError("manifest.files must be an object")
+    data_entries = [
+        path for path in SITE.iterdir() if path.name != "manifest.json"
+    ]
+    invalid_entries = sorted(
+        path.name
+        for path in data_entries
+        if path.is_symlink() or not path.is_file()
+    )
+    if invalid_entries:
+        raise ValueError(
+            f"site/data contains non-regular artifacts: {invalid_entries}"
         )
-        p = SITE / physical_name
+    on_disk = {path.name for path in data_entries}
+    listed: set[str] = set()
+    total = 0
+    for fname, meta in sorted(artifact_files.items()):
+        p = validated_artifact_path(fname, meta)
+        size, digest, physical_name = meta
+        listed.add(physical_name)
+        check(f"{fname} 内容寻址物理名", True, physical_name)
         ok = p.stat().st_size == size and sha256_of(p) == digest
         if not ok:
             check(f"{fname} 字节数与 SHA-256", False)
         total += size
         if fname.endswith(".pack") and size > sr.PACK_CAP:
             check(f"{fname} <= 80MB pack 上限", False, f"{size:,}")
+    reconcile("manifest.files 覆盖全部数据文件", on_disk, listed)
     check(
         "files 字节数与摘要全部一致",
         total == manifest["total_bytes"],
@@ -1417,10 +1477,10 @@ def main() -> None:  # noqa: PLR0915
                     sub["name"][i],
                     sub["name_cn"][i],
                     sub["type"][i],
-                    sub["platform_code"][i] if sub["platform"][i] else None,
+                    sub["platform_code"][i],
                     sub["date"][i],
-                    sub["score"][i] or None,
-                    sub["rank"][i] or None,
+                    sub["score"][i],
+                    sub["rank"][i],
                     int(sub["nsfw"][i]),
                     sub["wish"][i],
                     sub["done"][i],
@@ -2717,6 +2777,28 @@ def main() -> None:  # noqa: PLR0915
         )
         sys.exit(1)
     log(f"verify_site: all checks passed in {elapsed:,.0f}s")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--site",
+        type=Path,
+        default=SITE_ROOT,
+        help="staging site root (default: site)",
+    )
+    args = parser.parse_args()
+    site_root = args.site.resolve()
+    with parquet_layout_lock(PARQUET):
+        input_identity = require_current_release_inputs(
+            dump=DUMP,
+            dump_zip=DUMP_ZIP,
+            mappings=MAPPING_SNAPSHOT,
+            parquet=PARQUET,
+            layout_dir=LAYOUT_DIR,
+            shape_digest=shape_digest(),
+        )
+        verify_release(site_root, input_identity)
 
 
 if __name__ == "__main__":
