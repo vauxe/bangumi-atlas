@@ -83,7 +83,7 @@ test("publishes user-facing Subject totals as derived numeric dimensions", () =>
 });
 
 test("separates lookup, full text, evidence, and private field behavior", () => {
-  assert.equal(QUERY_CONTRACT.schema, "atlas-query-v2");
+  assert.equal(QUERY_CONTRACT.schema, "atlas-query-v1");
   assert.deepEqual(fieldDefinition("subject", "summary").capabilities, [
     "fullText",
     "evidence",

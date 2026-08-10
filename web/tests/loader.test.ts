@@ -412,8 +412,8 @@ test("rejects a manifest missing a mandatory search artifact", async () => {
 test("rejects an incomplete full-text-v1 query release", async () => {
   const malformed = testManifest({});
   malformed.query = {
-    schema: "atlas-release-query-v2",
-    capabilities: ["atlas-query-v2", "full-text-v1"],
+    schema: "atlas-release-query-v1",
+    capabilities: ["atlas-query-v1", "full-text-v1"],
     contractDigest: "0".repeat(64),
   };
   globalThis.fetch = (async () =>
@@ -425,8 +425,8 @@ test("rejects an incomplete full-text-v1 query release", async () => {
 test("accepts a query release without a deployment marker", async () => {
   const manifest = testManifest({});
   manifest.query = {
-    schema: "atlas-release-query-v2",
-    capabilities: ["atlas-query-v2"],
+    schema: "atlas-release-query-v1",
+    capabilities: ["atlas-query-v1"],
     contractDigest: "0".repeat(64),
   };
   globalThis.fetch = (async () =>
@@ -434,7 +434,7 @@ test("accepts a query release without a deployment marker", async () => {
 
   const loaded = await loadManifest();
 
-  assert.equal(loaded.query?.schema, "atlas-release-query-v2");
+  assert.equal(loaded.query?.schema, "atlas-release-query-v1");
 });
 
 test("hashes Unicode bigrams exactly like the site baker", () => {

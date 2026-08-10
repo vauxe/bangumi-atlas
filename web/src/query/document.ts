@@ -189,7 +189,7 @@ export type QueryOperator =
   | ExistsOperator;
 
 export interface QueryDocument {
-  schema: "atlas-query-document-v2";
+  schema: "atlas-query-document-v1";
   root: string;
   parameters: Record<string, ParameterType>;
   operators: Record<string, QueryOperator>;

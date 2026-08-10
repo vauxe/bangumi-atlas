@@ -709,7 +709,7 @@ function compileScopedList(query: ListQuery): QueryBundle {
   operators.results = { kind: "union", branches };
   const section: QuerySection = {
     query: {
-      schema: "atlas-query-document-v2",
+      schema: "atlas-query-document-v1",
       root: "results",
       parameters,
       operators,
@@ -724,7 +724,7 @@ function compileScopedList(query: ListQuery): QueryBundle {
     answer: { shape: "entity-list", title: "全部匹配" },
   };
   return {
-    schema: "atlas-query-bundle-v2",
+    schema: "atlas-query-bundle-v1",
     release: { policy: "latest" },
     sections: { results: section },
   };
@@ -819,12 +819,12 @@ function decompileScopedList(bundle: QueryBundle): QueryDraft | null {
     const operators = operatorSubtree(section.query, outer.input);
     if (!operators) return null;
     const restored = decompileExplorerQuery({
-      schema: "atlas-query-bundle-v2",
+      schema: "atlas-query-bundle-v1",
       release: bundle.release,
       sections: {
         results: {
           query: {
-            schema: "atlas-query-document-v2",
+            schema: "atlas-query-document-v1",
             root: outer.input,
             parameters: section.query.parameters,
             operators,

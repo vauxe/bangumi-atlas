@@ -52,7 +52,7 @@ LAYOUT_INPUT_FILES = (
     *(f"{name}.parquet" for name, *_ in EDGE_FILES),
 )
 LAYOUT_CACHE_FILE = "cache.json"
-LAYOUT_CACHE_FORMAT = "layout-cache-v2"
+LAYOUT_CACHE_FORMAT = "layout-cache-v1"
 LAYOUT_SCHEMA = pa.schema(
     [
         ("key", pa.uint32()),

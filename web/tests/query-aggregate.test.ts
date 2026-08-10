@@ -24,7 +24,7 @@ const source: QueryDataSource = {
 
 test("aggregates groups while ignoring null and missing measure values", async () => {
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "aggregate",
     parameters: {},
     operators: {
@@ -55,7 +55,7 @@ test("aggregates groups while ignoring null and missing measure values", async (
 
 test("returns the defined empty global aggregate", async () => {
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "aggregate",
     parameters: {},
     operators: {
@@ -80,7 +80,7 @@ test("returns the defined empty global aggregate", async () => {
 
 test("does not let projection bypass aggregate field capabilities", async () => {
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "aggregate",
     parameters: {},
     operators: {
@@ -107,7 +107,7 @@ test("does not let projection bypass aggregate field capabilities", async () => 
 
 test("does not let projection bypass sort field capabilities", async () => {
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: {},
     operators: {

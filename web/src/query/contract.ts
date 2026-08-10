@@ -47,7 +47,7 @@ interface FactDefinition {
 }
 
 interface QueryContract {
-  schema: "atlas-query-v2";
+  schema: "atlas-query-v1";
   capabilities: FieldCapability[];
   operatorSets: Record<string, string[]>;
   search: Record<"lookup" | "fullText", SearchSemantics>;

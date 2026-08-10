@@ -28,7 +28,7 @@ export interface Manifest {
   vocab_digests: Record<string, string>;
   owned_collections: Record<string, { parent: string; via: string }>;
   query?: {
-    schema: "atlas-release-query-v2";
+    schema: "atlas-release-query-v1";
     capabilities: string[];
     contractDigest: string;
   };

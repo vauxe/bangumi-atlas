@@ -68,7 +68,7 @@ const source: QueryDataSource = {
 };
 
 const pathQuery = (target: string): QueryDocument => ({
-  schema: "atlas-query-document-v2",
+  schema: "atlas-query-document-v1",
   root: "path",
   parameters: {},
   operators: {
@@ -181,7 +181,7 @@ test("does not impose a hidden fact-read quota on paths", async () => {
     },
   };
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "path",
     parameters: {},
     operators: {

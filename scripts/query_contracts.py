@@ -70,7 +70,7 @@ def validate_query_contract(
 ) -> None:
     """Reject a registry that cannot drive both builder and data runtime."""
 
-    if contract.get("schema") != "atlas-query-v2":
+    if contract.get("schema") != "atlas-query-v1":
         raise ValueError("unsupported query contract schema")
     owners = contract.get("owners")
     if not isinstance(owners, dict) or tuple(owners) != QUERY_OWNERS:

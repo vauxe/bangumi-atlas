@@ -2483,9 +2483,9 @@ def bake_release(  # noqa: PLR0915
             "episode": {"parent": "subject", "via": "subject_id"}
         },
         "query": {
-            "schema": "atlas-release-query-v2",
+            "schema": "atlas-release-query-v1",
             "capabilities": [
-                "atlas-query-v2",
+                "atlas-query-v1",
                 "fact-ref-v1",
                 "full-text-v1",
             ],

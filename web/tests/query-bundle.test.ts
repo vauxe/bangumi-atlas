@@ -15,7 +15,7 @@ test("bounds the number of independently executed bundle sections", () => {
       { length: maximum + 1 },
       (_, index) => [`section-${index}`, {
         query: {
-          schema: "atlas-query-document-v2" as const,
+          schema: "atlas-query-document-v1" as const,
           root: "values",
           parameters: {},
           operators: {
@@ -27,7 +27,7 @@ test("bounds the number of independently executed bundle sections", () => {
     ),
   );
   const bundle: QueryBundle = {
-    schema: "atlas-query-bundle-v2",
+    schema: "atlas-query-bundle-v1",
     release: { policy: "latest" },
     sections,
   };
@@ -37,12 +37,12 @@ test("bounds the number of independently executed bundle sections", () => {
 
 test("keeps typed parameter values with the section they execute", async () => {
   const bundle: QueryBundle = {
-    schema: "atlas-query-bundle-v2",
+    schema: "atlas-query-bundle-v1",
     release: { policy: "latest" },
     sections: {
       results: {
         query: {
-          schema: "atlas-query-document-v2",
+          schema: "atlas-query-document-v1",
           root: "filter",
           parameters: { minimum: "number" },
           operators: {

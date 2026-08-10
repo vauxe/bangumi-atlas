@@ -28,7 +28,7 @@ export type ReleaseSelection =
   | { policy: "fixed"; version: string };
 
 export interface QueryBundle {
-  schema: "atlas-query-bundle-v2";
+  schema: "atlas-query-bundle-v1";
   release: ReleaseSelection;
   sections: Record<string, QuerySection>;
 }
@@ -44,7 +44,7 @@ const ANSWER_SHAPES = new Set<AnswerShape>([
 ]);
 
 export function normalizeBundle(bundle: QueryBundle): QueryBundle {
-  if (bundle?.schema !== "atlas-query-bundle-v2")
+  if (bundle?.schema !== "atlas-query-bundle-v1")
     throw new TypeError("query bundle schema is unsupported");
   if (
     bundle.release?.policy !== "latest" &&
@@ -80,7 +80,7 @@ export function normalizeBundle(bundle: QueryBundle): QueryBundle {
     };
   }
   return {
-    schema: "atlas-query-bundle-v2",
+    schema: "atlas-query-bundle-v1",
     release: { ...bundle.release },
     sections,
   };

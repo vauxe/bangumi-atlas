@@ -103,120 +103,6 @@ const DEFAULT_COLUMNS: Record<Owner, string[]> = {
   episode: ["ref", "name", "nameCn", "type", "airdate", "duration"],
 };
 
-const QUERY_OPERATOR: Record<CompareOperator, string> = {
-  eq: "=",
-  ne: "!=",
-  lt: "<",
-  lte: "<=",
-  gt: ">",
-  gte: ">=",
-  contains: "CONTAINS",
-};
-
-function queryLiteral(value: LiteralValue): string {
-  if (typeof value === "string")
-    return `'${value
-      .replaceAll("\\", "\\\\")
-      .replaceAll("'", "\\'")
-      .replaceAll("\n", "\\n")
-      .replaceAll("\r", "\\r")
-      .replaceAll("\t", "\\t")}'`;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new TypeError("查询数字必须是有限值");
-    return String(value);
-  }
-  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
-  return "NULL";
-}
-
-function queryInput(value: LiteralValue, parameter?: string): string {
-  return parameter ? `$${parameter}` : queryLiteral(value);
-}
-
-function conditionSource(
-  condition: ExplorerCondition,
-  parentPrecedence = 0,
-  fieldName: (field: string) => string = (field) => field,
-): string {
-  switch (condition.kind) {
-    case "compare":
-      return condition.negated
-        ? `NOT (${fieldName(condition.field)} ${QUERY_OPERATOR[condition.operator]} ${queryInput(condition.value, condition.parameter)})`
-        : `${fieldName(condition.field)} ${QUERY_OPERATOR[condition.operator]} ${queryInput(condition.value, condition.parameter)}`;
-    case "in": {
-      if (!condition.values.length) throw new TypeError("值集合不能为空");
-      const source = `${fieldName(condition.field)} IN [${condition.values.map(queryLiteral).join(", ")}]`;
-      return condition.negated ? `NOT (${source})` : source;
-    }
-    case "isNull":
-      return condition.negated
-        ? `NOT (${fieldName(condition.field)} IS NULL)`
-        : `${fieldName(condition.field)} IS NULL`;
-    case "isMissing":
-      return condition.negated
-        ? `NOT (${fieldName(condition.field)} IS MISSING)`
-        : `${fieldName(condition.field)} IS MISSING`;
-    case "not":
-      return `NOT (${conditionSource(condition.term, 0, fieldName)})`;
-    case "all":
-    case "any": {
-      if (!condition.terms.length) throw new TypeError("条件组不能为空");
-      const precedence = condition.kind === "all" ? 2 : 1;
-      const source = condition.terms
-        .map((term) => conditionSource(term, precedence, fieldName))
-        .join(condition.kind === "all" ? " AND " : " OR ");
-      return precedence < parentPrecedence ? `(${source})` : source;
-    }
-  }
-}
-
-function relationSource(
-  owner: Owner,
-  relation: ExplorerRelation,
-  index: number,
-): string {
-  const fact = QUERY_CONTRACT.facts[relation.factKind];
-  if (fact.roles[relation.candidateRole] !== owner)
-    throw new TypeError("关系的候选角色类型不匹配");
-  const endpoints = relationEndpoints(relation);
-  const endpointVariables = endpoints.map((_, endpointIndex) =>
-    endpointIndex === 0
-      ? `relation${index}_related`
-      : `relation${index}_related${endpointIndex}`
-  );
-  const endpointByRole = new Map(
-    endpoints.map((endpoint, endpointIndex) => [endpoint.role, endpointIndex]),
-  );
-  const roles = [
-    ...endpoints.map((endpoint) => endpoint.role),
-    relation.candidateRole,
-    ...Object.keys(fact.roles).filter((role) =>
-      !endpointByRole.has(role) && role !== relation.candidateRole
-    ),
-  ].map((role) => {
-    const endpointIndex = endpointByRole.get(role);
-    const variable = role === relation.candidateRole
-      ? "item"
-      : endpointIndex !== undefined
-        ? endpointVariables[endpointIndex]!
-        : `relation${index}_${role}`;
-    return `${role}: ${variable}`;
-  });
-  const predicates = [
-    ...endpoints.map((endpoint, endpointIndex) =>
-      `${endpointVariables[endpointIndex]}.ref = ${queryLiteral(endpoint.related)}`
-    ),
-    ...(relation.condition
-      ? [conditionSource(
-          relation.condition,
-          0,
-          (field) => `relation${index}.${field}`,
-        )]
-      : []),
-  ];
-  return `${relation.exists ? "" : "NOT "}EXISTS { MATCH ${relation.factKind}(${roles.join(", ")}) AS relation${index} WHERE ${predicates.join(" AND ")} }`;
-}
-
 function relationEndpoints(
   relation: ExplorerRelation,
 ): Array<ExplorerRelationEndpoint & { owner: Owner }> {
@@ -237,50 +123,6 @@ function relationEndpoints(
     seen.add(endpoint.role);
     return { ...endpoint, owner: expectedOwner };
   });
-}
-
-export function formatExplorerQuery(draft: ExplorerQuery): string {
-  const lines = [`FIND ${draft.owner} AS item`];
-  const text = draft.text?.value.trim();
-  if (text) lines.push(`SEARCH ${queryInput(text, draft.text?.parameter)}`);
-  const fullText = draft.fullText?.value.trim();
-  if (fullText) {
-    if (!draft.fullText?.field) throw new TypeError("正文检索缺少内容字段");
-    lines.push(
-      `SEARCH ${queryInput(fullText, draft.fullText.parameter)} IN ${draft.fullText.field}`,
-    );
-  }
-  const predicates = [
-    ...(draft.condition ? [conditionSource(draft.condition)] : []),
-    ...(draft.relations ?? []).map((relation, index) =>
-      relationSource(draft.owner, relation, index)
-    ),
-  ];
-  if (predicates.length)
-    lines.push(`WHERE ${predicates.join("\n  AND ")}`);
-  if (draft.aggregate) {
-    if (!draft.aggregate.metrics.length)
-      throw new TypeError("统计至少需要一个指标");
-    lines.push(`RETURN ${[
-      ...draft.aggregate.groupBy,
-      ...draft.aggregate.metrics.map((metric) =>
-        `${metric.function === "countDistinct" ? "COUNT" : metric.function.toUpperCase()}(${metric.function === "countDistinct" ? `DISTINCT ${metric.field ?? "*"}` : metric.field ?? "*"}) AS ${explorerMetricName(metric)}`
-      ),
-    ].join(", ")}`);
-    if (draft.aggregate.groupBy.length)
-      lines.push(`GROUP BY ${draft.aggregate.groupBy.join(", ")}`);
-    if (draft.aggregate.having)
-      lines.push(`HAVING ${conditionSource(draft.aggregate.having)}`);
-  } else {
-    lines.push(`RETURN ${(draft.columns ?? DEFAULT_COLUMNS[draft.owner]).join(", ")}`);
-  }
-  if (draft.orderBy?.length)
-    lines.push(`ORDER BY ${draft.orderBy.map((order) =>
-      `${order.column} ${order.direction.toUpperCase()} NULLS ${order.nulls.toUpperCase()}`
-    ).join(", ")}`);
-  const limit = draft.limit ?? null;
-  if (limit !== null) lines.push(`LIMIT ${limit}`);
-  return lines.join("\n");
 }
 
 interface ParameterCollector {
@@ -715,12 +557,12 @@ export function compileExplorerQuery(draft: ExplorerQuery): QueryBundle {
   if (limit !== null && (!Number.isSafeInteger(limit) || limit < 0))
     throw new TypeError("结果条数必须是非负整数");
   return {
-    schema: "atlas-query-bundle-v2",
+    schema: "atlas-query-bundle-v1",
     release: { policy: "latest" },
     sections: {
       results: {
         query: {
-          schema: "atlas-query-document-v2",
+          schema: "atlas-query-document-v1",
           root,
           parameters: parameters.types,
           operators,
