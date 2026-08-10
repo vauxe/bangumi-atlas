@@ -457,10 +457,10 @@ class LayoutCacheTests(unittest.TestCase):
                 create=True,
             ):
                 before = layout.layout_cache_identity()
-                layout_source.write_text("layout-v2\n")
+                layout_source.write_text("layout-changed\n")
                 after_layout_change = layout.layout_cache_identity()
                 layout_source.write_text("layout-v1\n")
-                entity_key_source.write_text("entity-key-v2\n")
+                entity_key_source.write_text("entity-key-changed\n")
                 after_entity_key_change = layout.layout_cache_identity()
 
             self.assertNotEqual(before, after_layout_change)
@@ -543,6 +543,8 @@ class LayoutCacheTests(unittest.TestCase):
             input_digest = layout.layout_input_digest(parquet)
             layout.write_layout_cache(output, input_digest, shape)
 
+            cache = json.loads((output / layout.LAYOUT_CACHE_FILE).read_text())
+            self.assertEqual(cache["format"], "layout-cache-v1")
             self.assertTrue(
                 layout.layout_cache_matches(output, input_digest, shape)
             )
@@ -573,7 +575,9 @@ class LayoutCacheTests(unittest.TestCase):
             layout.write_layout_cache(output, input_digest, "shape-v1")
 
             self.assertFalse(
-                layout.layout_cache_matches(output, input_digest, "shape-v2")
+                layout.layout_cache_matches(
+                    output, input_digest, "shape-changed"
+                )
             )
             with mock.patch.object(
                 layout, "layout_cache_identity", return_value="changed"

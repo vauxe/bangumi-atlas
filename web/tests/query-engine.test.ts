@@ -96,7 +96,7 @@ test("looks up one release-local fact by its typed FactRef", async () => {
     },
   };
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: { ref: "fact-ref" },
     operators: {
@@ -132,7 +132,7 @@ test("looks up one release-local fact by its typed FactRef", async () => {
 });
 
 const rankedSubjects: QueryDocument = {
-  schema: "atlas-query-document-v2",
+  schema: "atlas-query-document-v1",
   root: "project",
   parameters: { minimum: "number" },
   operators: {
@@ -200,7 +200,7 @@ test("executes typed scan, filter, project, order, and semantic limit", async ()
 
 test("uses hidden projection columns for sorting without leaking them to results", async () => {
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: {},
     operators: {
@@ -267,7 +267,7 @@ test("pushes only referenced entity fields into a structural scan", async () => 
 
 test("applies projection before distinct and semantic limit", async () => {
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: {},
     operators: {
@@ -293,7 +293,7 @@ test("applies projection before distinct and semantic limit", async () => {
 
 test("keeps hidden sort columns out of distinct result identity", async () => {
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: {},
     operators: {
@@ -343,7 +343,7 @@ test("stops an unordered stable scan at the semantic result limit", async () => 
     },
   };
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "scan",
     parameters: {},
     operators: {
@@ -378,7 +378,7 @@ test("requests display identity when a scanned entity is returned as a value", a
     },
   };
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: {},
     operators: {
@@ -395,7 +395,7 @@ test("requests display identity when a scanned entity is returned as a value", a
   };
 
   await executeQuery({
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "scan",
     parameters: {},
     operators: {
@@ -434,7 +434,7 @@ test("pushes fields through projected entity aliases", async () => {
     },
   };
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "score",
     parameters: {},
     operators: {
@@ -461,7 +461,7 @@ test("pushes fields through projected entity aliases", async () => {
 
 test("uses a canonical row tie-breaker when order keys are equal", async () => {
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "values",
     parameters: {},
     operators: {
@@ -490,7 +490,7 @@ test("rejects invalid fields and types before touching the data source", async (
     },
   };
   const invalid = (predicate: QueryDocument["operators"][string] & { kind: "filter" }): QueryDocument => ({
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "filter",
     parameters: {},
     operators: {
@@ -554,7 +554,7 @@ test("filters tags by name without dropping their source counts", async () => {
     },
   };
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: {},
     operators: {
@@ -586,7 +586,7 @@ test("filters tags by name without dropping their source counts", async () => {
 
 test("keeps explicit null placement independent from sort direction", async () => {
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "values",
     parameters: {},
     operators: {
@@ -602,7 +602,7 @@ test("keeps explicit null placement independent from sort direction", async () =
 
 test("orders projected stable references as typed scalar identities", async () => {
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: {},
     operators: {
@@ -642,7 +642,7 @@ test("expands one canonical multi-role fact without losing its context", async (
     entity: async (ref) => entities.get(ref) ?? null,
   };
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: {},
     operators: {
@@ -700,7 +700,7 @@ test("keeps a fact match when an archived role has no entity", async () => {
     entity: async (ref) => ref === "character:7" ? C(7) : null,
   };
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: {},
     operators: {
@@ -751,7 +751,7 @@ test("keeps lookup and full text as distinct verified sources", async () => {
     },
   };
   const lookup: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: { text: "string" },
     operators: {
@@ -833,7 +833,7 @@ test("follows a typed reference in both directions", async () => {
     },
   };
   const query = (direction: "forward" | "reverse"): QueryDocument => ({
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: {},
     operators: {
@@ -896,7 +896,7 @@ test("returns a fact full-text hit with every participant binding", async () => 
     },
   };
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: {},
     operators: {
@@ -949,7 +949,7 @@ test("keeps a fact full-text hit whose archived role is unresolved", async () =>
     },
   };
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: {},
     operators: {
@@ -992,7 +992,7 @@ test("establishes an entity binding from a typed canonical value", async () => {
     },
   };
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: {},
     operators: {

@@ -1,7 +1,6 @@
 import { Data } from "../data";
 import { loadManifest } from "../loader";
 import { executeQuery } from "./engine";
-import { lowerAtlasQuery } from "./language";
 import { SiteQueryDataSource } from "./site-source";
 import { SiteQuerySearchIndex } from "./site-search";
 import { createQueryWorkerRuntime } from "./worker-runtime";
@@ -16,7 +15,7 @@ interface WorkerScope {
 
 const scope = self as unknown as WorkerScope;
 const REQUIRED_CAPABILITIES = [
-  "atlas-query-v2",
+  "atlas-query-v1",
   "fact-ref-v1",
   "full-text-v1",
 ] as const;
@@ -29,7 +28,7 @@ async function contractDigest(): Promise<string> {
 
 const source = loadManifest().then(async (manifest) => {
   if (
-    manifest.query?.schema !== "atlas-release-query-v2" ||
+    manifest.query?.schema !== "atlas-release-query-v1" ||
     manifest.query.contractDigest !== await contractDigest() ||
     REQUIRED_CAPABILITIES.some(
       (capability) => !manifest.query?.capabilities.includes(capability),
@@ -64,9 +63,7 @@ async function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T
 
 const runtime = createQueryWorkerRuntime(async (request, signal) =>
   executeQuery(
-    request.type === "execute"
-      ? request.document
-      : lowerAtlasQuery(request.source, request.parameterTypes),
+    request.document,
     request.parameters,
     await abortable(source, signal),
     {

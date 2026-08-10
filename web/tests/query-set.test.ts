@@ -16,7 +16,7 @@ const setQuery = (
     { input: "right", columns: [{ output: "value", input: "b" }] },
   ];
   return {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "set",
     parameters: {},
     operators: {
@@ -51,7 +51,7 @@ test("normalizes commutative set branches but preserves except order", async () 
 
 test("exists and notExists perform typed correlation without changing the outer row", async () => {
   const query = (kind: "exists" | "notExists"): QueryDocument => ({
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "correlate",
     parameters: {},
     operators: {
@@ -79,7 +79,7 @@ test("exists and notExists perform typed correlation without changing the outer 
 
 test("validates exists correlation columns and types", async () => {
   const invalid: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "exists",
     parameters: {},
     operators: {
@@ -106,7 +106,7 @@ test("does not impose a row quota on set branches", async () => {
 
 test("does not impose a row quota on correlated existence", async () => {
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "exists",
     parameters: {},
     operators: {

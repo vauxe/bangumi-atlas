@@ -205,7 +205,7 @@ export async function loadManifest(): Promise<Manifest> {
   if (
     m.query !== undefined &&
     (
-      m.query.schema !== "atlas-release-query-v2" ||
+      m.query.schema !== "atlas-release-query-v1" ||
       !Array.isArray(m.query.capabilities) ||
       m.query.capabilities.some((item) => typeof item !== "string") ||
       new Set(m.query.capabilities).size !== m.query.capabilities.length ||

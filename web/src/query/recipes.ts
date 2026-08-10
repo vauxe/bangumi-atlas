@@ -113,7 +113,7 @@ export function fullTextRecipe(text: string): QueryBundle {
       const binding = "entity";
       sections[`${owner}-${field}`] = {
         query: {
-          schema: "atlas-query-document-v2",
+          schema: "atlas-query-document-v1",
           root: "project",
           parameters: {},
           operators: {
@@ -182,7 +182,7 @@ export function fullTextRecipe(text: string): QueryBundle {
       };
       sections[`${factKind}-${field}`] = {
         query: {
-          schema: "atlas-query-document-v2",
+          schema: "atlas-query-document-v1",
           root: "project",
           parameters: {},
           operators,
@@ -193,7 +193,7 @@ export function fullTextRecipe(text: string): QueryBundle {
     }
   }
   return normalizeBundle({
-    schema: "atlas-query-bundle-v2",
+    schema: "atlas-query-bundle-v1",
     release: { policy: "latest" },
     sections,
   });
@@ -206,7 +206,7 @@ export function comparisonRecipe(
   parseEntityRef(left);
   parseEntityRef(right);
   return normalizeBundle({
-    schema: "atlas-query-bundle-v2",
+    schema: "atlas-query-bundle-v1",
     release: { policy: "latest" },
     sections: {
       all: comparisonSection("全部关联", "union", left, right),
@@ -236,12 +236,12 @@ export function pathRecipe(
   )
     throw new TypeError("path query limits must be positive integers");
   return normalizeBundle({
-    schema: "atlas-query-bundle-v2",
+    schema: "atlas-query-bundle-v1",
     release: { policy: "latest" },
     sections: {
       paths: {
         query: {
-          schema: "atlas-query-document-v2",
+          schema: "atlas-query-document-v1",
           root: "path",
           parameters: {},
           operators: {
@@ -379,7 +379,7 @@ function comparisonSection(
   };
   return {
     query: {
-      schema: "atlas-query-document-v2",
+      schema: "atlas-query-document-v1",
       root: "result",
       parameters: {},
       operators,

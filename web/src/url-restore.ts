@@ -1,4 +1,4 @@
-import type { LinkState, UrlState } from "./url";
+import type { UrlState } from "./url";
 
 export interface LocatedTarget {
   key: number;
@@ -11,31 +11,17 @@ export type TargetLocator = (
 ) => Promise<LocatedTarget | null>;
 
 export interface ResolvedUrlSelection extends LocatedTarget {
-  link: LinkState | null;
   camera: "fly" | "none";
 }
 
-/** Resolve both ends before applying a linked URL; never degrade it to a
- * normal selection merely because one stable key has not streamed in yet. */
 export async function resolveUrlSelection(
   urlState: UrlState,
   locate: TargetLocator,
 ): Promise<ResolvedUrlSelection | null> {
   const target = await locate(urlState.key, urlState.rank);
   if (!target) return null;
-
-  let link: LinkState | null = null;
-  if (urlState.link) {
-    const source = await locate(
-      urlState.link.fromKey,
-      urlState.link.fromRank,
-    );
-    if (!source) return null;
-    link = { ...urlState.link, fromRank: source.rank };
-  }
   return {
     ...target,
-    link,
     camera: urlState.view ? "none" : "fly",
   };
 }

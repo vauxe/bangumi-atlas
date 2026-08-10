@@ -35,7 +35,7 @@ import { interactionHint, Scene } from "./scene";
 import { searchNameSuggestions } from "./search";
 import { notify, state, subscribe } from "./store";
 import { TYPE_NAMES, etype, type EntityKind } from "./types";
-import { decode, encode, type LinkState } from "./url";
+import { decode, encode } from "./url";
 import { locateStableTarget, resolveUrlSelection } from "./url-restore";
 import {
   ambiguousNameSuggestionRanks,
@@ -227,8 +227,7 @@ async function boot(): Promise<void> {
       geometryComplete = true;
       hud.textContent = "";
       scene.geometryGrew();
-      // 稳定 key 未解析时挂起整个 URL。全量就绪后从原 URL
-      // 重新解析两端与相机,避免把 common/path 悄悄降级成普通选中。
+      // 稳定 key 未解析时挂起整个 URL；全量就绪后从原 URL 重试。
       const hash = pendingUrlHash;
       pendingUrlHash = null;
       if (hash !== null && location.hash === hash)
@@ -238,11 +237,6 @@ async function boot(): Promise<void> {
   );
 
   const sparseRankByKey = new Map<number, number>();
-  const queryRefFromKey = (key: number): `${"subject" | "person" | "character"}:${number}` => {
-    const owner = (["", "subject", "person", "character"] as const)[key >>> 24];
-    if (!owner) throw new TypeError(`无效实体键 ${key}`);
-    return `${owner}:${key & 0xffffff}`;
-  };
   const rankOfKeyLocal = (key: number): number | null => {
     const sparse = sparseRankByKey.get(key);
     if (sparse !== undefined) return sparse;
@@ -278,23 +272,6 @@ async function boot(): Promise<void> {
       }
       return point;
     });
-
-  async function handleLink(
-    link: LinkState,
-    bRank: number,
-    push = true,
-    cam: "fly" | "none" = "fly",
-  ): Promise<void> {
-    const bKey = geo.key[bRank] ?? 0;
-    if (!bKey || geo.key[link.fromRank] !== link.fromKey) {
-      hud.textContent = "节点身份解析失败,请刷新重试";
-      return;
-    }
-    const from = queryRefFromKey(link.fromKey);
-    const to = queryRefFromKey(bKey);
-    await select(bRank, cam, push, bKey);
-    queryWorkbench?.askRelationship(link.kind, from, to);
-  }
 
   /** 相机语义:fly = 飞行聚焦;center = 远处才滑移枢轴并保持缩放;
    * none = 不动相机(URL 还原,尊重链接机位)。 */
@@ -396,20 +373,12 @@ async function boot(): Promise<void> {
         if (epoch !== navigationEpoch) return;
         if (resolved) {
           pendingUrlHash = null;
-          if (resolved.link)
-            await handleLink(
-              resolved.link,
-              resolved.rank,
-              false,
-              resolved.camera,
-            );
-          else
-            await select(
-              resolved.rank,
-              resolved.camera,
-              false,
-              resolved.key,
-            );
+          await select(
+            resolved.rank,
+            resolved.camera,
+            false,
+            resolved.key,
+          );
         } else if (st.key !== null && !geometryComplete) {
           pendingUrlHash = appliedHash;
         } else {

@@ -246,7 +246,7 @@ class ParquetGenerationManifestTests(unittest.TestCase):
                     projected_rows=stats,
                     projection_fingerprints=fingerprints,
                 )
-                oracle.write_text("oracle-v2\n")
+                oracle.write_text("oracle-changed\n")
                 with self.assertRaisesRegex(ValueError, "semantic oracle"):
                     provenance.require_valid_generation(
                         dump=dump,
@@ -279,7 +279,7 @@ class ParquetGenerationManifestTests(unittest.TestCase):
                     projected_rows=stats,
                     projection_fingerprints=fingerprints,
                 )
-                helper.write_text("fingerprint-v2\n")
+                helper.write_text("fingerprint-changed\n")
                 with self.assertRaisesRegex(ValueError, "semantic oracle"):
                     provenance.require_valid_generation(
                         dump=dump,
@@ -311,7 +311,7 @@ class ParquetGenerationManifestTests(unittest.TestCase):
             )
 
             with (
-                patch.object(ek, "ENTITY_KEY_FORMAT", "entity-key-v2"),
+                patch.object(ek, "ENTITY_KEY_FORMAT", "entity-key-changed"),
                 self.assertRaisesRegex(ValueError, "semantic oracle"),
             ):
                 provenance.require_valid_generation(

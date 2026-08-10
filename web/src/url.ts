@@ -4,26 +4,11 @@
 import { state } from "./store";
 import type { OrbitState } from "./camera";
 import { decodeBundle, encodeShareableBundle } from "./query/bundle-url";
-import { normalizeBundle, type QueryBundle } from "./query/bundle";
-import { normalizeQuery } from "./query/canonical";
-import { decodeQuestion } from "./query/question-url";
-import { decodeCypherState } from "./query/cypher-url";
-import { compileQuestion } from "./query/question";
-import { inferCypherParameters } from "./query/parameters";
-import { lowerAtlasCypher } from "./query/language";
-
-export interface LinkState {
-  kind: "common" | "path";
-  fromRank: number;
-  fromKey: number;
-}
 
 export interface UrlState {
   view: Partial<OrbitState> | null;
   key: number | null;
   rank: number | null;
-  /** 共同关联/路径模式及其稳定起点。旧 URL 缺省为 null。 */
-  link: LinkState | null;
   /** 俯视正交开关是可分享相机状态的一部分。 */
   ortho: boolean;
 }
@@ -66,17 +51,16 @@ function uintParam(
   return value;
 }
 
-/** 解码当前状态；旧查询语法只在这一边界迁移。 */
+/** 解码当前状态；未知字段不会进入应用状态。 */
 export function decode(hash: string): UrlState {
   const out: UrlState = {
     view: null,
     key: null,
     rank: null,
-    link: null,
     ortho: false,
   };
   const params = new URLSearchParams(hash.replace(/^#/, ""));
-  state.queryBundle = decodeBundle(params.get("qb") ?? "") ?? migrateLegacyQuery(params);
+  state.queryBundle = decodeBundle(params.get("qb") ?? "");
   out.ortho = params.get("o") === "1";
   const c = params.get("c");
   if (c) {
@@ -92,35 +76,5 @@ export function decode(hash: string): UrlState {
   }
   out.key = uintParam(params, "n", false);
   out.rank = uintParam(params, "r", true);
-  const kind = params.get("q");
-  const fromKey = uintParam(params, "f", false);
-  const fromRank = uintParam(params, "fr", true);
-  if (
-    (kind === "common" || kind === "path") &&
-    fromKey !== null &&
-    fromRank !== null
-  )
-    out.link = { kind, fromKey, fromRank };
   return out;
-}
-
-function migrateLegacyQuery(params: URLSearchParams): QueryBundle | null {
-  const question = decodeQuestion(params.get("aq") ?? "");
-  if (question) return normalizeBundle(compileQuestion(question));
-  const cypher = decodeCypherState(params.get("ac") ?? "");
-  if (!cypher) return null;
-  const inferred = inferCypherParameters(JSON.stringify(cypher.parameters));
-  return normalizeBundle({
-    schema: "atlas-query-bundle-v2",
-    release: { policy: "latest" },
-    sections: {
-      results: {
-        query: normalizeQuery(
-          lowerAtlasCypher(cypher.source, inferred.types),
-          inferred.values,
-        ),
-        answer: { shape: "table", title: "高级查询结果" },
-      },
-    },
-  });
 }

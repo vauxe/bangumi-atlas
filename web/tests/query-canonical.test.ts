@@ -29,7 +29,7 @@ const document = (
     },
   ];
   return {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: filterId,
     parameters: { min: "number" },
     operators: {
@@ -59,7 +59,7 @@ test("normalizes ids, parameters, unreachable nodes, and commutative predicates"
 
 test("alpha-renames internal bindings without renaming projected columns", () => {
   const make = (binding: string): QueryDocument => ({
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: {},
     operators: {
@@ -86,7 +86,7 @@ test("alpha-renames internal bindings without renaming projected columns", () =>
 
 test("preserves values row order and duplicate bag entries", async () => {
   const values = (rows: number[][]): QueryDocument => ({
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "values",
     parameters: {},
     operators: {
@@ -127,7 +127,7 @@ test("rejects parameter mismatches, cycles, and non-finite literals", () => {
 
 test("rejects unsafe names before building row objects", () => {
   const invalid: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "project",
     parameters: {},
     operators: {
@@ -161,7 +161,7 @@ test("rejects unsafe names before building row objects", () => {
 
 test("rejects incompatible contains element types", () => {
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "filter",
     parameters: {},
     operators: {
@@ -184,7 +184,7 @@ test("rejects incompatible contains element types", () => {
 
 test("type-checks entity-reference fields against canonical references", () => {
   const episodeBySubject = (value: string): QueryDocument => ({
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "filter",
     parameters: {},
     operators: {
@@ -219,7 +219,7 @@ test("enforces the Values cell limit across the whole query", () => {
     (_, value) => [value],
   );
   const query: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: "union",
     parameters: {},
     operators: {

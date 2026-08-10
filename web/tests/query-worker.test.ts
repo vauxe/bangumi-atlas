@@ -14,7 +14,7 @@ import { QueryWorkerClient } from "../src/query/worker-client";
 import { SiteRuntimeError } from "../src/site-error";
 
 const query: QueryDocument = {
-  schema: "atlas-query-document-v2",
+  schema: "atlas-query-document-v1",
   root: "values",
   parameters: {},
   operators: { values: { kind: "values", columns: ["n"], rows: [[1]] } },
@@ -207,33 +207,4 @@ test("hard cancellation terminates a busy worker and recreates it", async () => 
   assert.equal((ports[1]?.sent.at(-1) as { type?: string })?.type, "execute");
   client.dispose();
   await assert.rejects(replacement, /disposed/);
-});
-
-test("sends Atlas Query source to the same cancellable worker boundary", async () => {
-  const sent: unknown[] = [];
-  const port = {
-    postMessage(message: unknown) { sent.push(message); },
-    addEventListener() {},
-    removeEventListener() {},
-  };
-  const client = new QueryWorkerClient(port);
-  const pending = client.executeSource(
-    "FIND subject WHERE score >= $min RETURN item AS subject",
-    { min: "number" },
-    { min: 8 },
-    { pageSize: 25 },
-  );
-
-  assert.deepEqual(sent[0], {
-    schema: "atlas-query-wire-v1",
-    type: "execute-source",
-    requestId: "q1",
-    source: "FIND subject WHERE score >= $min RETURN item AS subject",
-    parameterTypes: { min: "number" },
-    parameters: { min: 8 },
-    pageSize: 25,
-    offset: 0,
-  });
-  client.dispose();
-  await assert.rejects(pending, /disposed/);
 });

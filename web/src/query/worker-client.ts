@@ -1,5 +1,4 @@
 import type {
-  ParameterType,
   ParameterValues,
   QueryDocument,
 } from "./document";
@@ -90,36 +89,12 @@ export class QueryWorkerClient {
     parameters: ParameterValues,
     options: QueryClientOptions,
   ): Promise<QueryResult> {
-    return this.request({
-      type: "execute",
-      document,
-      parameters,
-    }, options);
-  }
-
-  executeSource(
-    source: string,
-    parameterTypes: Record<string, ParameterType>,
-    parameters: ParameterValues,
-    options: QueryClientOptions,
-  ): Promise<QueryResult> {
-    return this.request({
-      type: "execute-source",
-      source,
-      parameterTypes,
-      parameters,
-    }, options);
+    return this.request(document, parameters, options);
   }
 
   private request(
-    query: (
-      | { type: "execute"; document: QueryDocument }
-      | {
-          type: "execute-source";
-          source: string;
-          parameterTypes: Record<string, ParameterType>;
-        }
-    ) & { parameters: ParameterValues },
+    document: QueryDocument,
+    parameters: ParameterValues,
     options: QueryClientOptions,
   ): Promise<QueryResult> {
     if (options.signal?.aborted)
@@ -151,8 +126,10 @@ export class QueryWorkerClient {
       this.pending.set(requestId, pending);
       this.worker.postMessage({
         schema: QUERY_WIRE_SCHEMA,
+        type: "execute",
         requestId,
-        ...query,
+        document,
+        parameters,
         pageSize: options.pageSize,
         offset: options.offset ?? 0,
       });

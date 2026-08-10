@@ -5,7 +5,6 @@ import {
   defaultQueryDraft,
   draftQuery,
   queryDraftFromBundle,
-  type EntityRef,
   type QueryDraft,
 } from "./draft";
 import type { QueryResult } from "./engine";
@@ -223,19 +222,6 @@ export class QueryWorkbench {
 
   focus(): void {
     this.bar.focus();
-  }
-
-  askRelationship(
-    kind: "common" | "path",
-    from: EntityRef,
-    to: EntityRef,
-  ): void {
-    const draft: QueryDraft = kind === "path"
-      ? { kind: "path", from, to, maxHops: 6, maxPaths: 10 }
-      : { kind: "comparison", from, to };
-    this.bar.replace(draft);
-    this.expand();
-    this.runCurrent();
   }
 
   sync(bundle: QueryBundle | null): void {

@@ -1,5 +1,5 @@
 {
-  "schema": "atlas-query-v2",
+  "schema": "atlas-query-v1",
   "capabilities": [
     "lookup",
     "fullText",

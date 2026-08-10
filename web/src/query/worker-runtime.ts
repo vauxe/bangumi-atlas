@@ -54,7 +54,7 @@ export function createQueryWorkerRuntime(
         );
         return;
       }
-      if (request.type !== "execute" && request.type !== "execute-source") return;
+      if (request.type !== "execute") return;
       if (active.has(request.requestId)) {
         post({
           schema: QUERY_WIRE_SCHEMA,

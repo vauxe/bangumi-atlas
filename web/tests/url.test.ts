@@ -3,8 +3,6 @@ import { beforeEach, test } from "node:test";
 
 import { compileExplorerQuery } from "../src/query/explorer";
 import type { QueryBundle } from "../src/query/bundle";
-import { encodeCypherState } from "../src/query/cypher-url";
-import { encodeQuestion } from "../src/query/question-url";
 import { state } from "../src/store";
 import { decode, encode } from "../src/url";
 
@@ -19,23 +17,23 @@ beforeEach(() => {
   state.queryBundle = null;
 });
 
-test("reads legacy link-query identity without writing it again", () => {
-  const decoded = decode(
-    "#n=16777258&r=123&q=path&f=33554439&fr=9",
-  );
-  assert.equal(decoded.key, 0x0100_002a);
-  assert.equal(decoded.rank, 123);
-  assert.deepEqual(decoded.link, {
-    kind: "path",
-    fromKey: 0x0200_0007,
-    fromRank: 9,
+test("ignores retired pre-release URL formats", () => {
+  const decoded = decode("#n=16777258&r=123&q=path&f=33554439&fr=9");
+  assert.deepEqual(decoded, {
+    view: null,
+    key: 0x0100_002a,
+    rank: 123,
+    ortho: false,
   });
-  assert.doesNotMatch(encode(view, decoded.key, decoded.rank), /(?:^|&)(?:q|f|fr)=/);
-});
 
-test("keeps old selection URLs compatible and ignores partial link state", () => {
-  assert.equal(decode("#n=16777258&r=123").link, null);
-  assert.equal(decode("#n=16777258&r=123&q=common&f=33554439").link, null);
+  for (const hash of ["#aq=retired", "#ac=retired"]) {
+    state.queryBundle = null;
+    decode(hash);
+    assert.equal(state.queryBundle, null);
+  }
+
+  decode("#y=2000-2030&m=1&t=2&s=85");
+  assert.equal(state.queryBundle, null);
 });
 
 test("encodes one canonical QueryBundle and no parallel filter state", () => {
@@ -52,18 +50,18 @@ test("encodes one canonical QueryBundle and no parallel filter state", () => {
   state.queryBundle = null;
   decode(hash);
   const decodedBundle = state.queryBundle as QueryBundle | null;
-  assert.equal(decodedBundle?.schema, "atlas-query-bundle-v2");
+  assert.equal(decodedBundle?.schema, "atlas-query-bundle-v1");
   assert.equal(decodedBundle?.sections.results?.query.limit, null);
 });
 
 test("an unshareable query does not prevent local URL updates", () => {
   state.queryBundle = {
-    schema: "atlas-query-bundle-v2",
+    schema: "atlas-query-bundle-v1",
     release: { policy: "latest" },
     sections: {
       results: {
         query: {
-          schema: "atlas-query-document-v2",
+          schema: "atlas-query-document-v1",
           root: "values",
           parameters: {},
           operators: {
@@ -84,38 +82,4 @@ test("an unshareable query does not prevent local URL updates", () => {
   assert.doesNotThrow(() => encode(view, null, null));
   assert.doesNotMatch(encode(view, null, null), /(?:^|&)qb=/);
   assert.ok(state.queryBundle);
-});
-
-test("does not revive obsolete canvas filter state", () => {
-  decode("#y=2000-2030&m=1&t=2&s=85");
-  assert.equal(state.queryBundle, null);
-  assert.doesNotMatch(encode(view, null, null), /(?:^|&)(?:m|t|s|y)=/);
-});
-
-test("migrates a legacy ordinary-user question into QueryBundle v2", () => {
-  const encoded = encodeQuestion({
-    schema: "atlas-question-v1",
-    mode: "find",
-    owner: "subject",
-    condition: { kind: "compare", field: "score", operator: "gte", value: 8 },
-    columns: ["ref", "name", "score"],
-  });
-
-  decode(`#aq=${encoded}`);
-
-  assert.equal(state.queryBundle?.schema, "atlas-query-bundle-v2");
-  assert.ok(state.queryBundle?.sections.results);
-});
-
-test("migrates legacy Atlas Cypher into the same QueryBundle state", () => {
-  const encoded = encodeCypherState({
-    schema: "atlas-cypher-source-v1",
-    source: "MATCH (s:Subject) WHERE s.score >= $min RETURN s AS subject",
-    parameters: { min: 8 },
-  });
-
-  decode(`#ac=${encoded}`);
-
-  assert.equal(state.queryBundle?.schema, "atlas-query-bundle-v2");
-  assert.ok(state.queryBundle?.sections.results);
 });

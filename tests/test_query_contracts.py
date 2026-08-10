@@ -19,7 +19,7 @@ class QueryContractTests(unittest.TestCase):
 
         validate_query_contract(contract, sr.FACT_ROLES, sr.FACT_ATTRS)
 
-        self.assertEqual(contract["schema"], "atlas-query-v2")
+        self.assertEqual(contract["schema"], "atlas-query-v1")
         self.assertEqual(len(query_schema_digest()), 64)
         self.assertNotEqual(
             query_schema_digest(),

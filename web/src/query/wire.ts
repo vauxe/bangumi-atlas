@@ -1,5 +1,4 @@
 import type {
-  ParameterType,
   ParameterValues,
   QueryDocument,
 } from "./document";
@@ -8,22 +7,11 @@ import { MISSING, isMissing } from "./value";
 
 export const QUERY_WIRE_SCHEMA = "atlas-query-wire-v1" as const;
 
-export interface ExecuteQueryRequest {
+export interface QueryExecutionRequest {
   schema: typeof QUERY_WIRE_SCHEMA;
   type: "execute";
   requestId: string;
   document: QueryDocument;
-  parameters: ParameterValues;
-  pageSize: number;
-  offset: number;
-}
-
-export interface ExecuteSourceRequest {
-  schema: typeof QUERY_WIRE_SCHEMA;
-  type: "execute-source";
-  requestId: string;
-  source: string;
-  parameterTypes: Record<string, ParameterType>;
   parameters: ParameterValues;
   pageSize: number;
   offset: number;
@@ -35,7 +23,6 @@ export interface CancelQueryRequest {
   requestId: string;
 }
 
-export type QueryExecutionRequest = ExecuteQueryRequest | ExecuteSourceRequest;
 export type QueryWorkerRequest = QueryExecutionRequest | CancelQueryRequest;
 
 export interface WireQueryResult extends Omit<QueryResult, "rows"> {

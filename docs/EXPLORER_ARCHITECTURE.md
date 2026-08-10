@@ -10,7 +10,7 @@
 本文描述交互、渲染与发布边界。
 
 底层发布格式仍是 `structural-site-v1/explorer-v1`，其上的统一查询合同是
-`atlas-query-v2`。查询语义、用户界面与发布门禁见
+`atlas-query-v1`。查询语义、用户界面与发布门禁见
 [静态查询能力设计](QUERY_CAPABILITY_DESIGN.md)。最终站点仍是 GitHub Pages 纯静态产物，
 浏览器不运行 LadybugDB。
 
@@ -116,7 +116,7 @@ GPU 承担节点拾取。
 `QueryBundle`。编辑不会自动执行，运行中同一按钮用于停止。用户不需要在搜索和详细查询之间切换，也不面对
 统计、比较、路径等执行模式或内部枚举。
 底层集合、聚合和路径能力仍由同一执行器提供，但不进入默认查询交互。
-查询语义和字段能力由 [atlas-query-v2 合同](QUERY_CAPABILITY_DESIGN.md) 定义。
+查询语义和字段能力由 [atlas-query-v1 合同](QUERY_CAPABILITY_DESIGN.md) 定义。
 
 | 视图能力 | 行为 |
 |---|---|

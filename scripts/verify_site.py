@@ -988,10 +988,10 @@ def verify_release(  # noqa: PLR0915
     query_release = manifest.get("query", {})
     check(
         "查询能力合同完整",
-        query_release.get("schema") == "atlas-release-query-v2"
+        query_release.get("schema") == "atlas-release-query-v1"
         and query_release.get("capabilities")
         == [
-            "atlas-query-v2",
+            "atlas-query-v1",
             "fact-ref-v1",
             "full-text-v1",
         ]

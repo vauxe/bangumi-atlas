@@ -651,7 +651,7 @@ export function normalizeQuery(
 ): QueryDocument {
   const preserveParameters = options.preserveParameters === true;
   if (preserveParameters) normalizeQuery(document, values);
-  if (document.schema !== "atlas-query-document-v2")
+  if (document.schema !== "atlas-query-document-v1")
     throw new TypeError("unsupported query document schema");
   if (
     Object.keys(document.operators).length >
@@ -1102,7 +1102,7 @@ export function normalizeQuery(
     canonicalizeBindings(root, output),
   );
   const normalized: QueryDocument = {
-    schema: "atlas-query-document-v2",
+    schema: "atlas-query-document-v1",
     root: stable.root,
     parameters: preserveParameters
       ? Object.fromEntries(Object.entries(document.parameters).sort(([left], [right]) =>
