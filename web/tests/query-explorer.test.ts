@@ -6,21 +6,27 @@ import { normalizeBundle } from "../src/query/bundle";
 import {
   compileExplorerQuery,
   decompileExplorerQuery,
-  explorerTextCriterion,
   formatExplorerQuery,
 } from "../src/query/explorer";
 import { lowerAtlasQuery } from "../src/query/language";
+import { querySortFields } from "../src/query/workbench-model";
+import { validateQuery } from "../src/query/validate";
+import type { Owner } from "../src/query/contract";
 
-test("builds the detailed-query text criterion from its own input", () => {
-  const quickSearch = { value: "空之境界" };
-  const detailedSearch = { value: "  星海  " };
+test("reports a malformed body query without referring to a UI scope", () => {
+  const draft = {
+    owner: "subject" as const,
+    fullText: { value: "星海", field: undefined },
+  };
 
-  assert.deepEqual(
-    explorerTextCriterion(detailedSearch.value, "fullText", "summary"),
-    { value: "星海", capability: "fullText", field: "summary" },
+  assert.throws(
+    () => formatExplorerQuery(draft as never),
+    /正文检索缺少内容字段/,
   );
-  assert.equal(quickSearch.value, "空之境界");
-  assert.equal(explorerTextCriterion("   ", "lookup", "summary"), undefined);
+  assert.throws(
+    () => compileExplorerQuery(draft as never),
+    /正文检索缺少内容字段/,
+  );
 });
 
 test("does not impose a hidden result limit on an ordinary query", () => {
@@ -30,6 +36,23 @@ test("does not impose a hidden result limit on an ordinary query", () => {
   assert.equal(bundle.sections.results?.query.limit, null);
   assert.doesNotMatch(formatExplorerQuery(draft), /LIMIT/);
   assert.equal(decompileExplorerQuery(bundle)?.limit, undefined);
+});
+
+test("every sort field exposed by the visual editor compiles into an executable query", () => {
+  const owners: Owner[] = ["subject", "person", "character", "episode"];
+  for (const owner of owners) {
+    for (const column of querySortFields(owner)) {
+      const section = compileExplorerQuery({
+        owner,
+        orderBy: [{ column, direction: "asc", nulls: "last" }],
+      }).sections.results;
+      assert.ok(section);
+      assert.doesNotThrow(
+        () => validateQuery(section.query),
+        `${owner}.${column} should be a valid sort choice`,
+      );
+    }
+  }
 });
 
 test("the unified builder composes lookup, fields, relations, sort, and limit", () => {
@@ -71,6 +94,28 @@ test("the unified builder composes lookup, fields, relations, sort, and limit", 
     orderBy: [{ column: "score", direction: "desc", nulls: "last" }],
     limit: 100,
   });
+});
+
+test("composes name lookup and body search without replacing either criterion", () => {
+  const draft = {
+    owner: "subject" as const,
+    text: { value: "机器人", capability: "lookup" as const },
+    fullText: { value: "未来", field: "summary" as const },
+    columns: ["ref", "name"],
+    orderBy: [],
+  };
+
+  const bundle = compileExplorerQuery(draft);
+  const operators = Object.values(bundle.sections.results!.query.operators);
+
+  assert.equal(operators.filter(({ kind }) => kind === "lookup").length, 1);
+  assert.equal(operators.filter(({ kind }) => kind === "fullText").length, 1);
+  assert.ok(operators.some(({ kind }) => kind === "exists"));
+  assert.deepEqual(decompileExplorerQuery(bundle), draft);
+  assert.equal(
+    canonicalJson(normalizeQuery(lowerAtlasQuery(formatExplorerQuery(draft)), {})),
+    canonicalJson(normalizeQuery(bundle.sections.results!.query, {})),
+  );
 });
 
 test("formats the visual editor as executable Atlas Query", () => {
@@ -137,6 +182,25 @@ test("formats an excluded value set without inventing another query model", () =
   assert.deepEqual(decompileExplorerQuery(compileExplorerQuery(draft)), draft);
 });
 
+test("keeps owning-subject filters executable and editable", () => {
+  const draft: Parameters<typeof formatExplorerQuery>[0] = {
+    owner: "episode",
+    condition: {
+      kind: "in",
+      field: "subjectRef",
+      values: ["subject:265", "subject:213"],
+    },
+    columns: ["ref", "name", "subjectRef"],
+    orderBy: [],
+  };
+
+  const source = formatExplorerQuery(draft);
+  assert.match(source, /subjectRef IN \['subject:265', 'subject:213'\]/);
+  assert.doesNotThrow(() => normalizeQuery(compileExplorerQuery(draft).sections.results!.query, {}));
+  assert.doesNotThrow(() => normalizeQuery(lowerAtlasQuery(source), {}));
+  assert.deepEqual(decompileExplorerQuery(compileExplorerQuery(draft)), draft);
+});
+
 test("round-trips complementary contains and null conditions", () => {
   const draft: Parameters<typeof formatExplorerQuery>[0] = {
     owner: "subject",
@@ -188,6 +252,64 @@ test("formats relationship filters with every canonical fact role", () => {
     sections: {
       results: {
         query,
+        answer: { shape: "entity-list", title: "探索结果" },
+      },
+    },
+  }), draft);
+});
+
+test("binds every selected endpoint on the same ternary relationship fact", () => {
+  const draft: Parameters<typeof formatExplorerQuery>[0] = {
+    owner: "character",
+    relations: [{
+      factKind: "VOICE_CREDIT",
+      candidateRole: "character",
+      relatedRole: "person",
+      related: "person:7",
+      additionalEndpoints: [{
+        role: "subjectContext",
+        related: "subject:265",
+      }],
+      exists: true,
+    }],
+    columns: ["ref", "name"],
+    orderBy: [],
+    limit: 20,
+  };
+
+  const bundle = compileExplorerQuery(draft);
+  const query = bundle.sections.results!.query;
+  const match = Object.values(query.operators).find((operator) =>
+    operator.kind === "matchFact" && operator.factKind === "VOICE_CREDIT"
+  );
+  assert.ok(match?.kind === "matchFact");
+  const values = query.operators[match.input];
+  assert.deepEqual(values, {
+    kind: "values",
+    columns: ["relation0Fixed", "relation0Fixed1"],
+    types: {
+      relation0Fixed: "entity:person",
+      relation0Fixed1: "entity:subject",
+    },
+    rows: [["person:7", "subject:265"]],
+  });
+  assert.match(
+    formatExplorerQuery(draft),
+    /person: relation0_related, subjectContext: relation0_related1, character: item/,
+  );
+  assert.match(
+    formatExplorerQuery(draft),
+    /relation0_related\.ref = 'person:7' AND relation0_related1\.ref = 'subject:265'/,
+  );
+  assert.deepEqual(decompileExplorerQuery(bundle), draft);
+
+  const parsed = lowerAtlasQuery(formatExplorerQuery(draft));
+  assert.deepEqual(decompileExplorerQuery({
+    schema: "atlas-query-bundle-v2",
+    release: { policy: "latest" },
+    sections: {
+      results: {
+        query: parsed,
         answer: { shape: "entity-list", title: "探索结果" },
       },
     },
@@ -300,9 +422,8 @@ test("composes grouped statistics and post-statistic conditions", () => {
 test("keeps reusable values typed, editable, and shareable", () => {
   const draft: Parameters<typeof compileExplorerQuery>[0] = {
     owner: "subject",
-    text: {
+    fullText: {
       value: "机器人",
-      capability: "fullText",
       field: "summary",
       parameter: "keyword",
     },

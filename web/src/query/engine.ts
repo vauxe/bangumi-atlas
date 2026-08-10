@@ -1411,6 +1411,10 @@ export async function executeQuery(
     throw new TypeError("offset must be a non-negative integer");
   const query = normalizeQuery(document, parameters);
   const columns = queryResultColumns(query);
+  const visibleColumns = new Set(Object.keys(columns));
+  const publicRow = (row: QueryRow): QueryRow => Object.fromEntries(
+    Object.entries(row).filter(([column]) => visibleColumns.has(column)),
+  );
   const limit = query.limit ?? Number.POSITIVE_INFINITY;
   const cap = Math.min(limit, offset + options.pageSize);
   const orderBy = query.orderBy ?? [];
@@ -1434,7 +1438,7 @@ export async function executeQuery(
     options.signal,
   )) {
     options.signal?.throwIfAborted();
-    const key = distinct ? rowKey(row) : null;
+    const key = distinct ? rowKey(publicRow(row)) : null;
     if (key !== null && distinct?.has(key)) continue;
     if (key !== null) distinct?.add(key);
     totalMatches++;
@@ -1446,15 +1450,19 @@ export async function executeQuery(
 
   totalMatches = Math.min(totalMatches, limit);
   const visibleMatches = totalMatches;
-  const rows = top.slice(offset, Math.min(offset + options.pageSize, visibleMatches));
+  const page = top.slice(offset, Math.min(offset + options.pageSize, visibleMatches));
+  const publicEvidence = (row: QueryRow): RowEvidence => Object.fromEntries(
+    Object.entries(rowEvidence(context, row))
+      .filter(([column]) => visibleColumns.has(column)),
+  );
   const [digest, coverage] = await metadata;
   return {
-    rows: rows.map((ranked) => ranked.row),
-    evidence: rows.map((ranked) => rowEvidence(context, ranked.row)),
+    rows: page.map((ranked) => publicRow(ranked.row)),
+    evidence: page.map((ranked) => publicEvidence(ranked.row)),
     columns,
     totalMatches,
     visibleMatches,
-    hasMore: visibleMatches > offset + rows.length,
+    hasMore: visibleMatches > offset + page.length,
     stability: "exact",
     queryDigest: digest,
     releaseId: source.releaseId ?? null,

@@ -38,6 +38,8 @@ type ValueType =
 interface TypeInfo {
   type: ValueType;
   semantic?: string;
+  /** Internal execution column excluded from QueryResult rows. */
+  hidden?: boolean;
   /** Capabilities inherited from a projected source field. */
   capabilities?: ReadonlySet<FieldCapability>;
   operators?: ReadonlySet<string>;
@@ -55,6 +57,12 @@ function literalType(value: LiteralValue): ValueType {
   if (typeof value === "string") return "string";
   if (typeof value === "boolean") return "boolean";
   throw new TypeError("literal is not a query scalar");
+}
+
+function fieldValueType(type: string): ValueType {
+  if (type.startsWith("entity:"))
+    return `entity-ref:${type.slice(7) as Owner}`;
+  return type as ValueType;
 }
 
 function compatible(left: ValueType, right: ValueType): boolean {
@@ -124,9 +132,7 @@ function inferExpression(
         if (!operators)
           throw new TypeError(`${owner}.${expression.field} has no operator set`);
         return {
-          type: expression.field === "ref"
-            ? `entity-ref:${owner}`
-            : field.type as ValueType,
+          type: fieldValueType(field.type),
           semantic: `${owner}.${expression.field}`,
           capabilities: new Set(field.capabilities),
           operators: new Set(operators),
@@ -137,7 +143,7 @@ function inferExpression(
         const definition = capability
           ? assertFactFieldCapability(kind, expression.field, capability)
           : factFieldDefinition(kind, expression.field);
-        const fieldType = definition.type;
+        const fieldType = fieldValueType(definition.type);
         const operatorSet = definition.operators;
         return {
           type: fieldType as ValueType,
@@ -380,7 +386,10 @@ export function validateQuery(document: QueryDocument): RowSchema {
         schema = Object.fromEntries(
           operator.columns.map((column) => [
             column.name,
-            inferExpression(column.value, input, "project"),
+            {
+              ...inferExpression(column.value, input, "project"),
+              ...(column.hidden ? { hidden: true } : {}),
+            },
           ]),
         );
         break;
@@ -517,6 +526,7 @@ export function validateQuery(document: QueryDocument): RowSchema {
             schema[column.output] = {
               ...previous,
               type,
+              hidden: previous.hidden && info.hidden ? true : undefined,
               semantic: previous.semantic === info.semantic ? previous.semantic : undefined,
               capabilities: previous.semantic === info.semantic
                 ? new Set(
@@ -580,12 +590,14 @@ export function queryResultColumns(
   document: QueryDocument,
 ): Record<string, QueryResultColumn> {
   return Object.fromEntries(
-    Object.entries(validateQuery(document)).map(([name, info]) => [
-      name,
-      {
-        type: info.type,
-        ...(info.semantic ? { semantic: info.semantic } : {}),
-      },
-    ]),
+    Object.entries(validateQuery(document))
+      .filter(([, info]) => !info.hidden)
+      .map(([name, info]) => [
+        name,
+        {
+          type: info.type,
+          ...(info.semantic ? { semantic: info.semantic } : {}),
+        },
+      ]),
   );
 }

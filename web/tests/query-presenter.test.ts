@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  completionActions,
+  describeFactCondition,
   queryInputValue,
   queryTokens,
 } from "../src/query/presenter";
@@ -16,6 +16,15 @@ const mappings: Mappings = {
   character_role: {},
   episode_type: {},
 };
+
+test("describes a relationship attribute condition in user language", () => {
+  assert.equal(describeFactCondition("WORKED_ON", {
+    kind: "compare",
+    field: "position",
+    operator: "eq",
+    value: 2,
+  }, mappings), "职位 = 导演");
+});
 
 test("projects a list draft as one readable query sentence", () => {
   const tokens = queryTokens({
@@ -50,9 +59,9 @@ test("projects a list draft as one readable query sentence", () => {
   });
 
   assert.deepEqual(tokens.map((token) => token.label), [
-    "查找作品",
+    "作品",
     "评分 ≥ 8",
-    "人物参与 · 人物是宫崎骏 · 职位 = 导演",
+    "导演是宫崎骏",
     "按评分降序",
   ]);
   assert.equal(queryInputValue({
@@ -64,33 +73,211 @@ test("projects a list draft as one readable query sentence", () => {
   }), "机器人");
 });
 
+test("uses readable enum labels for conditions shared by multiple entity types", () => {
+  const condition = queryTokens({
+    kind: "list",
+    query: {
+      scope: ["subject", "person", "character"],
+      condition: {
+        kind: "compare",
+        field: "summaryState",
+        operator: "eq",
+        value: "HAS",
+      },
+    },
+  }).find(({ kind }) => kind === "condition");
+
+  assert.equal(condition?.label, "是否有简介 = 有简介");
+});
+
+test("names the entity scope of a type-specific sort rule", () => {
+  const order = queryTokens({
+    kind: "list",
+    query: {
+      scope: ["subject", "person", "character"],
+      orderBy: [{
+        column: "score",
+        owners: ["subject"],
+        direction: "desc",
+        nulls: "last",
+      }, {
+        column: "name",
+        direction: "asc",
+        nulls: "first",
+      }],
+    },
+  }).find(({ kind }) => kind === "order");
+
+  assert.equal(order?.label, "先按作品的评分降序，再按原名升序");
+});
+
+test("states a negative relationship as an exclusion", () => {
+  const token = queryTokens({
+    kind: "list",
+    query: {
+      scope: ["subject"],
+      relations: [{
+        factKind: "WORKED_ON",
+        candidateRole: "subject",
+        relatedRole: "person",
+        related: "person:7",
+        exists: false,
+        condition: {
+          kind: "compare",
+          field: "position",
+          operator: "eq",
+          value: 2,
+        },
+      }],
+    },
+  }, {
+    mappings,
+    entityLabel: () => "宫崎骏",
+  }).find(({ kind }) => kind === "relation");
+
+  assert.equal(token?.label, "排除：导演是宫崎骏");
+});
+
+test("shows an Episode's owning Subject by name instead of its reference", () => {
+  const token = queryTokens({
+    kind: "list",
+    query: {
+      scope: ["episode"],
+      condition: {
+        kind: "compare",
+        field: "subjectRef",
+        operator: "eq",
+        value: "subject:265",
+      },
+    },
+  }, {
+    entityLabel: (ref) => ref === "subject:265" ? "新世纪福音战士" : ref,
+  }).find(({ kind }) => kind === "condition");
+
+  assert.equal(token?.label, "所属作品 = 新世纪福音战士");
+});
+
+test("keeps reference-shaped ordinary text as text", () => {
+  const token = queryTokens({
+    kind: "list",
+    query: {
+      scope: ["subject"],
+      condition: {
+        kind: "compare",
+        field: "name",
+        operator: "eq",
+        value: "subject:265",
+      },
+    },
+  }, {
+    entityLabel: () => "不应使用的条目名",
+  }).find(({ kind }) => kind === "condition");
+
+  assert.equal(token?.label, "原名 = “subject:265”");
+});
+
+test("describes a generic relationship without technical sentence fragments", () => {
+  const token = queryTokens({
+    kind: "list",
+    query: {
+      scope: ["subject"],
+      relations: [{
+        factKind: "RELATES_TO",
+        candidateRole: "source",
+        relatedRole: "target",
+        related: "subject:265",
+        exists: true,
+      }],
+    },
+  }, {
+    entityLabel: () => "新世纪福音战士",
+  }).find(({ kind }) => kind === "relation");
+
+  assert.equal(token?.label, "作品关系：新世纪福音战士");
+});
+
+test("describes every endpoint constrained on one voice-credit fact", () => {
+  const token = queryTokens({
+    kind: "list",
+    query: {
+      scope: ["character"],
+      relations: [{
+        factKind: "VOICE_CREDIT",
+        candidateRole: "character",
+        relatedRole: "person",
+        related: "person:7",
+        additionalEndpoints: [{
+          role: "subjectContext",
+          related: "subject:265",
+        }],
+        exists: true,
+      }],
+    },
+  }, {
+    entityLabel: (ref) => ({
+      "person:7": "花泽香菜",
+      "subject:265": "化物语",
+    })[ref],
+  }).find(({ kind }) => kind === "relation");
+
+  assert.equal(token?.label, "配音：花泽香菜 · 作品：化物语");
+});
+
+test("presents an ordered top-N answer as one semantic token", () => {
+  const tokens = queryTokens({
+    kind: "list",
+    query: {
+      scope: ["subject"],
+      orderBy: [{ column: "score", direction: "desc", nulls: "last" }],
+      limit: 10,
+    },
+  });
+
+  assert.deepEqual(tokens.map((token) => token.label), [
+    "作品",
+    "前 10 条 · 按评分降序",
+  ]);
+  assert.deepEqual(tokens.map((token) => token.target.type), ["owner", "order"]);
+});
+
+test("keeps a restored standalone limit visible for compatibility", () => {
+  const tokens = queryTokens({
+    kind: "list",
+    query: { scope: ["subject"], limit: 10 },
+  });
+
+  assert.deepEqual(tokens.map((token) => token.label), [
+    "作品",
+    "最多 10 条",
+  ]);
+  assert.equal(tokens[1]?.target.type, "limit");
+});
+
 test("keeps full text visible as a semantic token rather than plain name input", () => {
   const draft = {
     kind: "list" as const,
     query: {
       scope: ["character"] as const,
-      text: {
-        value: "时间旅行",
-        capability: "fullText" as const,
-        field: "summary" as const,
-      },
+      fullText: { value: "时间旅行" },
     },
   };
 
   assert.equal(queryInputValue(draft), "");
   assert.deepEqual(queryTokens(draft).map((token) => token.label), [
-    "查找角色",
+    "角色",
     "简介含“时间旅行”",
   ]);
 });
 
 test("presents cross-scope long text as one list query", () => {
   const draft = { kind: "list" as const, allText: "星空" };
-  assert.deepEqual(queryTokens(draft).map((token) => token.label), [
+  const tokens = queryTokens(draft);
+  assert.deepEqual(tokens.map((token) => token.label), [
     "查找正文",
     "所有正文与关系备注",
     "正文含“星空”",
   ]);
+  assert.equal(tokens[0]?.editable, false);
   assert.equal(queryInputValue(draft), "");
 });
 
@@ -138,37 +325,6 @@ test("uses domain labels for statistic conditions on grouped enum fields", () =>
     "统计结果中类型 = 动画");
 });
 
-test("offers only actions that are valid for the current answer shape", () => {
-  const list = completionActions({
-    kind: "list",
-    query: { scope: ["subject"] },
-  }, "/统");
-  assert.deepEqual(list.map((item) => item.id), ["aggregate"]);
-
-  const path = completionActions({
-    kind: "path",
-    from: "subject:1",
-    to: "person:2",
-    maxHops: 6,
-    maxPaths: 10,
-  }, "");
-  assert.deepEqual(path.map((item) => item.id), [
-    "list",
-    "comparison",
-    "path",
-  ]);
-
-  const episode = completionActions({
-    kind: "list",
-    query: { scope: ["episode"] },
-  }, "");
-  assert.equal(episode.some((item) => item.id === "relation"), false);
-  assert.equal(completionActions({
-    kind: "list",
-    query: { scope: ["subject"] },
-  }, "").some((item) => item.id === "relation"), true);
-});
-
 test("renders comparison and path endpoints by meaning, not stable ids", () => {
   const labels = (ref: string): string => ({
     "subject:1": "千与千寻",
@@ -202,6 +358,11 @@ test("renders comparison and path endpoints by meaning, not stable ids", () => {
     from: "subject:1",
     to: "person:2",
   })[0]?.target.type, "head");
+  assert.equal(queryTokens({
+    kind: "comparison",
+    from: "subject:1",
+    to: "person:2",
+  })[0]?.editable, false);
 });
 
 test("makes the default scope readable and labels every narrowing action", () => {
@@ -213,12 +374,17 @@ test("makes the default scope readable and labels every narrowing action", () =>
     },
   };
 
-  assert.equal(queryTokens(draft)[0]?.label, "查找全部");
-  const conditions = completionActions(draft, "")
-    .filter((action) => action.id === "condition");
-  assert.deepEqual(conditions.map((action) => [action.label, action.owner]), [
-    ["作品 · 添加条件", "subject"],
-    ["人物 · 添加条件", "person"],
-    ["角色 · 添加条件", "character"],
-  ]);
+  assert.equal(queryTokens(draft)[0]?.label, "作品、人物、角色");
+  assert.equal(queryTokens(draft)[0]?.target.type, "owner");
+});
+
+test("names multi-type scopes by what they actually contain", () => {
+  assert.equal(queryTokens({
+    kind: "list",
+    query: { scope: ["subject", "character"] },
+  })[0]?.label, "作品、角色");
+  assert.equal(queryTokens({
+    kind: "list",
+    query: { scope: ["subject", "person", "character", "episode"] },
+  })[0]?.label, "全部类型");
 });

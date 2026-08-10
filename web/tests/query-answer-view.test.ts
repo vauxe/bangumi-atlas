@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
@@ -25,6 +26,7 @@ const mappings: Mappings = {
 };
 
 class FakeElement {
+  readonly attributes = new Map<string, string>();
   children: FakeElement[] = [];
   className = "";
   textContent = "";
@@ -48,7 +50,9 @@ class FakeElement {
     this.listeners.set(type, listener);
   }
 
-  setAttribute(): void {}
+  setAttribute(name: string, value: string): void {
+    this.attributes.set(name, value);
+  }
 
   createTHead(): FakeElement {
     const head = new FakeElement();
@@ -178,6 +182,14 @@ test("renders common entity codes as user-facing labels", () => {
     queryValueText(99, { column: "type", row: { ref: "subject:42" } }),
     "未知作品类型（99）",
   );
+});
+
+test("renders person careers as readable labels without changing raw data", () => {
+  assert.equal(queryValueText(["seiyu", "writer"], {
+    column: "career",
+    row: { ref: "person:42" },
+    semantic: "person.career",
+  }), "声优、作家");
 });
 
 test("labels unknown release enum values with their domain meaning", () => {
@@ -422,9 +434,28 @@ test("shows Chinese and original entity names without repeating identical names"
     const identical = body?.children[1]?.children[0]?.children[0];
     assert.equal(visibleText(bilingual as FakeElement), "中文名 原題");
     assert.equal(visibleText(identical as FakeElement), "同名");
+    assert.equal(bilingual?.attributes.has("aria-label"), false);
   } finally {
     globalThis.document = originalDocument;
   }
+});
+
+test("keeps result links readable", () => {
+  const styles = readFileSync("src/query/workbench.css", "utf8");
+  assert.match(styles, /\.query-entity-link\s*\{[^}]*text-align:\s*left;/s);
+});
+
+test("adapts result cards to the answer workspace instead of the viewport", () => {
+  const styles = readFileSync("src/query/workbench.css", "utf8");
+
+  assert.match(
+    styles,
+    /\.query-workspace\s*\{[^}]*width:\s*100%;[^}]*container-type:\s*inline-size;/s,
+  );
+  assert.match(
+    styles,
+    /@container\s*\(max-width:\s*34rem\)\s*\{[\s\S]*?\.query-table tbody tr:not\(\.query-match-row\)/s,
+  );
 });
 
 test("keeps result tables for reading instead of duplicating the query editor", () => {

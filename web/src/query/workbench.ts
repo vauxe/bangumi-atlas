@@ -12,7 +12,7 @@ import type { QueryResult } from "./engine";
 import { queryResultEntityRefs, renderAnswer } from "./answer-view";
 import {
   QueryBar,
-  type EntitySuggestion,
+  type EntitySuggestionBatch,
   type NameSuggestion,
   type SelectedQueryEntity,
 } from "./query-bar";
@@ -24,7 +24,8 @@ import {
 import { QUERY_SECURITY_PROFILE } from "./security";
 import type { Owner } from "./contract";
 import { notify, state } from "../store";
-import type { Mappings } from "../types";
+import type { Mappings, TagVocabularyField } from "../types";
+import { setQueryIconButton, type QueryIconName } from "./icons";
 
 export interface QueryWorkbenchDependencies {
   host?: HTMLElement;
@@ -38,12 +39,18 @@ export interface QueryWorkbenchDependencies {
     text: string,
     owners: readonly Owner[],
     signal: AbortSignal,
-  ): Promise<EntitySuggestion[]>;
+  ): AsyncIterable<EntitySuggestionBatch>;
   suggestNames?(
     text: string,
     owners: readonly Owner[],
     signal: AbortSignal,
   ): Promise<NameSuggestion[]>;
+  suggestTagValues?(
+    field: TagVocabularyField,
+    text: string,
+    signal: AbortSignal,
+  ): Promise<readonly string[]>;
+  featuredMetaTagValues?: readonly string[];
   onNameSuggestion?(suggestion: NameSuggestion): void | Promise<void>;
   releaseId(): string;
   onEntity(ref: string): void | Promise<void>;
@@ -62,21 +69,33 @@ function action(label: string, className = ""): HTMLButtonElement {
   return result;
 }
 
+function iconAction(
+  icon: QueryIconName,
+  label: string,
+  className = "",
+): HTMLButtonElement {
+  const result = action("", className);
+  setQueryIconButton(result, icon, label);
+  return result;
+}
+
+function labeledIconAction(
+  icon: QueryIconName,
+  label: string,
+  className = "",
+): HTMLButtonElement {
+  const result = iconAction(icon, label, className);
+  const text = document.createElement("span");
+  text.textContent = label;
+  result.append(text);
+  return result;
+}
+
 function enoughText(draft: QueryDraft): boolean {
   const text = draft.kind === "list" && !draft.query
     ? draft.allText.trim()
     : draftQuery(draft)?.text?.value.trim();
   return !text || [...text].length >= 2;
-}
-
-/** Plain name location stays on the canvas; every exact/structured answer uses the workspace. */
-export function queryNeedsWorkspace(draft: QueryDraft): boolean {
-  if (draft.kind !== "list" || !draft.query) return true;
-  const query = draft.query;
-  return query.text?.capability === "fullText" || Boolean(
-    query.condition || query.relations?.length || query.columns?.length ||
-    query.orderBy?.length || query.limit !== undefined,
-  );
 }
 
 /** Merge the entities present in each currently rendered answer section. */
@@ -89,24 +108,42 @@ export function mergeQueryResultRefs(
   return [...refs];
 }
 
+export function queryWorkspaceVisibility(
+  expanded: boolean,
+  hasAnswer: boolean,
+  running: boolean,
+): { workspaceHidden: boolean; reopenHidden: boolean } {
+  return {
+    workspaceHidden: !expanded,
+    reopenHidden: expanded || !(hasAnswer || running),
+  };
+}
+
+export function queryHighlightStatus(count: number, current: boolean): string {
+  return count > 0
+    ? `图上 ${count.toLocaleString()} 个${current ? "当前" : "上次"}结果`
+    : "";
+}
+
 export class QueryWorkbench {
   private readonly panel = document.createElement("main");
   private readonly workspace = document.createElement("section");
   private readonly status = document.createElement("div");
   private readonly highlightStatus = document.createElement("span");
   private readonly answers = document.createElement("div");
-  private readonly stopButton = action("停止", "query-stop");
-  private readonly reopenButton = action("↗", "query-reopen");
+  private readonly reopenButton = labeledIconAction("expand", "查看结果", "query-reopen");
   private readonly bar: QueryBar;
   private controller: AbortController | null = null;
   private running = false;
   private runnable = true;
   private expanded = false;
   private hasAnswer = false;
-  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private lastBundle = "";
+  private answerBundle = "";
   private resultRefsBySection = new Map<string, string[]>();
   private highlightSerial = 0;
+  private highlightCount = 0;
+  private resultsCurrent = false;
 
   constructor(private readonly dependencies: QueryWorkbenchDependencies) {
     this.panel.id = "query-workbench";
@@ -119,7 +156,6 @@ export class QueryWorkbench {
     const barHost = document.createElement("div");
     barHost.className = "query-bar-host";
     this.reopenButton.hidden = true;
-    this.reopenButton.setAttribute("aria-label", "重新打开查询答案");
     this.reopenButton.setAttribute("aria-controls", "query-workspace");
     compose.append(barHost, this.reopenButton);
 
@@ -130,17 +166,14 @@ export class QueryWorkbench {
     const toolbar = document.createElement("header");
     const meta = document.createElement("div");
     meta.className = "query-workspace-meta";
-    const reset = action("清空", "query-reset");
-    const collapse = action("×", "query-collapse");
-    collapse.setAttribute("aria-label", "收起查询答案");
-    this.stopButton.hidden = true;
-    this.stopButton.setAttribute("aria-label", "停止当前查询");
+    const reset = action("清空查询", "query-reset");
+    const collapse = iconAction("collapse", "收起结果", "query-collapse");
     this.status.className = "query-status";
     this.status.setAttribute("role", "status");
     this.status.setAttribute("aria-live", "polite");
     this.highlightStatus.className = "query-highlight-status";
     meta.append(this.status, this.highlightStatus);
-    toolbar.append(meta, this.stopButton, reset, collapse);
+    toolbar.append(meta, reset, collapse);
 
     this.answers.className = "query-answers";
     this.answers.setAttribute("aria-label", "查询答案内容");
@@ -152,11 +185,14 @@ export class QueryWorkbench {
       draft: defaultQueryDraft(),
       onChange: (draft) => this.draftChanged(draft),
       onSubmit: () => this.runCurrent(),
+      onCancel: () => this.cancelCurrent(),
       reportError: (error) => this.showError(error),
       selectedEntity: dependencies.selectedEntity,
       resolveEntityLabel: dependencies.resolveEntityLabel,
       suggestEntities: dependencies.suggestEntities,
       suggestNames: dependencies.suggestNames,
+      suggestTagValues: dependencies.suggestTagValues,
+      featuredMetaTagValues: dependencies.featuredMetaTagValues,
       onNameSuggestion: dependencies.onNameSuggestion
         ? (suggestion) => {
             void Promise.resolve(dependencies.onNameSuggestion?.(suggestion))
@@ -170,7 +206,6 @@ export class QueryWorkbench {
     this.reopenButton.addEventListener("click", () => this.expand(false));
     collapse.addEventListener("click", () => this.collapse());
     reset.addEventListener("click", () => this.newQuery());
-    this.stopButton.addEventListener("click", () => this.cancelCurrent());
     this.panel.addEventListener("keydown", (event) => {
       if (event.isComposing || event.defaultPrevented || event.key !== "Escape") return;
       if (this.bar.dismissCompletion()) {
@@ -208,12 +243,18 @@ export class QueryWorkbench {
       if (!this.lastBundle) return;
       this.abortCurrent(new DOMException("query navigation", "AbortError"));
       this.lastBundle = "";
+      this.answerBundle = "";
       this.hasAnswer = false;
+      this.resultsCurrent = false;
+      this.highlightCount = 0;
+      this.renderHighlightStatus();
       this.resultRefsBySection = new Map();
       this.publishResultEntities();
       this.answers.replaceChildren();
       this.setStatus("");
       this.bar.replace(defaultQueryDraft());
+      this.runnable = true;
+      this.updateRunState();
       this.collapse(false);
       return;
     }
@@ -221,7 +262,11 @@ export class QueryWorkbench {
     const key = canonicalJson(normalized);
     if (key === this.lastBundle) return;
     const draft = queryDraftFromBundle(normalized);
-    if (draft) this.bar.replace(draft);
+    if (draft) {
+      this.bar.replace(draft);
+      this.runnable = true;
+      this.updateRunState();
+    }
     this.expand();
     void this.runBundle(normalized, false).then(() => {
       if (!draft) this.setStatus("此旧查询只能查看结果");
@@ -230,24 +275,34 @@ export class QueryWorkbench {
 
   private expand(focus = true): void {
     this.expanded = true;
-    this.workspace.hidden = false;
-    this.reopenButton.hidden = true;
+    this.syncWorkspaceVisibility();
     if (focus) this.bar.focus();
   }
 
   private collapse(focus = true): void {
-    if (this.running)
-      this.abortCurrent(new DOMException("query workspace collapsed", "AbortError"));
     this.expanded = false;
-    this.workspace.hidden = true;
-    this.reopenButton.hidden = !this.hasAnswer;
+    this.syncWorkspaceVisibility();
     if (focus) this.bar.focus();
+  }
+
+  private syncWorkspaceVisibility(): void {
+    const visibility = queryWorkspaceVisibility(
+      this.expanded,
+      this.hasAnswer,
+      this.running,
+    );
+    this.workspace.hidden = visibility.workspaceHidden;
+    this.reopenButton.hidden = visibility.reopenHidden;
   }
 
   private newQuery(): void {
     this.abortCurrent(new DOMException("new query", "AbortError"));
     this.lastBundle = "";
+    this.answerBundle = "";
     this.hasAnswer = false;
+    this.resultsCurrent = false;
+    this.highlightCount = 0;
+    this.renderHighlightStatus();
     this.resultRefsBySection = new Map();
     this.publishResultEntities();
     state.queryBundle = null;
@@ -257,30 +312,34 @@ export class QueryWorkbench {
     this.answers.replaceChildren();
     this.setStatus("");
     this.bar.replace(defaultQueryDraft());
+    this.runnable = true;
+    this.updateRunState();
     this.collapse();
   }
 
   private draftChanged(draft: QueryDraft): void {
-    if (this.refreshTimer !== null) clearTimeout(this.refreshTimer);
-    this.refreshTimer = null;
     this.abortCurrent(new DOMException("query changed", "AbortError"));
     this.setStatus("");
     if (!enoughText(draft)) {
+      this.resultsCurrent = false;
+      this.renderHighlightStatus();
       this.runnable = false;
       this.setStatus("名称至少需要两个字才能查看完整结果");
+      this.updateRunState();
       return;
     }
     try {
-      compileQueryDraft(draft);
+      const bundle = normalizeBundle(compileQueryDraft(draft));
+      this.resultsCurrent = this.hasAnswer &&
+        canonicalJson(bundle) === this.answerBundle;
+      this.renderHighlightStatus();
       this.runnable = true;
-      if (queryNeedsWorkspace(draft)) this.expand(false);
-      if (!this.expanded) return;
-      this.refreshTimer = setTimeout(() => {
-        this.refreshTimer = null;
-        this.runCurrent(false);
-      }, 220);
+      this.updateRunState();
     } catch (error) {
+      this.resultsCurrent = false;
+      this.renderHighlightStatus();
       this.runnable = false;
+      this.updateRunState();
       this.showError(error);
     }
   }
@@ -290,21 +349,26 @@ export class QueryWorkbench {
     try {
       this.expand(focus);
       const bundle = compileQueryDraft(this.bar.current());
+      this.runnable = true;
+      this.updateRunState();
       void this.runBundle(bundle, true).catch((error) => this.showError(error));
     } catch (error) {
+      this.runnable = false;
+      this.updateRunState();
       this.showError(error);
     }
   }
 
   private async runBundle(bundle: QueryBundle, persist: boolean): Promise<void> {
-    if (this.refreshTimer !== null) clearTimeout(this.refreshTimer);
-    this.refreshTimer = null;
     const normalized = normalizeBundle(bundle);
+    const bundleKey = canonicalJson(normalized);
     this.abortCurrent(new DOMException("superseded query", "AbortError"));
     const controller = new AbortController();
     this.controller = controller;
     this.setRunning(true);
-    this.lastBundle = canonicalJson(normalized);
+    this.lastBundle = bundleKey;
+    this.resultsCurrent = this.hasAnswer && bundleKey === this.answerBundle;
+    this.renderHighlightStatus();
     const currentRelease = this.dependencies.releaseId();
     if (
       normalized.release.policy === "fixed" &&
@@ -353,6 +417,11 @@ export class QueryWorkbench {
           this.answers.replaceChildren(...cards.map(({ card }) => card));
           this.answers.setAttribute("aria-busy", "false");
           this.hasAnswer = true;
+          this.answerBundle = bundleKey;
+          this.resultsCurrent = true;
+          this.highlightCount = 0;
+          this.renderHighlightStatus();
+          this.syncWorkspaceVisibility();
           this.resultRefsBySection = pendingRefs;
           this.publishResultEntities();
         },
@@ -464,7 +533,15 @@ export class QueryWorkbench {
 
   private setRunning(running: boolean): void {
     this.running = running;
-    this.stopButton.hidden = !running;
+    this.syncWorkspaceVisibility();
+    this.updateRunState();
+  }
+
+  private updateRunState(): void {
+    this.bar.setExecutionState({
+      running: this.running,
+      runnable: this.runnable,
+    });
   }
 
   private setStatus(message: string): void {
@@ -475,18 +552,25 @@ export class QueryWorkbench {
     const serial = ++this.highlightSerial;
     const refs = mergeQueryResultRefs(this.resultRefsBySection);
     if (!this.dependencies.onResultEntities) {
-      this.highlightStatus.textContent = "";
+      this.highlightCount = 0;
+      this.renderHighlightStatus();
       return;
     }
     void Promise.resolve().then(() =>
       this.dependencies.onResultEntities?.(refs) ?? 0
     ).then((count) => {
       if (serial !== this.highlightSerial) return;
-      this.highlightStatus.textContent = count > 0
-        ? `图上 ${count.toLocaleString()} 个当前结果`
-        : "";
+      this.highlightCount = count;
+      this.renderHighlightStatus();
     }).catch((error) => {
       if (serial === this.highlightSerial) this.showError(error);
     });
+  }
+
+  private renderHighlightStatus(): void {
+    this.highlightStatus.textContent = queryHighlightStatus(
+      this.highlightCount,
+      this.resultsCurrent,
+    );
   }
 }

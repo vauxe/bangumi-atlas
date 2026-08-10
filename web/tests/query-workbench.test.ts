@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
@@ -12,47 +13,67 @@ import {
   factEnumValues,
   FIELD_LABEL,
   parseFactValue,
+  parseValue,
   describeAggregateMetric,
   queryAggregateFields,
+  queryAddFilterFields,
+  queryConditionOperatorLabel,
   queryConditionOperators,
   queryFactConditionOperators,
+  queryFactDiscriminatorField,
   queryFactFields,
+  queryFilterFields,
+  queryFieldsFor,
   queryGroupFields,
+  queryScalarInputType,
   queryProjectFields,
+  queryReferenceOwner,
   queryRelationOptions,
+  queryRelationContextRoles,
   queryRelationTargetOwner,
   querySortFields,
   queryStatisticColumns,
-  queryTextScopes,
+  splitFactDiscriminatorCondition,
 } from "../src/query/workbench-model";
 import {
   mergeQueryResultRefs,
-  queryNeedsWorkspace,
+  queryHighlightStatus,
+  queryWorkspaceVisibility,
 } from "../src/query/workbench";
 
-test("keeps plain name location compact and expands for structured answers", () => {
-  assert.equal(queryNeedsWorkspace({
-    kind: "list",
-    query: {
-      scope: ["subject", "person", "character"],
-      text: { value: "机器人", capability: "lookup" },
-    },
-  }), false);
-  assert.equal(queryNeedsWorkspace({
-    kind: "list",
-    query: {
-      scope: ["subject"],
-      condition: { kind: "compare", field: "score", operator: "gte", value: 8 },
-    },
-  }), true);
-  assert.equal(queryNeedsWorkspace({ kind: "list", allText: "时间旅行" }), true);
-  assert.equal(queryNeedsWorkspace({
-    kind: "aggregate",
-    query: {
-      owner: "subject",
-      aggregate: { groupBy: ["year"], metrics: [{ function: "count" }] },
-    },
-  }), true);
+const workbenchSource = readFileSync("src/query/workbench.ts", "utf8");
+
+test("changes the query draft without scheduling result execution", () => {
+  assert.doesNotMatch(workbenchSource, /refreshTimer/);
+  const draftChanged = workbenchSource.match(
+    /private draftChanged\([\s\S]*?\n  }(?=\n\n  private runCurrent)/,
+  )?.[0];
+  assert.ok(draftChanged);
+  assert.doesNotMatch(draftChanged, /setTimeout|runCurrent/);
+});
+
+test("collapses results without cancelling the query or hiding the way back", () => {
+  assert.deepEqual(queryWorkspaceVisibility(false, false, true), {
+    workspaceHidden: true,
+    reopenHidden: false,
+  });
+  assert.deepEqual(queryWorkspaceVisibility(false, true, false), {
+    workspaceHidden: true,
+    reopenHidden: false,
+  });
+  assert.deepEqual(queryWorkspaceVisibility(false, false, false), {
+    workspaceHidden: true,
+    reopenHidden: true,
+  });
+
+  const collapse = workbenchSource.match(
+    /private collapse\([\s\S]*?\n  }(?=\n\n  private newQuery)/,
+  )?.[0];
+  assert.ok(collapse);
+  assert.doesNotMatch(collapse, /abortCurrent/);
+  assert.match(workbenchSource, /iconAction\("collapse", "收起结果"/);
+  assert.match(workbenchSource, /labeledIconAction\("expand", "查看结果"/);
+  assert.match(workbenchSource, /action\("清空查询", "query-reset"\)/);
 });
 
 test("merges visible answer entities in stable section order", () => {
@@ -62,15 +83,17 @@ test("merges visible answer entities in stable section order", () => {
   ])), ["subject:1", "person:2", "character:3"]);
 });
 
-test("offers one readable text-scope control for each entity type", () => {
-  assert.deepEqual(queryTextScopes("subject"), [
-    { value: "lookup", label: "名称含" },
-    { value: "fullText:summary", label: "简介含" },
-  ]);
-  assert.deepEqual(queryTextScopes("episode"), [
-    { value: "lookup", label: "名称含" },
-    { value: "fullText:description", label: "分集介绍含" },
-  ]);
+test("labels retained graph highlights as previous results after query edits", () => {
+  assert.equal(queryHighlightStatus(25, true), "图上 25 个当前结果");
+  assert.equal(queryHighlightStatus(25, false), "图上 25 个上次结果");
+  assert.equal(queryHighlightStatus(0, false), "");
+});
+
+test("publishes the body field for each entity type", () => {
+  assert.deepEqual(queryFieldsFor("subject", "fullText"), ["summary"]);
+  assert.deepEqual(queryFieldsFor("person", "fullText"), ["summary"]);
+  assert.deepEqual(queryFieldsFor("character", "fullText"), ["summary"]);
+  assert.deepEqual(queryFieldsFor("episode", "fullText"), ["description"]);
 });
 
 test("accepts a user-chosen result count without an arbitrary product maximum", () => {
@@ -109,11 +132,38 @@ test("derives friendly condition operators from the field contract", () => {
   ]);
 });
 
+test("uses semantic input controls for numeric, date, and raw string fields", () => {
+  assert.equal(queryScalarInputType("subject", "score"), "number");
+  assert.equal(queryScalarInputType("subject", "ratingCount"), "number");
+  assert.equal(queryScalarInputType("subject", "totalCollections"), "number");
+  assert.equal(queryScalarInputType("episode", "sort"), "number");
+  assert.equal(queryScalarInputType("episode", "duration"), "text");
+  assert.equal(queryScalarInputType("subject", "date"), "date");
+  assert.equal(queryScalarInputType("episode", "airdate"), "date");
+  assert.equal(queryConditionOperatorLabel("subject", "date", "lt"), "早于");
+  assert.equal(queryConditionOperatorLabel("episode", "airdate", "gte"), "不早于");
+});
+
+test("keeps the full query contract while curating the default condition menu", () => {
+  assert.equal(queryFilterFields("subject").includes("name"), true);
+  assert.equal(queryFilterFields("subject").includes("nameCn"), true);
+  assert.equal(queryFilterFields("episode").includes("duration"), true);
+  assert.equal(queryAddFilterFields("subject").includes("name"), false);
+  assert.equal(queryAddFilterFields("subject").includes("nameCn"), false);
+  assert.equal(queryAddFilterFields("episode").includes("duration"), true);
+  assert.equal(queryAddFilterFields("episode").includes("airdate"), true);
+});
+
 test("uses release enum names in entity condition controls", () => {
   const mappings = {
     fact_labels: {},
     subject_type: { "2": "动画" },
-    platform: {},
+    platform: {
+      "1:0": "其他",
+      "1:1001": "漫画",
+      "2:0": "其他",
+      "2:1": "TV",
+    },
     person_type: { "1": "个人" },
     character_role: { "1": "角色" },
     episode_type: { "0": "本篇", "1": "特别篇" },
@@ -124,6 +174,20 @@ test("uses release enum names in entity condition controls", () => {
     "1": "特别篇",
   });
   assert.deepEqual(enumValuesFor("subject", "type", mappings), { "2": "动画" });
+  assert.deepEqual(enumValuesFor("subject", "platform", mappings), {
+    "其他": "其他",
+    "漫画": "漫画",
+    "TV": "TV",
+  });
+  assert.deepEqual(enumValuesFor("person", "career", mappings), {
+    actor: "演员",
+    artist: "艺术家",
+    illustrator: "插画家",
+    mangaka: "漫画家",
+    producer: "制作人",
+    seiyu: "声优",
+    writer: "作家",
+  });
 });
 
 test("derives relationship attribute controls from the same query contract", () => {
@@ -143,6 +207,43 @@ test("derives relationship attribute controls from the same query contract", () 
     episode_type: {},
   }), { "1": "原作", "2": "导演" });
   assert.equal(parseFactValue("WORKED_ON", "position", "2"), 2);
+});
+
+test("separates a concrete relationship from its true additional conditions", () => {
+  assert.equal(queryFactDiscriminatorField("PERSON_REL"), "relationType");
+  assert.equal(queryFactDiscriminatorField("WORKED_ON"), "position");
+
+  assert.deepEqual(splitFactDiscriminatorCondition("PERSON_REL", {
+    kind: "all",
+    terms: [
+      {
+        kind: "compare",
+        field: "relationType",
+        operator: "eq",
+        value: 1001,
+      },
+      {
+        kind: "compare",
+        field: "spoiler",
+        operator: "eq",
+        value: true,
+      },
+    ],
+  }), {
+    discriminator: {
+      kind: "compare",
+      field: "relationType",
+      operator: "eq",
+      value: 1001,
+    },
+    values: [1001],
+    remainder: {
+      kind: "compare",
+      field: "spoiler",
+      operator: "eq",
+      value: true,
+    },
+  });
 });
 
 test("maps editable complementary conditions without hiding unsupported negation", () => {
@@ -187,6 +288,35 @@ test("offers projectable result fields and validates a positive result count", (
   assert.equal(parseExplorerLimit("10001"), 10_001);
 });
 
+test("exposes Episode ownership as an entity-valued filter without exposing ids", () => {
+  assert.equal(queryFilterFields("episode").includes("subjectRef"), true);
+  assert.equal(queryFilterFields("episode").includes("ref"), false);
+  assert.equal(queryFilterFields("episode").includes("id"), false);
+  assert.equal(queryReferenceOwner("episode", "subjectRef"), "subject");
+  assert.equal(queryReferenceOwner("subject", "score"), null);
+  assert.equal(parseValue("episode", "subjectRef", "subject:265"), "subject:265");
+  assert.throws(
+    () => parseValue("episode", "subjectRef", "person:265"),
+    /所属作品.*作品/,
+  );
+});
+
+test("distinguishes integer validation from general numeric validation", () => {
+  assert.equal(parseValue("subject", "score", "8.5"), 8.5);
+  assert.throws(
+    () => parseValue("subject", "year", "2020.5"),
+    /年份必须是整数/,
+  );
+  assert.throws(
+    () => parseValue("subject", "score", "not-a-number"),
+    /评分请输入有效数字/,
+  );
+  assert.throws(
+    () => parseFactValue("RELATES_TO", "relationType", "1.5"),
+    /必须是整数/,
+  );
+});
+
 test("resolves the related entity type from the fact role", () => {
   assert.equal(
     queryRelationTargetOwner("RELATES_TO|source|target"),
@@ -199,6 +329,17 @@ test("resolves the related entity type from the fact role", () => {
   assert.throws(
     () => queryRelationTargetOwner("RELATES_TO|subject|unknownRole"),
     /关联类型无效/,
+  );
+});
+
+test("derives the optional endpoints of a complete relationship fact", () => {
+  assert.deepEqual(
+    queryRelationContextRoles("VOICE_CREDIT", "character", "person"),
+    [{ role: "subjectContext", owner: "subject", label: "作品" }],
+  );
+  assert.deepEqual(
+    queryRelationContextRoles("WORKED_ON", "subject", "person"),
+    [],
   );
 });
 
@@ -218,6 +359,10 @@ test("uses domain language for fields and content availability", () => {
   assert.equal(FIELD_LABEL.date, "首发日期");
   assert.equal(FIELD_LABEL.metaTags, "内容标签");
   assert.equal(FIELD_LABEL.summaryState, "是否有简介");
+  assert.equal(FIELD_LABEL.series, "是否为系列作品");
+  assert.equal(FIELD_LABEL.sort, "集序号");
+  assert.equal(FIELD_LABEL.disc, "光盘编号");
+  assert.equal(FIELD_LABEL.descriptionState, "是否有分集介绍");
   assert.deepEqual(enumValuesFor("subject", "summaryState"), {
     HAS: "有简介",
     EMPTY: "无简介",
@@ -290,7 +435,7 @@ test("makes empty and nested query intent visible without exposing syntax", () =
   assert.equal(describeExplorerQuery({ owner: "character" }), "角色 · 全部条目");
   assert.equal(describeExplorerQuery({
     owner: "episode",
-    text: { value: "再会", capability: "fullText", field: "description" },
+    fullText: { value: "再会", field: "description" },
     condition: {
       kind: "any",
       terms: [
@@ -311,4 +456,8 @@ test("makes empty and nested query intent visible without exposing syntax", () =
     owner: "subject",
     condition: { kind: "compare", field: "tags", operator: "contains", value: "科幻", negated: true },
   }), "作品 · 用户标签不含「科幻」");
+  assert.equal(describeExplorerQuery({
+    owner: "person",
+    condition: { kind: "compare", field: "career", operator: "contains", value: "seiyu" },
+  }), "人物 · 职业 含 声优");
 });

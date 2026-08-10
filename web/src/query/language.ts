@@ -184,7 +184,7 @@ interface ReturnItem {
 }
 interface ParsedQuery {
   patterns: Pattern[];
-  search?: { text: AstValue; field?: string };
+  searches?: { text: AstValue; field?: string }[];
   where?: AstPredicate;
   distinct: boolean;
   returns: ReturnItem[];
@@ -247,13 +247,13 @@ class Parser {
     this.bindings.add(this.rootVariable);
     const patterns: Pattern[] = [{ kind: "node", variable: this.rootVariable, owner }];
 
-    let search: ParsedQuery["search"];
-    if (this.acceptWord("SEARCH")) {
+    const searches: NonNullable<ParsedQuery["searches"]> = [];
+    while (this.acceptWord("SEARCH")) {
       const text = this.value();
       if (text.kind !== "literal" && text.kind !== "parameter")
         this.fail("SEARCH 需要字符串或参数", this.previous());
       const field = this.acceptWord("IN") ? this.identifier() : undefined;
-      search = { text, ...(field ? { field } : {}) };
+      searches.push({ text, ...(field ? { field } : {}) });
     }
     while (this.acceptWord("MATCH")) patterns.push(this.queryFactPattern());
     const where = this.acceptWord("WHERE") ? this.or() : undefined;
@@ -278,7 +278,7 @@ class Parser {
     this.finish();
     return {
       patterns,
-      ...(search ? { search } : {}),
+      ...(searches.length ? { searches } : {}),
       ...(where ? { where } : {}),
       distinct,
       returns,
@@ -843,39 +843,57 @@ function lowerParsedQuery(
   };
 
   const main = buildPatterns(ast.patterns);
-  if (ast.search) {
-    const sourceOperator = operators[main.source];
-    if (sourceOperator?.kind !== "scan")
-      throw new TypeError("SEARCH 只能用于 FIND 的根实体");
-    if (!ast.search.field) {
-      operators[main.source] = {
+  const sourceOperator = operators[main.source];
+  if (sourceOperator?.kind !== "scan")
+    throw new TypeError("FIND 必须从一个根实体开始");
+  const searchOperator = (
+    search: NonNullable<ParsedQuery["searches"]>[number],
+    binding: string,
+  ): QueryOperator => {
+    if (!search.field) {
+      return {
         kind: "lookup",
         owner: sourceOperator.owner,
-        binding: sourceOperator.binding,
-        text: expression(ast.search.text),
+        binding,
+        text: expression(search.text),
       };
-    } else {
-      const definition = QUERY_CONTRACT.owners[sourceOperator.owner]
-        .fields[ast.search.field];
-      if (definition?.capabilities.includes("fullText")) {
-        operators[main.source] = {
-          kind: "fullText",
-          target: "entity",
-          owner: sourceOperator.owner,
-          binding: sourceOperator.binding,
-          text: expression(ast.search.text),
-          field: ast.search.field as "summary" | "description",
-        };
-      } else if (definition?.capabilities.includes("lookup")) {
-        operators[main.source] = {
-          kind: "lookup",
-          owner: sourceOperator.owner,
-          binding: sourceOperator.binding,
-          text: expression(ast.search.text),
-          fields: [ast.search.field as "name" | "nameCn" | "nameVariant"],
-        };
-      } else throw new TypeError(`${sourceOperator.owner}.${ast.search.field} 不支持 SEARCH`);
     }
+    const definition = QUERY_CONTRACT.owners[sourceOperator.owner]
+      .fields[search.field];
+    if (definition?.capabilities.includes("fullText")) return {
+      kind: "fullText",
+      target: "entity",
+      owner: sourceOperator.owner,
+      binding,
+      text: expression(search.text),
+      field: search.field as "summary" | "description",
+    };
+    if (definition?.capabilities.includes("lookup")) return {
+      kind: "lookup",
+      owner: sourceOperator.owner,
+      binding,
+      text: expression(search.text),
+      fields: [search.field as "name" | "nameCn" | "nameVariant"],
+    };
+    throw new TypeError(`${sourceOperator.owner}.${search.field} 不支持 SEARCH`);
+  };
+  let searchRoot = main.root;
+  for (const [index, search] of (ast.searches ?? []).entries()) {
+    if (index === 0) {
+      operators[main.source] = searchOperator(search, sourceOperator.binding);
+      continue;
+    }
+    const match = id("search");
+    const binding = `${sourceOperator.binding}Search${index}`;
+    operators[match] = searchOperator(search, binding);
+    const exists = id("exists");
+    operators[exists] = {
+      kind: "exists",
+      input: searchRoot,
+      match,
+      columns: [{ outer: sourceOperator.binding, inner: binding }],
+    };
+    searchRoot = exists;
   }
   for (const anchor of ast.where ? textContainsAnchors(ast.where) : []) {
     const sourceOperator = operators[main.source];
@@ -898,8 +916,8 @@ function lowerParsedQuery(
     break;
   }
   let root = ast.where
-    ? applyWhere(main.root, main.owners, ast.where, main.source)
-    : main.root;
+    ? applyWhere(searchRoot, main.owners, ast.where, main.source)
+    : searchRoot;
   const aliases = ast.returns.map((item) => item.alias);
   if (new Set(aliases).size !== aliases.length)
     throw new TypeError("RETURN 别名必须唯一");

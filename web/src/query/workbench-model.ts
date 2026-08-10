@@ -13,10 +13,11 @@ import type {
   ExplorerCondition,
   ExplorerQuery,
 } from "./explorer";
-import type { AggregateFunction } from "./document";
+import type { AggregateFunction, LiteralValue } from "./document";
 import type { CompareOperator } from "./value";
 import { MEDIA_NAMES } from "../types";
 import type { Mappings } from "../types";
+import { CAREER_VALUES } from "../value-labels";
 import { FACT_LABEL, OWNER_LABEL } from "./vocabulary";
 
 export { FACT_LABEL, OWNER_LABEL } from "./vocabulary";
@@ -29,6 +30,7 @@ export const FIELD_LABEL: Record<string, string> = {
   date: "首发日期",
   year: "年份",
   score: "评分",
+  ratingCount: "评分人数",
   rank: "Bangumi 排名",
   nsfw: "限制级",
   wish: "想看 / 读 / 玩",
@@ -36,7 +38,8 @@ export const FIELD_LABEL: Record<string, string> = {
   doing: "在看 / 读 / 玩",
   onHold: "搁置",
   dropped: "抛弃",
-  series: "系列",
+  totalCollections: "总收藏数",
+  series: "是否为系列作品",
   scoreDetails: "评分分布",
   metaTags: "内容标签",
   tags: "用户标签",
@@ -45,13 +48,14 @@ export const FIELD_LABEL: Record<string, string> = {
   collects: "收藏数",
   role: "角色定位",
   airdate: "播出日期",
-  disc: "碟片",
+  disc: "光盘编号",
   duration: "时长",
-  sort: "集数",
+  sort: "集序号",
+  subjectRef: "所属作品",
   summary: "简介",
   description: "分集介绍",
   summaryState: "是否有简介",
-  descriptionState: "分集介绍状态",
+  descriptionState: "是否有分集介绍",
 };
 
 export const FACT_FIELD_LABEL: Record<string, string> = {
@@ -67,9 +71,9 @@ export const OPERATOR_LABEL: Record<string, string> = {
   eq: "等于",
   ne: "不等于",
   lt: "小于",
-  lte: "不大于",
+  lte: "至多",
   gt: "大于",
-  gte: "不小于",
+  gte: "至少",
   contains: "包含",
   notContains: "不包含",
   in: "属于",
@@ -90,13 +94,44 @@ export const AGGREGATE_FUNCTION_LABEL: Record<AggregateFunction, string> = {
 };
 
 export const COMMON_FIELDS: Record<Owner, Set<string>> = {
-  subject: new Set(["type", "year", "score", "tags", "nsfw", "summaryState"]),
+  subject: new Set([
+    "type",
+    "year",
+    "score",
+    "ratingCount",
+    "totalCollections",
+    "tags",
+    "nsfw",
+    "summaryState",
+  ]),
   person: new Set(["type", "career", "comments", "collects", "summaryState"]),
   character: new Set(["role", "comments", "collects", "summaryState"]),
   episode: new Set(["type", "year", "sort", "disc", "descriptionState"]),
 };
 
 export const INTERNAL_FIELDS = new Set(["ref", "id", "subjectRef"]);
+
+export type QueryScalarInputType = "text" | "number" | "date";
+
+interface QueryFieldUi {
+  add?: false;
+  inputType?: QueryScalarInputType;
+}
+
+const QUERY_FIELD_UI: Partial<Record<Owner, Record<string, QueryFieldUi>>> = {
+  subject: {
+    name: { add: false },
+    nameCn: { add: false },
+    date: { inputType: "date" },
+  },
+  person: { name: { add: false } },
+  character: { name: { add: false } },
+  episode: {
+    name: { add: false },
+    nameCn: { add: false },
+    airdate: { inputType: "date" },
+  },
+};
 
 export const DEFAULT_RESULT_FIELDS: Record<Owner, string[]> = {
   subject: ["name", "nameCn", "type", "date", "year", "score", "rank"],
@@ -119,6 +154,8 @@ const DESCENDING_SORT_FIELDS = new Set([
   "date",
   "year",
   "score",
+  "ratingCount",
+  "totalCollections",
   "wish",
   "done",
   "doing",
@@ -148,12 +185,67 @@ export function queryFieldsFor(
     .map(([field]) => field);
 }
 
+export function queryReferenceOwner(owner: Owner, field: string): Owner | null {
+  const type = QUERY_CONTRACT.owners[owner].fields[field]?.type;
+  if (!type?.startsWith("entity:")) return null;
+  const referenceOwner = type.slice("entity:".length) as Owner;
+  return referenceOwner in QUERY_CONTRACT.owners ? referenceOwner : null;
+}
+
+/** Fields the visual condition editor can represent without exposing raw ids. */
+export function queryFilterFields(owner: Owner): string[] {
+  return queryFieldsFor(owner, "filter").filter((field) =>
+    !INTERNAL_FIELDS.has(field) ||
+    (field !== "ref" && queryReferenceOwner(owner, field) !== null)
+  );
+}
+
+/** Fields worth presenting in the default menu; the complete contract remains editable. */
+export function queryAddFilterFields(owner: Owner): string[] {
+  return queryFilterFields(owner).filter((field) =>
+    QUERY_FIELD_UI[owner]?.[field]?.add !== false
+  );
+}
+
+export function queryScalarInputType(
+  owner: Owner,
+  field: string,
+): QueryScalarInputType {
+  const semanticType = QUERY_FIELD_UI[owner]?.[field]?.inputType;
+  if (semanticType) return semanticType;
+  const type = QUERY_CONTRACT.owners[owner].fields[field]?.type;
+  return type === "integer" || type === "number" ? "number" : "text";
+}
+
+const DATE_OPERATOR_LABEL: Partial<Record<string, string>> = {
+  lt: "早于",
+  lte: "不晚于",
+  gt: "晚于",
+  gte: "不早于",
+};
+
+export function queryConditionOperatorLabel(
+  owner: Owner,
+  field: string,
+  operator: string,
+): string {
+  return queryScalarInputType(owner, field) === "date"
+    ? DATE_OPERATOR_LABEL[operator] ?? OPERATOR_LABEL[operator] ?? operator
+    : OPERATOR_LABEL[operator] ?? operator;
+}
+
 export function enumValuesFor(
   owner: Owner,
   field: string,
   mappings?: Mappings,
 ): Record<string, string> | null {
   const definition = QUERY_CONTRACT.owners[owner].fields[field];
+  if (owner === "subject" && field === "platform" && mappings) {
+    const labels = [...new Set(Object.values(mappings.platform).filter(Boolean))];
+    if (labels.length)
+      return Object.fromEntries(labels.map((label) => [label, label]));
+  }
+  if (owner === "person" && field === "career") return { ...CAREER_VALUES };
   const namespace = definition?.enum;
   if (namespace && mappings && !namespace.startsWith("fact_labels.")) {
     const values = mappings[
@@ -213,13 +305,10 @@ function describeCondition(owner: Owner, condition: ExplorerCondition): string {
 
 export function describeExplorerQuery(draft: ExplorerQuery): string {
   const parts = [OWNER_LABEL[draft.owner]];
-  if (draft.text) {
-    const scope = draft.text.capability === "lookup"
-      ? "名称"
-      : draft.text.field === "description"
-        ? "分集介绍"
-        : "简介";
-    parts.push(`${scope}含「${draft.text.value}」`);
+  if (draft.text) parts.push(`名称含「${draft.text.value}」`);
+  if (draft.fullText) {
+    const scope = draft.fullText.field === "description" ? "分集介绍" : "简介";
+    parts.push(`${scope}含「${draft.fullText.value}」`);
   }
   if (draft.condition) parts.push(describeCondition(draft.owner, draft.condition));
   for (const relation of draft.relations ?? []) {
@@ -227,6 +316,10 @@ export function describeExplorerQuery(draft: ExplorerQuery): string {
     parts.push(
       `与${OWNER_LABEL[related.owner]} #${related.archiveId} ${relation.exists ? "有" : "无"}${FACT_LABEL[relation.factKind] ?? relation.factKind}`,
     );
+    for (const endpoint of relation.additionalEndpoints ?? []) {
+      const context = parseEntityRef(endpoint.related);
+      parts.push(`限定${OWNER_LABEL[context.owner]} #${context.archiveId}`);
+    }
   }
   for (const order of draft.orderBy ?? [])
     parts.push(
@@ -239,6 +332,40 @@ export function describeExplorerQuery(draft: ExplorerQuery): string {
 export function queryConditionOperators(owner: Owner, field: string): string[] {
   const definition = QUERY_CONTRACT.owners[owner].fields[field];
   return conditionOperators(definition);
+}
+
+export function sameFilterFieldSemantics(
+  leftOwner: Owner,
+  rightOwner: Owner,
+  field: string,
+): boolean {
+  const left = QUERY_CONTRACT.owners[leftOwner].fields[field];
+  const right = QUERY_CONTRACT.owners[rightOwner].fields[field];
+  if (
+    !left?.capabilities.includes("filter") ||
+    !right?.capabilities.includes("filter") ||
+    left.type !== right.type ||
+    left.enum !== right.enum
+  ) return false;
+  const leftOperators = queryConditionOperators(leftOwner, field);
+  const rightOperators = queryConditionOperators(rightOwner, field);
+  return leftOperators.length === rightOperators.length &&
+    leftOperators.every((operator, index) => operator === rightOperators[index]);
+}
+
+export function sameSortFieldSemantics(
+  leftOwner: Owner,
+  rightOwner: Owner,
+  field: string,
+): boolean {
+  const left = QUERY_CONTRACT.owners[leftOwner].fields[field];
+  const right = QUERY_CONTRACT.owners[rightOwner].fields[field];
+  return Boolean(
+    left?.capabilities.includes("sort") &&
+    right?.capabilities.includes("sort") &&
+    left.type === right.type &&
+    left.enum === right.enum
+  );
 }
 
 function conditionOperators(
@@ -271,6 +398,67 @@ export function queryFactFields(
     .map(([field]) => field);
 }
 
+/** The enum field that gives a fact its user-facing relationship name. */
+export function queryFactDiscriminatorField(kind: QueryFactKind): string | null {
+  return queryFactFields(kind, "filter")
+    .find((field) => Boolean(factFieldDefinition(kind, field).enum)) ?? null;
+}
+
+export interface FactDiscriminatorSplit {
+  discriminator?: ExplorerCondition;
+  values: LiteralValue[];
+  remainder?: ExplorerCondition;
+}
+
+function discriminatorValues(
+  condition: ExplorerCondition,
+  field: string,
+): LiteralValue[] | null {
+  if (
+    condition.kind === "compare" &&
+    condition.field === field &&
+    condition.operator === "eq" &&
+    !condition.negated &&
+    !condition.parameter
+  ) return [condition.value];
+  if (
+    condition.kind === "in" &&
+    condition.field === field &&
+    !condition.negated &&
+    condition.values.length
+  ) return condition.values;
+  return null;
+}
+
+/**
+ * Pull a directly selectable relationship name out of a condition while
+ * leaving all genuinely additional fact conditions unchanged.
+ */
+export function splitFactDiscriminatorCondition(
+  kind: QueryFactKind,
+  condition?: ExplorerCondition,
+): FactDiscriminatorSplit {
+  const field = queryFactDiscriminatorField(kind);
+  if (!field || !condition) return { values: [], remainder: condition };
+  const direct = discriminatorValues(condition, field);
+  if (direct) return { discriminator: condition, values: direct };
+  if (condition.kind !== "all") return { values: [], remainder: condition };
+  const matches = condition.terms
+    .map((term, index) => ({ term, index, values: discriminatorValues(term, field) }))
+    .filter((match) => match.values !== null);
+  if (matches.length !== 1) return { values: [], remainder: condition };
+  const match = matches[0]!;
+  const remainder = combineExplorerConditions(
+    "all",
+    condition.terms.filter((_, index) => index !== match.index),
+  );
+  return {
+    discriminator: match.term,
+    values: match.values!,
+    ...(remainder ? { remainder } : {}),
+  };
+}
+
 export function queryFactConditionOperators(
   kind: QueryFactKind,
   field: string,
@@ -293,18 +481,27 @@ export function factEnumValues(
   return null;
 }
 
+function parseNumericValue(
+  raw: string,
+  type: "integer" | "number",
+  label: string,
+): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value))
+    throw new TypeError(`${label}请输入有效数字`);
+  if (type === "integer" && !Number.isSafeInteger(value))
+    throw new TypeError(`${label}必须是整数`);
+  return value;
+}
+
 export function parseFactValue(
   kind: QueryFactKind,
   field: string,
   raw: string,
 ): string | number | boolean {
   const type = factFieldDefinition(kind, field).type;
-  if (type === "integer" || type === "number") {
-    const value = Number(raw);
-    if (!Number.isFinite(value) || (type === "integer" && !Number.isSafeInteger(value)))
-      throw new TypeError(`${FACT_FIELD_LABEL[field] ?? field}需要有效数字`);
-    return value;
-  }
+  if (type === "integer" || type === "number")
+    return parseNumericValue(raw, type, FACT_FIELD_LABEL[field] ?? field);
   if (type === "boolean") {
     if (raw !== "true" && raw !== "false")
       throw new TypeError(`${FACT_FIELD_LABEL[field] ?? field}请选择是或否`);
@@ -355,8 +552,19 @@ export function parseExplorerLimit(raw: string): number {
 export function queryRelationOptions(owner: Owner): Array<{
   value: string;
   label: string;
+  factKind: QueryFactKind;
+  candidateRole: string;
+  relatedRole: string;
+  targetLabel: string;
 }> {
-  const options: Array<{ value: string; label: string }> = [];
+  const options: Array<{
+    value: string;
+    label: string;
+    factKind: QueryFactKind;
+    candidateRole: string;
+    relatedRole: string;
+    targetLabel: string;
+  }> = [];
   for (const [factKind, fact] of Object.entries(QUERY_CONTRACT.facts)) {
     for (const [candidateRole, candidateOwner] of Object.entries(fact.roles)) {
       if (candidateOwner !== owner) continue;
@@ -369,27 +577,19 @@ export function queryRelationOptions(owner: Owner): Array<{
               ? "关联到它的"
               : `${relatedRole} · `
           : "";
+        const targetLabel = `${direction}${OWNER_LABEL[relatedOwner]}`;
         options.push({
           value: `${factKind}|${candidateRole}|${relatedRole}`,
-          label: `${FACT_LABEL[factKind as QueryFactKind]} · ${direction}${OWNER_LABEL[relatedOwner]}`,
+          label: `${FACT_LABEL[factKind as QueryFactKind]} · ${targetLabel}`,
+          factKind: factKind as QueryFactKind,
+          candidateRole,
+          relatedRole,
+          targetLabel,
         });
       }
     }
   }
   return options;
-}
-
-export function queryTextScopes(owner: Owner): Array<{
-  value: string;
-  label: string;
-}> {
-  return [
-    { value: "lookup", label: "名称含" },
-    ...queryFieldsFor(owner, "fullText").map((field) => ({
-      value: `fullText:${field}`,
-      label: `${FIELD_LABEL[field] ?? field}含`,
-    })),
-  ];
 }
 
 export function querySortFields(owner: Owner): string[] {
@@ -441,17 +641,37 @@ export function queryRelationTargetOwner(selection: string): Owner {
   return owner;
 }
 
+export function queryRelationContextRoles(
+  factKind: QueryFactKind,
+  candidateRole: string,
+  relatedRole: string,
+): Array<{ role: string; owner: Owner; label: string }> {
+  const fact = QUERY_CONTRACT.facts[factKind];
+  return Object.entries(fact.roles)
+    .filter(([role]) => role !== candidateRole && role !== relatedRole)
+    .map(([role, owner]) => ({ role, owner, label: OWNER_LABEL[owner] }));
+}
+
 export function parseValue(
   owner: Owner,
   field: string,
   raw: string,
 ): string | number | boolean {
   const type = QUERY_CONTRACT.owners[owner].fields[field]?.type;
+  if (type?.startsWith("entity:")) {
+    const expected = type.slice("entity:".length) as Owner;
+    let actual: Owner;
+    try {
+      actual = parseEntityRef(raw).owner;
+    } catch {
+      throw new TypeError(`${FIELD_LABEL[field] ?? field}需要有效的${OWNER_LABEL[expected]}`);
+    }
+    if (actual !== expected)
+      throw new TypeError(`${FIELD_LABEL[field] ?? field}需要选择${OWNER_LABEL[expected]}`);
+    return raw;
+  }
   if (type === "integer" || type === "number") {
-    const value = Number(raw);
-    if (!Number.isFinite(value) || (type === "integer" && !Number.isSafeInteger(value)))
-      throw new TypeError(`${FIELD_LABEL[field] ?? field} 需要有效数字`);
-    return value;
+    return parseNumericValue(raw, type, FIELD_LABEL[field] ?? field);
   }
   if (type === "boolean") {
     if (raw !== "true" && raw !== "false")

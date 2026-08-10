@@ -12,8 +12,10 @@ import type {
   Mappings,
   Page,
   StructuralEntity,
+  TagVocabularyField,
 } from "./types";
 import { FACT_TAGS } from "./types";
+import { AsyncMemo } from "./async-memo";
 import {
   anchorForFact,
   loadGzJson,
@@ -64,6 +66,69 @@ interface EntityVocab {
   career: string[];
   metaTags: string[];
   tags: string[];
+}
+
+type VocabFamily = keyof EntityVocab;
+
+export interface VocabularyIndex {
+  values: readonly string[];
+  folded: readonly string[];
+}
+
+function foldVocabularyValue(value: string): string {
+  return value.normalize("NFKC").toLowerCase();
+}
+
+export function buildVocabularyIndex(
+  values: readonly string[],
+): VocabularyIndex {
+  return {
+    values,
+    folded: values.map(foldVocabularyValue),
+  };
+}
+
+interface VocabularyCandidate {
+  position: number;
+  value: string;
+  width: number;
+}
+
+function compareVocabularyCandidates(
+  left: VocabularyCandidate,
+  right: VocabularyCandidate,
+): number {
+  return left.width - right.width || left.position - right.position;
+}
+
+export function suggestVocabularyValues(
+  index: VocabularyIndex,
+  text: string,
+): string[] {
+  const query = foldVocabularyValue(text.trim());
+  if (!query) return [];
+  const exact: VocabularyCandidate[] = [];
+  const prefix: VocabularyCandidate[] = [];
+  const substring: VocabularyCandidate[] = [];
+  for (let position = 0; position < index.values.length; position++) {
+    const value = index.values[position];
+    const folded = index.folded[position];
+    if (value === undefined || folded === undefined) continue;
+    const candidate = { position, value, width: folded.length };
+    if (folded === query) {
+      exact.push(candidate);
+    } else if (folded.startsWith(query)) {
+      prefix.push(candidate);
+    } else if (folded.includes(query)) {
+      substring.push(candidate);
+    }
+  }
+  return [
+    ...exact.sort(compareVocabularyCandidates),
+    ...prefix.sort(compareVocabularyCandidates),
+    ...substring.sort(compareVocabularyCandidates),
+  ]
+    .map((candidate) => candidate.value);
 }
 
 interface EpisodeEntry {
@@ -230,7 +295,11 @@ function findRange<T extends number[]>(
 }
 
 export class Data {
-  private vocabPromise: Promise<EntityVocab> | null = null;
+  private readonly vocabFamilies = new AsyncMemo<VocabFamily, string[]>();
+  private readonly tagVocabularyIndexes = new Map<
+    TagVocabularyField,
+    VocabularyIndex
+  >();
   private mappingsPromise: Promise<Mappings> | null = null;
 
   /** rank-by-key 反向索引;未载入或不在当前发布时为 null。 */
@@ -248,33 +317,48 @@ export class Data {
     return this.mappingsPromise;
   }
 
-  private vocab(): Promise<EntityVocab> {
-    this.vocabPromise ??= (async () => {
+  private vocabulary(family: VocabFamily): Promise<string[]> {
+    return this.vocabFamilies.get(family, async () => {
       const idx = await loadGzJson<VocabIdx>("vocab.idx");
-      const fetchAll = async (fam: string): Promise<string[]> => {
-        const out: string[] = [];
-        for (const [off, len] of idx.members[fam] ?? [])
-          out.push(
-            ...(await member<string[]>(
-              "structure",
-              "vocab.pack",
-              off,
-              len,
-            )),
-          );
-        return out;
-      };
-      const [career, metaTags, tags] = await Promise.all([
-        fetchAll("career"),
-        fetchAll("meta_tags"),
-        fetchAll("tags"),
-      ]);
-      return { career, metaTags, tags };
-    })().catch((error: unknown) => {
-      this.vocabPromise = null;
-      throw error;
+      const diskFamily = family === "metaTags" ? "meta_tags" : family;
+      const parts = await Promise.all(
+        (idx.members[diskFamily] ?? []).map(([offset, length]) =>
+          member<string[]>(
+            "structure",
+            "vocab.pack",
+            offset,
+            length,
+          )
+        ),
+      );
+      return parts.flat();
     });
-    return this.vocabPromise;
+  }
+
+  private async vocab(): Promise<EntityVocab> {
+    const [career, metaTags, tags] = await Promise.all([
+      this.vocabulary("career"),
+      this.vocabulary("metaTags"),
+      this.vocabulary("tags"),
+    ]);
+    return { career, metaTags, tags };
+  }
+
+  async suggestTagValues(
+    field: TagVocabularyField,
+    text: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string[]> {
+    options.signal?.throwIfAborted();
+    const values = await this.vocabulary(field);
+    options.signal?.throwIfAborted();
+    let index = this.tagVocabularyIndexes.get(field);
+    if (!index) {
+      index = buildVocabularyIndex(values);
+      this.tagVocabularyIndexes.set(field, index);
+    }
+    options.signal?.throwIfAborted();
+    return suggestVocabularyValues(index, text);
   }
 
   private decodeEntity(

@@ -11,6 +11,7 @@ import type { AnswerSpec } from "./bundle";
 import { isMissing, isTagValue } from "./value";
 import { MEDIA_NAMES } from "../types";
 import type { Mappings } from "../types";
+import { careerValueLabel } from "../value-labels";
 import {
   QUERY_CONTRACT,
   factFieldDefinition,
@@ -266,7 +267,7 @@ export function queryValueText(
   if (value === null) return "未记录";
   if (value === "" || Array.isArray(value) && !value.length) return "暂无内容";
   if (Array.isArray(value))
-    return value.map((item) => queryValueText(item)).join("、");
+    return value.map((item) => queryValueText(item, context)).join("、");
   if (isTagValue(value))
     return `${value.name}（${value.count.toLocaleString("zh-CN")}）`;
   if (entity(value))
@@ -279,6 +280,8 @@ export function queryValueText(
     typeof value === "string" && context?.column === "entityType" &&
     Object.hasOwn(OWNER_LABEL, value)
   ) return OWNER_LABEL[value as Owner];
+  if (typeof value === "string" && context?.semantic === "person.career")
+    return careerValueLabel(value);
   if (typeof value === "string") return readableRef(value);
   if (typeof value === "number" && context) {
     const mapped = mappedNumber(value, context);
@@ -329,7 +332,6 @@ function valueNode(
     const secondary = secondaryLabel ?? names?.secondary;
     if (secondary && secondary !== primary) {
       button.className += " query-entity-names";
-      button.setAttribute("aria-label", `${primary}，原名：${secondary}`);
       const primaryName = document.createElement("span");
       primaryName.className = "query-entity-name-primary";
       primaryName.textContent = primary;

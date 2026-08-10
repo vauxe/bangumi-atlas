@@ -32,6 +32,13 @@ import type { Bounds3D, Geometry } from "./types";
 
 export type { OrbitState } from "./camera";
 
+export function interactionHint(selected: boolean): string {
+  const base =
+    "拖动平移 · 右键拖动旋转 · 滚轮缩放 · 单击查看 · S 搜索 · T 俯视 · R 复位";
+  if (!selected) return base;
+  return `${base} · 单击空白或 Esc 取消选择`;
+}
+
 const EDGE_WIDTH = 1;
 const CASCADE_STEP_MS = 30;
 const CASCADE_FADE_MS = 200;
@@ -277,6 +284,7 @@ export class Scene {
         type: AtlasOrbitController,
         inertia: 300,
         scrollZoom: { speed: 0.01, smooth: false },
+        // 节点交互统一为单击；不保留控制器自己的双击缩放手势。
         doubleClickZoom: false,
         dragMode: "pan",
         // 巡航上限:滚轮把 zoom 提到此层级后,多余滚动量转为
@@ -325,18 +333,6 @@ export class Scene {
     canvas?.setAttribute("aria-label", "Bangumi 关系星图");
     // 右键负责轨道旋转；拦掉浏览器菜单，避免松手时打断操作。
     parent.addEventListener("contextmenu", (ev) => ev.preventDefault());
-    // 双击 = 聚焦飞行(controller 的 doubleClickZoom 已让位)
-    parent.addEventListener("dblclick", (ev) => {
-      const picks = this.deck.pickMultipleObjects({
-        x: ev.clientX,
-        y: ev.clientY,
-        radius: 5,
-        depth: 1,
-        layerIds: ["context"], // index 即 rank(工作集层下标语义不同)
-      });
-      const rank = picks[0]?.index;
-      if (typeof rank === "number" && rank >= 0) this.flyTo(rank);
-    });
     this.render();
   }
 

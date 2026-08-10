@@ -182,6 +182,37 @@ test("rejects incompatible contains element types", () => {
   assert.throws(() => normalizeQuery(query, {}), /contains operand type mismatch/);
 });
 
+test("type-checks entity-reference fields against canonical references", () => {
+  const episodeBySubject = (value: string): QueryDocument => ({
+    schema: "atlas-query-document-v2",
+    root: "filter",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "episode", binding: "episode" },
+      filter: {
+        kind: "filter",
+        input: "scan",
+        predicate: {
+          kind: "compare",
+          operator: "eq",
+          left: { kind: "field", binding: "episode", field: "subjectRef" },
+          right: { kind: "literal", value },
+        },
+      },
+    },
+  });
+
+  assert.doesNotThrow(() => normalizeQuery(episodeBySubject("subject:265"), {}));
+  assert.throws(
+    () => normalizeQuery(episodeBySubject("person:265"), {}),
+    /entity reference type mismatch/,
+  );
+  assert.throws(
+    () => normalizeQuery(episodeBySubject("265"), {}),
+    /entity reference/,
+  );
+});
+
 test("enforces the Values cell limit across the whole query", () => {
   const rows = Array.from(
     { length: QUERY_SECURITY_PROFILE.document.maxValuesCells / 2 + 1 },
