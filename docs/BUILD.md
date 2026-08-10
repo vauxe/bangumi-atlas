@@ -31,34 +31,53 @@ uv run mypy scripts
 [DATA_ARCHITECTURE.md](DATA_ARCHITECTURE.md) §5。
 
 ```bash
-uv run python scripts/fetch_dump.py
-uv run python scripts/build_db.py
-uv run python scripts/verify_db.py
-uv run python scripts/layout.py
-uv run python scripts/bake_site.py
-uv run python scripts/verify_site.py
+uv run python -m scripts.fetch_dump
+uv run python -m scripts.build_db
+uv run python -m scripts.verify_db
+uv run python -m scripts.layout
+uv run python -m scripts.bake_site
+uv run python -m scripts.verify_site
 ```
 
-`layout.py` 默认启用本地缓存。它先计算 3 张节点 Parquet 与 6 张关系 Parquet 的逐文件
-内容摘要，再核对完整 `layout.py`、`uv.lock`、`shape_digest`、`coords.parquet` 与
-`report.json` 的摘要和坐标 schema。全部一致才直接复用布局，且不会加载图数据结构或
-重写两份产物；任一项缺失、损坏或变化都视为未命中并完整重算。摘要检查会顺序读取
-输入文件，但不会物化节点、边或 igraph，实测内存远低于完整布局。
+`layout.py` 默认启用本地缓存。Parquet generation 校验每个输入文件后，布局直接用清单中
+已验证的摘要计算输入身份，不再重复读取相同文件。缓存另行核对完整布局实现、EntityKey
+实现、关键数值库版本、`shape_digest`、`coords.parquet` 与 `report.json` 的摘要和坐标 schema。
+全部一致才直接复用布局，且不会加载图数据结构或重写两份产物；任一项缺失、损坏或变化都
+视为未命中并完整重算。完整实现摘要允许无害改动产生保守的缓存未命中，但不会让改变输出的
+加载或编排逻辑误用旧坐标。
 
-`build_db.py` 发布 Parquet 与 `layout.py` 消费 Parquet 使用同一把跨进程锁，不能并发
-观察到正在替换的九张表；Parquet 构建中断还会保留 `.build-in-progress` 标记，布局会
-拒绝继续。布局在发布前再次核对输入与实现身份，缓存标记只在两份产物完整写出后原子
-发布到 `data/layout/cache.json`。需要主动重算时使用：
+`build_db.py` 只在枚举门禁、独立 raw→Parquet 内容对账和制品清单全部通过后，才最后
+发布 `data/parquet/generation.json`。该清单以 SHA-256 绑定 `dump.zip`、9 个 JSONL、
+映射快照、11 张 Parquet、Arrow schema、原始/投影/筛选行数和语义指纹；同名 `VERSION`
+不能替代内容身份。构建中断会保留 `.build-in-progress`，旧清单也不能让半代制品看起来
+完整。
+清单当前的内部格式标识是 `parquet-generation-v1`；它只用于兼容性门禁，不是产品或
+站点的正式发布版本号。项目尚未正式发布，因此首个格式直接沿用 v1。
+发布时还会逐成员解压 `dump.zip`，要求它只含这 9 个唯一顶层成员，并把每个成员的
+SHA-256、字节数和行数与 `data/dump` 严格对齐；因此“新 zip + 旧 JSONL”不能组成一代。
+语义 oracle 绑定实际参与投影的代码、EntityKey 实现与关键运行时版本；布局缓存绑定完整
+`layout.py`、独立 EntityKey 实现和数值库版本，不因其他脚本或锁文件变化而失效。
+
+下载先写入同目录临时归档，摘要通过后才替换；解压也先在同目录完成，失败时保留上一份
+完整 dump，并拒绝归档、dump 目录或其数据根为符号链接。
+下载、映射刷新、Parquet、LadybugDB、数据库核验、布局、烘焙和站点核验使用同一把
+跨进程代际锁。消费者在锁内核对 generation 自身、当前归档、映射和 Parquet，不能观察到
+正在替换的文件；解压 JSONL 的逐字节 lineage 证明只在 generation 发布时执行，
+`verify_db.py` 另行重算其投影语义，避免布局、烘焙和站点核验反复扫描不参与其计算的
+1.7GB 原始文件。
+布局在发布前再次核对输入与实现身份，缓存标记只在两份产物完整写出后原子发布到
+`data/layout/cache.json`。需要主动重算时使用：
 
 ```bash
-uv run python scripts/layout.py --force
+uv run python -m scripts.layout --force
 ```
 
-缓存是本机执行优化，不参与 SiteRelease，也不能替代 `verify_site.py`。全新 CI runner
-没有缓存时仍执行完整布局。不要跨机器复制缓存；它刻意复用已经校验的产物字节，不尝试
-证明不同 CPU、BLAS 或依赖二进制重新计算时会产生相同浮点结果。
+缓存中的坐标不直接复制进 SiteRelease，但其输入摘要、实现身份和两份布局产物摘要属于
+发布来源身份；烘焙和 `verify_site.py` 都会精确核对。全新 CI runner 没有缓存时仍执行
+完整布局。不要跨机器复制缓存；它刻意复用已经校验的产物字节，不尝试证明不同 CPU、
+BLAS 或依赖二进制重新计算时会产生相同浮点结果。
 
-三处会主动中断构建，均为设计内的报警：
+以下来源身份不一致时会主动中断构建，均为设计内的报警：
 
 - 快照 SHA-256 与上游 `aux/latest.json` 不符。
 - 枚举异常超过 `build_db.py` 的 `ENUM_ANOMALY_BASELINES`，说明上游枚举漂移，需
@@ -84,82 +103,6 @@ uv run python scripts/layout.py --force
 
 内存分配器会让重复运行的 RSS 有波动；验收以完整运行、当前 `shape_digest`、行级对账和
 `verify_site.py` 全部通过为准，不能用曾中断的旧产物作为正确性基线。
-
-### 快速等价验证
-
-#### 布局与烘焙改动
-
-改动布局或烘焙逻辑时，可先在原始 Parquet 的确定性代表子集上比较旧提交与当前工作树，
-无需信任可能中断过的旧产物：
-
-```bash
-BASELINE_REF=origin/main  # 或换成改动前的完整提交号
-uv run python scripts/verify_build_equivalence.py \
-  --baseline-ref "$BASELINE_REF" \
-  --max-rss-mib 1024 \
-  --min-available-mib 1024
-```
-
-默认选择 2,048 个条目、1,024 个人物和 2,048 个角色，覆盖媒体类型、长文本、关系闭包、
-事实/剧集分页边界和高关联实体；超过 256 集的病理条目会被排除，避免小样本扭曲 P99
-门禁。旧实现直接从指定 Git 提交提取脚本，新旧阶段严格串行，并分别重新生成布局和站点
-数据。两份站点都先由当前独立校验器完整解码，再比较布局坐标、语义 manifest 与文件
-摘要；只允许流式排序造成的 `facts.idx`、`facts.pack`、`pages.pack` 物理重排。
-
-每个阶段限制计算线程、降低进程优先级并监控整个进程组；RSS 超过上限、系统可用内存
-低于下限、无法读取内存指标或阶段超时都会终止该进程组。验证只写入忽略目录
-`data/verifications/equivalence-*/`，不会覆盖当前 `data/layout` 或 `site/data`。进度、峰值
-RSS、日志路径和最终差异保存在其中的 `report.json`；失败现场会保留，便于继续诊断。
-
-`--max-rss-mib` 是验证进程组的硬上限，`--min-available-mib` 是为系统保留的可用内存
-下限。任一门禁触发都应先减小 `--subjects`、`--people`、`--characters` 或停止其他构建，
-不要关闭内存监控后重跑。实际峰值会随机器与上游数据变化。
-
-#### 原始数据与数据库改动
-
-上述命令从已经生成的 Parquet 开始，**不会运行 `build_db.py`**。因此修改 JSONL 解析、
-字段投影、Parquet 写入或数据库导入时，仅运行上述命令或单元测试，不能据此声明
-`build_db.py` 的产物与旧实现一致。此类改动的子集验收必须满足以下步骤：
-
-1. 从同一份原始 dump 确定性选择 subject、person、character，并按关系闭包回投到全部
-   9 个 JSONL 文件；两边必须使用同一份 `VERSION`、相同的 9 个子集文件摘要和同一份
-   映射快照。
-2. 子集应覆盖全部 5 种 subject 类型、全部事实表、剧集分页边界和高关联实体。关系闭包
-   不会自然覆盖悬空关系、孤儿剧集或源数据中不存在的重复关系；报告必须说明这些路径的
-   实际行数，缺失的异常路径由合成用例或全量独立校验补充，不能默认为已经覆盖。
-3. 验证分批写入时，至少让受影响的表超过 `PARQUET_BATCH_ROWS`（当前为 10,000 行），
-   不能只验证单个 row group。
-4. 从 Git 基线提取旧版构建脚本，与当前版本分别写入两个隔离目录；禁止复用或覆盖
-   `data/parquet`、`data/db` 和可能中断过的旧产物。两个构建必须严格串行，并使用与上节
-   相同的 RSS、系统可用内存和超时门禁。
-5. 对 11 张 Parquet 表逐一比较精确 schema、行数、顺序和每行字段值，并确认 DDL 与
-   导入映射没有意外变化；再分别查询两份 LadybugDB，确认数据库内容与各自 Parquet
-   一致。流式写入可能改变 row group，不能把 Parquet 文件是否逐字节一致作为逻辑等价
-   条件。
-6. 最后分别以旧、新 Parquet 继续运行同一版 `layout.py`、`bake_site.py` 和
-   `verify_site.py`，再比较坐标、语义 manifest 和所有逻辑站点产物，防止物理分批差异
-   传播到发布结果。
-
-报告至少应保存基线完整提交号、dump 与映射版本、入选 ID 或其摘要、每个源文件和表的
-行数、精确比较结果、各阶段峰值 RSS、退出原因及日志路径。只有这些步骤全部通过，才能
-声明“该真实子集在旧、新 `build_db.py` 间逻辑等价”；它仍不等于全量等价证明。
-
-分批写入的边界、空输入 schema 和中断时保留已发布文件由以下单元测试快速覆盖：
-
-```bash
-uv run python -m unittest tests.test_build_db.ParquetProjectionTests
-```
-
-单元测试不能替代真实子集差分。若当前 dump 的 `fact-summary` 全为空，真实子集只能覆盖
-规范空 pack；非空摘要路径还必须由合成用例覆盖：
-
-```bash
-uv run python -m unittest \
-  tests.test_bake_site.FactSummaryTests.test_emits_non_empty_text_addressed_by_fact_ref
-```
-
-子集验证用于快速回归；发布前仍须对当前实现执行完整数据管道和独立校验。旧全量产物
-如果曾中断或不完整，只能作为故障现场，不能作为正确性基线。
 
 ## 4. 客户端
 
@@ -188,14 +131,17 @@ kill %1
 
 1. `data/dump/VERSION` —— 上游每周三滚动，`fetch_dump.py` 始终取最新版本。
 2. `data/mappings/manifest.json` 的 commit 与逐文件 SHA-256。
-3. `data/layout/report.json` —— `algo`、`seed` 与 `shape_digest` 描述整形算法；摘要由
+3. `data/parquet/generation.json` —— 绑定原始归档、解压文件、映射、完整 Parquet 和
+   独立语义 oracle；发布时完成全量 lineage 证明，日常消费者只复核它实际依赖的当前
+   制品，`verify_db.py` 负责重新执行原始语义深度核验。
+4. `data/layout/report.json` —— `algo`、`seed` 与 `shape_digest` 描述整形算法；摘要由
    `layout.py` 从整形代码算出，改了几何就自动变。它不包含输入和数值运行时，因此不能
    单独作为整份坐标逐字节相同的证明。`depth_ratio`、邻距和 `edge_compactness` 由
    数据实测，随上游版本漂移，读作几何质量。
-4. `site/data/manifest.json` 的 `version` —— 标识发布使用的源数据版本；需要证明整份
+5. `site/data/manifest.json` 的 `version` —— 标识发布使用的源数据版本；需要证明整份
    发布逐字节相同时，仍应比较 SiteRelease 文件清单及内容摘要。
 
-前两项相同时，后两项的数据版本和布局质量指标应一致。布局固定使用分量分区、Leiden
+前三项相同时，后两项的数据版本和布局质量指标应一致。布局固定使用分量分区、Leiden
 社区归并、UMAP 岛内拓扑和加权社区超图，`layout.py` 为 igraph 的随机源播种；但不同
 平台的数值库仍可能产生浮点末位差异，逐字节结论必须由产物摘要给出。
 
@@ -204,10 +150,10 @@ kill %1
 以下开关供调试使用，发布路径只用 §3 的命令：
 
 - 只重跑烘焙：`bake_site.py` + `verify_site.py` 复用现有 `data/parquet` 与
-  `data/layout`，用于本地迭代烘焙逻辑。烘焙器核对 Parquet 与 dump 的 `VERSION`
-  标记，不一致即失败——发布坐标的世界跨度归一等改动只影响这两步，无需重跑布局。
+  `data/layout`，用于本地迭代烘焙逻辑。两者核对完整 Parquet generation 与布局 cache；
+  任一来源、schema、文件或实现身份不一致即失败。
 - `build_db.py --skip-parquet`：复用现有 Parquet，只重建数据库，受 `VERSION`
-  一致性护栏约束。
+  与完整 generation 内容护栏约束。
 - `build_db.py --offline`：改用本地枚举快照，校验其来源 commit 与逐文件 SHA-256。
   上游是否有更新仍需联网刷新阶段确认。
 - `layout.py --force`：忽略已通过全部摘要与 schema 校验的布局缓存，强制重算坐标；

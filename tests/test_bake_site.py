@@ -2,22 +2,177 @@ from __future__ import annotations
 
 import gzip
 import random
-import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-
 from scripts import bake_site
 
 
+class InputGenerationTests(unittest.TestCase):
+    def test_main_holds_generation_lock_for_validation_and_bake(self) -> None:
+        events: list[str] = []
+
+        @contextmanager
+        def lock(_parquet: Path):
+            events.append("lock-enter")
+            try:
+                yield
+            finally:
+                events.append("lock-exit")
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "site" / "data"
+            with (
+                patch.object(bake_site, "parquet_layout_lock", lock),
+                patch.object(
+                    bake_site,
+                    "require_current_release_inputs",
+                    side_effect=lambda **_kwargs: (
+                        events.append("validate") or {}
+                    ),
+                ),
+                patch.object(
+                    bake_site,
+                    "bake_release",
+                    side_effect=lambda _output, _identity: events.append(
+                        "bake"
+                    ),
+                ),
+                patch("sys.argv", ["bake_site.py", "--output", str(output)]),
+            ):
+                bake_site.main()
+
+        self.assertEqual(
+            events, ["lock-enter", "validate", "bake", "lock-exit"]
+        )
+
+
+class ReleaseBoundaryTests(unittest.TestCase):
+    def test_output_guard_only_accepts_managed_site_data_roots(self) -> None:
+        bake_site.validate_output_directory(bake_site.ROOT / "site" / "data")
+        with tempfile.TemporaryDirectory() as directory:
+            bake_site.validate_output_directory(
+                Path(directory) / "site" / "data"
+            )
+
+        runner_temp = bake_site.ROOT / ".runner-temp-test"
+        with patch.dict(
+            bake_site.os.environ,
+            {"RUNNER_TEMP": str(runner_temp)},
+        ):
+            bake_site.validate_output_directory(
+                runner_temp / "bangumi-atlas-site" / "data"
+            )
+
+        for unsafe in (
+            bake_site.ROOT,
+            bake_site.ROOT / ".git",
+            bake_site.ROOT / "scripts",
+            bake_site.ROOT / "data" / "verifications" / "site" / "data",
+            bake_site.ROOT.parent,
+            Path("/tmp"),
+        ):
+            with (
+                self.subTest(path=unsafe),
+                self.assertRaisesRegex(ValueError, "output"),
+            ):
+                bake_site.validate_output_directory(unsafe)
+
+    def test_output_guard_rejects_symlinked_staging_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir()
+            linked_parent = root / "linked-site"
+            linked_parent.symlink_to(target, target_is_directory=True)
+            direct_parent = root / "direct-site"
+            direct_parent.mkdir()
+            linked_output = direct_parent / "data"
+            linked_output.symlink_to(target, target_is_directory=True)
+
+            for output in (linked_parent / "data", linked_output):
+                with (
+                    self.subTest(output=output),
+                    self.assertRaisesRegex(ValueError, "symlink"),
+                ):
+                    bake_site.validate_output_directory(output)
+
+    def test_capacity_checks_are_runtime_errors_not_assertions(self) -> None:
+        bake_site.validate_release_capacity((1 << 21) - 1)
+        with self.assertRaisesRegex(ValueError, r"2\^21"):
+            bake_site.validate_release_capacity(1 << 21)
+        with (
+            patch.object(bake_site.sr, "RANK_SENTINEL", 10),
+            self.assertRaisesRegex(ValueError, "VisualRank"),
+        ):
+            bake_site.validate_release_capacity(10)
+
+    def test_media_flag_values_must_fit_the_published_bits(self) -> None:
+        bake_site.validate_media_flag_values(
+            bake_site.np.array([0, 1, 7], dtype=bake_site.np.int64)
+        )
+        for values in ([-1], [8]):
+            with (
+                self.subTest(values=values),
+                self.assertRaisesRegex(ValueError, "media"),
+            ):
+                bake_site.validate_media_flag_values(
+                    bake_site.np.asarray(values)
+                )
+
+
+class ManifestPublicationTests(unittest.TestCase):
+    def test_reconciliation_failure_does_not_publish_a_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory) / "data"
+            site.mkdir()
+            bake_site.failures[:] = ["semantic mismatch"]
+            self.addCleanup(bake_site.failures.clear)
+
+            with (
+                patch.object(bake_site, "SITE", site),
+                self.assertRaisesRegex(SystemExit, "semantic mismatch"),
+            ):
+                bake_site.publish_manifest(
+                    {"version": "invalid"},
+                    total_bytes=1,
+                    core_bytes=1,
+                    n_files=1,
+                    started=bake_site.time.time(),
+                )
+
+            self.assertFalse((site / "manifest.json").exists())
+
+    def test_size_gate_does_not_publish_a_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory) / "data"
+            site.mkdir()
+            bake_site.failures.clear()
+            self.addCleanup(bake_site.failures.clear)
+
+            with (
+                patch.object(bake_site, "SITE", site),
+                self.assertRaisesRegex(SystemExit, "1GB"),
+            ):
+                bake_site.publish_manifest(
+                    {"version": "too-large"},
+                    total_bytes=bake_site.SIZE_BUDGET + 1,
+                    core_bytes=1,
+                    n_files=1,
+                    started=bake_site.time.time(),
+                )
+
+            self.assertFalse((site / "manifest.json").exists())
+
+
 class EntityEncodingTests(unittest.TestCase):
-    def test_subject_zero_score_and_rank_are_encoded_as_absent(self) -> None:
+    def test_subject_zero_score_and_rank_remain_typed_values(self) -> None:
         row = bake_site.subject_entity_row(
             {
                 "name": ["未评分条目"],
@@ -50,10 +205,12 @@ class EntityEncodingTests(unittest.TestCase):
         )
 
         self.assertEqual(row[3], 0)  # platform 0 is a real mapped category
-        self.assertIsNone(row[5])
-        self.assertIsNone(row[6])
+        self.assertEqual(row[5], 0.0)
+        self.assertEqual(row[6], 0)
 
-    def test_subject_empty_platform_is_encoded_as_absent(self) -> None:
+    def test_subject_platform_code_survives_missing_display_mapping(
+        self,
+    ) -> None:
         row = bake_site.subject_entity_row(
             {
                 "name": ["未指定平台"],
@@ -85,7 +242,7 @@ class EntityEncodingTests(unittest.TestCase):
             tag_id={},
         )
 
-        self.assertIsNone(row[3])
+        self.assertEqual(row[3], 0)
 
     def test_person_and_character_do_not_store_a_fake_chinese_name(
         self,
@@ -719,6 +876,21 @@ class RankLookupTests(unittest.TestCase):
         bake_site.np.testing.assert_array_equal(
             bake_site.entity_ranks(lookup, keys[[2, 0]]), [2, 0]
         )
+
+    def test_source_id_rank_lookup_rejects_entity_key_aliases(self) -> None:
+        lookup = bake_site.build_rank_lookup(
+            bake_site.np.array(
+                [bake_site.sr.entity_key(bake_site.sr.KIND_SUBJECT, 0)],
+                dtype=bake_site.np.uint32,
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "24-bit"):
+            bake_site.ranks_for_source_ids(
+                lookup,
+                bake_site.sr.KIND_SUBJECT,
+                [1 << 24],
+            )
 
 
 class IncidenceGroupTests(unittest.TestCase):

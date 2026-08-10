@@ -91,6 +91,8 @@ dump 并受同一 manifest 约束，不能混用不同发布版本。LadybugDB �
 
 短字符串仍按原值保留，例如名称、日期、`duration`、`career` 和 `appear_eps`。它们有
 结构语义，不能为了压缩而改写或推断。
+数值字段同样保留类型化值：`platform_code` 缺少显示映射时仍保存原码，`score=0` 和
+`rank=0` 不改写成 `null`；查询层可以自行解释零值，但存储层不能合并两种状态。
 
 源字段 `Subject.rank` 在 Browser Data 中命名为 `bgmRank`。下文的 `VisualRank` 专指
 当前发布的几何数组下标，两者不能混用。
@@ -301,7 +303,7 @@ Manifest 至少包含：
 | `schema` | `structural-site-v1` |
 | `profile` | `explorer-v1` |
 | `version` | 对除自身外的规范 manifest 内容求 SHA-256 得到的内容身份 |
-| `source` | `dump_version` 与原始归档 `dump_sha256` |
+| `source` | `dump_version`、原始归档摘要、Parquet generation、布局输入/实现/产物摘要 |
 | `schema_digest` | 实体、事实、文本引用和磁盘元组定义的摘要；客户端必须匹配 |
 | `field_policy` | 每个源字段的 `core`、`sidecar` 或 `omitted` 决策 |
 | `mapping_digests` | 显示映射输入及 `mappings.json` 的摘要 |

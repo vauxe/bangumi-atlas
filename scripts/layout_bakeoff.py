@@ -4,7 +4,7 @@ Candidates: igraph DRL-3D (force family) vs igraph UMAP-3D (embedding
 family). For each: runtime, edge-compactness and community separation.
 Coordinates are exported for visual inspection with spike/preview.html.
 
-Usage: uv run python scripts/layout_bakeoff.py [--candidate drl|umap]
+Usage: uv run python -m scripts.layout_bakeoff [--candidate drl|umap]
 """
 
 import argparse
@@ -14,7 +14,8 @@ from pathlib import Path
 import igraph as ig
 import numpy as np
 import pyarrow.parquet as pq
-from layout import shape_layout
+
+from .layout import shape_layout
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "spike"

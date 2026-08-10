@@ -11,12 +11,13 @@ from __future__ import annotations
 import gzip
 import hashlib
 from functools import cache
-from numbers import Integral
 from pathlib import Path
 from typing import Any, Final
 
 import orjson
 from opencc import OpenCC
+
+from . import entity_key as _entity_key
 
 SITE_CONTRACT_PATH = Path(__file__).with_name("site-contract.json")
 SITE_CONTRACT: dict[str, Any] = orjson.loads(SITE_CONTRACT_PATH.read_bytes())
@@ -25,17 +26,17 @@ SITE_LIMITS: dict[str, Any] = SITE_CONTRACT["limits"]
 SCHEMA = str(SITE_CONTRACT["schema"])
 PROFILE = str(SITE_CONTRACT["profile"])
 
-# ---- EntityKey:kind << 24 | source_id ----
-KIND_SUBJECT = 1
-KIND_PERSON = 2
-KIND_CHARACTER = 3
-KINDS = (KIND_SUBJECT, KIND_PERSON, KIND_CHARACTER)
-KIND_NAMES = {
-    KIND_SUBJECT: "subject",
-    KIND_PERSON: "person",
-    KIND_CHARACTER: "character",
-}
-MAX_SOURCE_ID = (1 << 24) - 1
+ENTITY_KEY_FORMAT = _entity_key.ENTITY_KEY_FORMAT
+KIND_SUBJECT = _entity_key.KIND_SUBJECT
+KIND_PERSON = _entity_key.KIND_PERSON
+KIND_CHARACTER = _entity_key.KIND_CHARACTER
+KINDS = _entity_key.KINDS
+KIND_NAMES = _entity_key.KIND_NAMES
+MAX_SOURCE_ID = _entity_key.MAX_SOURCE_ID
+is_entity_kind = _entity_key.is_entity_kind
+entity_key = _entity_key.entity_key
+entity_keys = _entity_key.entity_keys
+
 EPISODE_SUBJECT_SENTINEL = (1 << 32) - 1
 
 # ---- u24 反向索引(VisualRank by EntityKey)----
@@ -477,30 +478,6 @@ def search_aliases(name: str, name_cn: str) -> list[tuple[str, str]]:
                 seen_keys.add(key)
                 aliases.append((key, matched))
     return aliases
-
-
-def is_entity_kind(value: object) -> bool:
-    return (
-        isinstance(value, Integral)
-        and not isinstance(value, bool)
-        and int(value) in KINDS
-    )
-
-
-def entity_key(kind: int, source_id: int) -> int:
-    """EntityKey = kind << 24 | source_id;越界即格式升级,不截断。"""
-    if not is_entity_kind(kind):
-        raise ValueError(f"unknown entity kind {kind}")
-    if (
-        not isinstance(source_id, Integral)
-        or isinstance(source_id, bool)
-        or not 0 <= int(source_id) <= MAX_SOURCE_ID
-    ):
-        raise ValueError(
-            f"source id {source_id} exceeds 24-bit EntityKey; "
-            "upgrade the key format instead of truncating"
-        )
-    return (int(kind) << 24) | int(source_id)
 
 
 def canonical_fact(

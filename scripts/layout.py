@@ -5,29 +5,36 @@ import ast
 import hashlib
 import inspect
 import json
+import platform
 import random
+import sys
 import textwrap
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import igraph as ig
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import scipy
 from scipy.spatial import cKDTree
 
-if TYPE_CHECKING:
-    from build_lock import PARQUET_BUILD_MARKER, parquet_layout_lock
-elif __package__:
-    from scripts.build_lock import PARQUET_BUILD_MARKER, parquet_layout_lock
-else:
-    from build_lock import PARQUET_BUILD_MARKER, parquet_layout_lock
+from . import entity_key as ek
+from . import parquet_provenance
+from .build_lock import parquet_layout_lock
 
 ROOT = Path(__file__).resolve().parent.parent
+DUMP = ROOT / "data" / "dump"
+DUMP_ZIP = ROOT / "data" / "dump.zip"
+MAPPINGS = ROOT / "data" / "mappings"
 PARQUET = ROOT / "data" / "parquet"
 OUT = ROOT / "data" / "layout"
+LAYOUT_CACHE_DEPENDENCIES = {
+    "entity_key.py": Path(ek.__file__),
+    "layout.py": Path(__file__),
+}
 
 ETYPE = {"subject": 1, "person": 2, "character": 3}
 EDGE_FILES = [
@@ -81,7 +88,7 @@ _GOLDEN_ANGLE = np.pi * (3 - np.sqrt(5.0))
 
 
 def node_key(etype: str, ids: np.ndarray) -> np.ndarray:
-    return (ETYPE[etype] << 24) | ids.astype(np.uint32)
+    return ek.entity_keys(ETYPE[etype], ids)
 
 
 def load_nodes() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -91,7 +98,7 @@ def load_nodes() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         PARQUET / "subject.parquet",
         columns=["id", "date", "wish", "done", "doing", "on_hold", "dropped"],
     )
-    ids = np.asarray(t.column("id"), dtype=np.uint32)
+    ids = np.asarray(t.column("id"), dtype=np.int64)
     keys.append(node_key("subject", ids))
     date = t.column("date").to_pylist()
     years.append(
@@ -110,7 +117,7 @@ def load_nodes() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         t = pq.read_table(
             PARQUET / f"{name}.parquet", columns=["id", "collects"]
         )
-        ids = np.asarray(t.column("id"), dtype=np.uint32)
+        ids = np.asarray(t.column("id"), dtype=np.int64)
         keys.append(node_key(name, ids))
         years.append(np.zeros(len(ids), dtype=np.uint16))
         collects.append(np.asarray(t.column("collects"), dtype=np.int64))
@@ -153,11 +160,11 @@ def load_edges(keys: np.ndarray) -> np.ndarray:
         )
         end = offset + len(t)
         src_keys = node_key(
-            src_t, np.asarray(t.column(src_col), dtype=np.uint32)
+            src_t, np.asarray(t.column(src_col), dtype=np.int64)
         )
         edges[offset:end, 0] = map_node_keys(keys, src_keys)
         dst_keys = node_key(
-            dst_t, np.asarray(t.column(dst_col), dtype=np.uint32)
+            dst_t, np.asarray(t.column(dst_col), dtype=np.int64)
         )
         edges[offset:end, 1] = map_node_keys(keys, dst_keys)
         offset = end
@@ -857,9 +864,29 @@ def layout_input_digest(parquet: Path) -> str:
     entries = [
         [name, _file_sha256(parquet / name)] for name in LAYOUT_INPUT_FILES
     ]
+    return _layout_input_digest(entries)
+
+
+def _layout_input_digest(entries: list[list[str]]) -> str:
     return hashlib.sha256(
         json.dumps(entries, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def layout_input_digest_from_generation(generation: dict[str, Any]) -> str:
+    """Reuse hashes already checked by generation validation."""
+
+    parquet = generation.get("parquet")
+    if not isinstance(parquet, dict):
+        raise ValueError("generation has no Parquet identities")
+    entries: list[list[str]] = []
+    for name in LAYOUT_INPUT_FILES:
+        identity = parquet.get(name)
+        digest = identity.get("sha256") if isinstance(identity, dict) else None
+        if not isinstance(digest, str) or len(digest) != 64:
+            raise ValueError(f"generation has no valid digest for {name}")
+        entries.append([name, digest])
+    return _layout_input_digest(entries)
 
 
 def _artifact_fingerprint(path: Path) -> dict[str, int | str]:
@@ -867,13 +894,27 @@ def _artifact_fingerprint(path: Path) -> dict[str, int | str]:
 
 
 def layout_cache_identity() -> str:
-    """Identify the local implementation and locked dependency contract."""
-    files = {"layout.py": _file_sha256(Path(__file__))}
-    lockfile = ROOT / "uv.lock"
-    if lockfile.exists():
-        files["uv.lock"] = _file_sha256(lockfile)
+    """Identify layout code, shared key encoding, and numeric runtimes."""
     return hashlib.sha256(
-        json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
+        json.dumps(
+            {
+                "files": {
+                    name: _file_sha256(path)
+                    for name, path in sorted(LAYOUT_CACHE_DEPENDENCIES.items())
+                },
+                "runtime": {
+                    "python": platform.python_implementation()
+                    + " "
+                    + ".".join(str(part) for part in sys.version_info[:3]),
+                    "igraph": ig.__version__,
+                    "numpy": np.__version__,
+                    "pyarrow": pa.__version__,
+                    "scipy": scipy.__version__,
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
     ).hexdigest()
 
 
@@ -971,14 +1012,11 @@ def edge_compactness(coords: np.ndarray, edges: np.ndarray) -> float | None:
     return float(edge_length.mean()) / mean_random if mean_random else None
 
 
-def _build_layout(force: bool) -> None:
-    marker = PARQUET / PARQUET_BUILD_MARKER
-    if marker.exists():
-        raise RuntimeError(
-            f"Parquet build incomplete ({marker}); rerun build_db.py"
-        )
+def build_layout(force: bool, generation: dict[str, Any]) -> None:
+    """Build or reuse layout for one already validated generation."""
+
     current_shape_digest = shape_digest()
-    input_digest = layout_input_digest(PARQUET)
+    input_digest = layout_input_digest_from_generation(generation)
     cache_identity = layout_cache_identity()
     if not force and layout_cache_matches(
         OUT, input_digest, current_shape_digest, cache_identity
@@ -1125,7 +1163,13 @@ def main() -> None:
     cli = parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     with parquet_layout_lock(PARQUET):
-        _build_layout(cli.force)
+        generation = parquet_provenance.require_valid_generation(
+            dump=DUMP,
+            dump_zip=DUMP_ZIP,
+            mappings=MAPPINGS,
+            parquet=PARQUET,
+        )
+        build_layout(cli.force, generation)
 
 
 if __name__ == "__main__":

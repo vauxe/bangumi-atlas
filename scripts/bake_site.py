@@ -14,6 +14,7 @@ import argparse
 import gzip
 import hashlib
 import heapq
+import os
 import shutil
 import sys
 import tempfile
@@ -29,22 +30,23 @@ import numpy as np
 import orjson
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
-import site_release as sr
-from community_labels import build_community_labels
-from enum_mappings import load_mappings
-from layout import shape_digest
-from query_contracts import (
+
+from . import site_release as sr
+from .build_lock import parquet_layout_lock
+from .community_labels import build_community_labels
+from .enum_mappings import load_mappings
+from .layout import shape_digest
+from .query_contracts import (
     load_query_contract,
     query_schema_digest,
     validate_query_contract,
 )
-from site_contracts import (
-    read_dump_version,
-    require_parquet_matches_dump,
+from .site_contracts import (
+    require_current_release_inputs,
     validate_layout_report,
     validate_name_pack,
 )
-from world_scale import (
+from .world_scale import (
     CANONICAL_WORLD_SPAN,
     MIN_NODE_CENTER_DISTANCE,
     find_minimum_distance_violation,
@@ -53,10 +55,11 @@ from world_scale import (
 )
 
 ROOT = Path(__file__).resolve().parent.parent
+DUMP = ROOT / "data" / "dump"
 PARQUET = ROOT / "data" / "parquet"
-LAYOUT = ROOT / "data" / "layout" / "coords.parquet"
-LAYOUT_REPORT = ROOT / "data" / "layout" / "report.json"
-DUMP_VERSION = ROOT / "data" / "dump" / "VERSION"
+LAYOUT_DIR = ROOT / "data" / "layout"
+LAYOUT = LAYOUT_DIR / "coords.parquet"
+LAYOUT_REPORT = LAYOUT_DIR / "report.json"
 DUMP_ZIP = ROOT / "data" / "dump.zip"
 SITE = ROOT / "site" / "data"
 MAPPING_SNAPSHOT = ROOT / "data" / "mappings"
@@ -122,6 +125,89 @@ def sha256_of(path: Path) -> str:
         while chunk := f.read(1 << 20):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def publish_manifest(
+    manifest: dict[str, Any],
+    *,
+    total_bytes: int,
+    core_bytes: int,
+    n_files: int,
+    started: float,
+) -> None:
+    """Publish the release marker only after every gate has passed."""
+
+    if total_bytes > SIZE_BUDGET:
+        failures.append("站点数据超 GH Pages 1GB 硬限")
+    elif total_bytes > SIZE_WARN:
+        log(f"WARNING: 站点数据 {total_bytes / 1e6:,.0f}MB 接近 1GB 门禁")
+    if n_files > FILE_BUDGET:
+        log(f"WARNING: 文件数 {n_files:,} 超 CF Pages 2 万限")
+    if failures:
+        sys.exit(f"FAILED: {len(failures)} 处对账不符: {failures}")
+
+    staging = SITE / ".manifest.json.build"
+    staging.unlink(missing_ok=True)
+    try:
+        staging.write_bytes(jdump(manifest))
+        staging.replace(SITE / "manifest.json")
+    finally:
+        staging.unlink(missing_ok=True)
+    log(
+        f"manifest 写出;数据合计 {total_bytes / 1e6:,.0f} MB"
+        f"(core {core_bytes / 1e6:,.0f} MB),{n_files:,} 个文件;"
+        f"总耗时 {time.time() - started:,.0f}s"
+    )
+
+
+def validate_output_directory(output: Path) -> Path:
+    """Resolve only the release directory or managed temporary outputs."""
+
+    if output.is_symlink() or output.parent.is_symlink():
+        raise ValueError(f"output must not traverse a symlink: {output}")
+    resolved = output.resolve()
+    default_path = ROOT / "site" / "data"
+    default = default_path.resolve()
+    if resolved == default:
+        if default_path.is_symlink() or default_path.parent.is_symlink():
+            raise ValueError("project site/data must not be a symlink")
+        return resolved
+
+    temporary_roots = [Path(tempfile.gettempdir()).resolve()]
+    if runner_temp := os.environ.get("RUNNER_TEMP"):
+        temporary_roots.append(Path(runner_temp).resolve())
+    in_managed_root = any(
+        resolved.is_relative_to(root) and resolved.parent != root
+        for root in temporary_roots
+    )
+    if resolved.name != "data" or not in_managed_root:
+        raise ValueError(
+            "output must be project site/data or */data below a managed "
+            "temporary root; "
+            f"refusing recursive cleanup of {resolved}"
+        )
+    return resolved
+
+
+def validate_release_capacity(node_count: int) -> None:
+    if type(node_count) is not int or node_count < 0:
+        raise ValueError("node count must be a non-negative integer")
+    if node_count >= 1 << 21:
+        raise ValueError("edge deduplication requires node count < 2^21")
+    if node_count >= sr.RANK_SENTINEL:
+        raise ValueError(
+            "VisualRank reached its u24 sentinel; upgrade the rank format"
+        )
+
+
+def validate_media_flag_values(values: np.ndarray) -> None:
+    media = np.asarray(values)
+    if media.ndim != 1 or media.dtype.kind not in "iu":
+        raise ValueError(
+            "media flag values must be a one-dimensional integer array"
+        )
+    if len(media) and (int(media.min()) < 0 or int(media.max()) >= 8):
+        raise ValueError("media exceeds the three published flags bits")
 
 
 def quantiles(sizes: list[int]) -> dict[str, int]:
@@ -374,17 +460,16 @@ def subject_entity_row(
     meta_id: dict[str, int],
     tag_id: dict[str, int],
 ) -> list[Any]:
-    # Archive uses zero for an unrated/unranked Subject; SiteRelease uses null.
     score = table["score"][i]
     bgm_rank = table["rank"][i]
     return [
         table["name"][i],
         table["name_cn"][i] or None,
         table["type"][i],
-        table["platform_code"][i] if table["platform"][i] else None,
+        table["platform_code"][i],
         table["date"][i],
-        score if score else None,
-        bgm_rank if bgm_rank else None,
+        score,
+        bgm_rank,
         int(table["nsfw"][i]),
         table["wish"][i],
         table["done"][i],
@@ -803,6 +888,14 @@ def entity_ranks(lookup: RankLookup, keys: np.ndarray) -> np.ndarray:
     return result
 
 
+def ranks_for_source_ids(
+    lookup: RankLookup, kind: int, source_ids: Sequence[Any]
+) -> np.ndarray:
+    """Map source IDs after enforcing the shared EntityKey boundary."""
+
+    return entity_ranks(lookup, sr.entity_keys(kind, source_ids))
+
+
 class IncidenceSpool:
     """Spill incidence into bounded contiguous bucket shards."""
 
@@ -1154,28 +1247,16 @@ def collect_mappings() -> tuple[dict[str, Any], dict[str, int]]:
     return mappings, unresolved
 
 
-def main() -> None:  # noqa: PLR0915
+def bake_release(  # noqa: PLR0915
+    output: Path, input_identity: dict[str, Any]
+) -> None:
     global SITE  # noqa: PLW0603
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=SITE,
-        help="staging data directory (default: site/data)",
-    )
-    args = parser.parse_args()
-    SITE = args.output.resolve()
-    if Path(SITE.anchor) == SITE or SITE == ROOT:
-        sys.exit("FAILED: refusing a broad output directory")
+    SITE = output
+    failures.clear()
     t_start = time.time()
-    dump_version = read_dump_version(DUMP_VERSION)
+    dump_version = str(input_identity["dump_version"])
     validate_query_contract(
         load_query_contract(), sr.FACT_ROLES, sr.FACT_ATTRS
-    )
-    # 烘焙读 Parquet,版本号却取自 dump:落后的 Parquet 会被贴上
-    # 当前 dump 的版本号发布出去(只重跑烘焙时尤其容易发生)
-    require_parquet_matches_dump(
-        dump_version, read_dump_version(PARQUET / "VERSION")
     )
     if not LAYOUT_REPORT.exists():
         sys.exit("FAILED: data/layout/report.json 缺失,先运行 layout.py")
@@ -1183,13 +1264,15 @@ def main() -> None:  # noqa: PLR0915
         orjson.loads(LAYOUT_REPORT.read_bytes()),
         shape_digest=shape_digest(),
     )
-    shutil.rmtree(SITE, ignore_errors=True)
+    if SITE.exists():
+        if not SITE.is_dir():
+            raise ValueError(f"output exists but is not a directory: {SITE}")
+        shutil.rmtree(SITE)
     SITE.mkdir(parents=True, exist_ok=True)
 
     lay = load_layout()
     n = len(lay["key"])
-    assert n < (1 << 21), "边去重编码假设节点数 < 2^21"
-    assert n < sr.RANK_SENTINEL, "VisualRank 必须小于 u24 哨兵,升级格式"
+    validate_release_capacity(n)
     order = np.argsort(-lay["collect"], kind="stable")
     key_r = lay["key"][order].astype(np.uint32)  # rank -> key
     kind_r = (key_r >> np.uint32(24)).astype(np.uint8)
@@ -1276,12 +1359,9 @@ def main() -> None:  # noqa: PLR0915
     score_values = np.zeros(n, dtype=np.float64)
     meta_tags_r: list[list[str] | None] = [None] * n
 
-    def ranks_for(kind: int, ids: list[Any]) -> np.ndarray:
-        source_ids = np.asarray(ids, dtype=np.uint32)
-        keys = (np.uint32(kind) << np.uint32(24)) | source_ids
-        return entity_ranks(rank_lookup, keys)
-
-    sub_ranks = ranks_for(sr.KIND_SUBJECT, sub_index["id"])
+    sub_ranks = ranks_for_source_ids(
+        rank_lookup, sr.KIND_SUBJECT, sub_index["id"]
+    )
     for i, rank_value in enumerate(sub_ranks):
         rank = int(rank_value)
         if rank == sr.RANK_SENTINEL:
@@ -1293,13 +1373,17 @@ def main() -> None:  # noqa: PLR0915
         media_vals[rank] = int(sub_index["type"][i])
         score_values[rank] = float(sub_index["score"][i] or 0)
         meta_tags_r[rank] = sub_index["meta_tags"][i]
-    per_ranks = ranks_for(sr.KIND_PERSON, per_names["id"])
+    per_ranks = ranks_for_source_ids(
+        rank_lookup, sr.KIND_PERSON, per_names["id"]
+    )
     for i, rank_value in enumerate(per_ranks):
         rank = int(rank_value)
         if rank != sr.RANK_SENTINEL:
             present_r[rank] = True
             names_r[rank] = per_names["name"][i]
-    cha_ranks = ranks_for(sr.KIND_CHARACTER, cha_names["id"])
+    cha_ranks = ranks_for_source_ids(
+        rank_lookup, sr.KIND_CHARACTER, cha_names["id"]
+    )
     for i, rank_value in enumerate(cha_ranks):
         rank = int(rank_value)
         if rank != sr.RANK_SENTINEL:
@@ -1334,7 +1418,7 @@ def main() -> None:  # noqa: PLR0915
     flags = np.zeros(n, dtype=np.uint8)
     flags |= nsfw_arr.astype(np.uint8)
     flags |= (iso_r.astype(np.uint8)) << 1
-    assert media_vals.max() < 8, "media 超出 flags bit2-4 容量,契约需扩位"
+    validate_media_flag_values(media_vals)
     flags |= (media_vals.astype(np.uint8)) << 2
     (SITE / "flags.bin").write_bytes(flags.tobytes())
     score_u8 = np.zeros(n, dtype=np.uint8)
@@ -1572,7 +1656,7 @@ def main() -> None:  # noqa: PLR0915
         f"实体结构:{ent_q['members']:,} 成员,"
         f"{entities_pack.size / 1e6:,.1f}MB,最大 {ent_q['max']:,}B"
     )
-    del entities_pack, ranks_for
+    del entities_pack
 
     # ---- 词表(career / meta_tags / tags.name)----
     vocab_pack = PackFile("vocab.pack")
@@ -2338,7 +2422,10 @@ def main() -> None:  # noqa: PLR0915
     for fpath in artifacts:
         if fpath.name == "manifest.json":
             continue
-        assert fpath.is_file(), f"产物应全为顶层文件,发现目录 {fpath.name}"
+        if not fpath.is_file():
+            raise ValueError(
+                f"published artifacts must be top-level files: {fpath.name}"
+            )
         size = fpath.stat().st_size
         digest = sha256_of(fpath)
         physical_name = sr.published_object_name(fpath.name, digest)
@@ -2382,7 +2469,11 @@ def main() -> None:  # noqa: PLR0915
         "profile": sr.PROFILE,
         "source": {
             "dump_version": dump_version,
-            "dump_sha256": sha256_of(DUMP_ZIP) if DUMP_ZIP.exists() else "",
+            "dump_sha256": input_identity["dump_sha256"],
+            "parquet_generation": input_identity["parquet_generation"],
+            "layout_input_digest": input_identity["layout_input_digest"],
+            "layout_cache_identity": input_identity["layout_cache_identity"],
+            "layout_artifacts": input_identity["layout_artifacts"],
         },
         "schema_digest": sr.schema_digest(),
         "field_policy": sr.FIELD_POLICY,
@@ -2447,20 +2538,35 @@ def main() -> None:  # noqa: PLR0915
     }
     version = sr.manifest_version(manifest_body)
     manifest = {"version": version, **manifest_body}
-    (SITE / "manifest.json").write_bytes(jdump(manifest))
-    if total_bytes > SIZE_BUDGET:
-        failures.append("站点数据超 GH Pages 1GB 硬限")
-    elif total_bytes > SIZE_WARN:
-        log(f"WARNING: 站点数据 {total_bytes / 1e6:,.0f}MB 接近 1GB 门禁")
-    if n_files > FILE_BUDGET:
-        log(f"WARNING: 文件数 {n_files:,} 超 CF Pages 2 万限")
-    log(
-        f"manifest 写出;数据合计 {total_bytes / 1e6:,.0f} MB"
-        f"(core {core_bytes / 1e6:,.0f} MB),{n_files:,} 个文件;"
-        f"总耗时 {time.time() - t_start:,.0f}s"
+    publish_manifest(
+        manifest,
+        total_bytes=total_bytes,
+        core_bytes=core_bytes,
+        n_files=n_files,
+        started=t_start,
     )
-    if failures:
-        sys.exit(f"FAILED: {len(failures)} 处对账不符: {failures}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=SITE,
+        help="staging data directory (default: site/data)",
+    )
+    args = parser.parse_args()
+    output = validate_output_directory(args.output)
+    with parquet_layout_lock(PARQUET):
+        input_identity = require_current_release_inputs(
+            dump=DUMP,
+            dump_zip=DUMP_ZIP,
+            mappings=MAPPING_SNAPSHOT,
+            parquet=PARQUET,
+            layout_dir=LAYOUT_DIR,
+            shape_digest=shape_digest(),
+        )
+        bake_release(output, input_identity)
 
 
 if __name__ == "__main__":

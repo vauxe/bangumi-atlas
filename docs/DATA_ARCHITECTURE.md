@@ -21,7 +21,7 @@ flowchart LR
     M[bangumi/common] --> C[data/mappings]
     B --> D[JSONL 解析与字段转换]
     C --> D
-    D --> E[data/parquet]
+    D --> E[data/parquet + generation.json]
     E -->|COPY| F[db/bangumi.lb]
     B --> G[数据库独立核验]
     E --> G
@@ -36,8 +36,8 @@ flowchart LR
 
 - **保真**：经过摘要校验的原始快照是唯一可信的无损数据源；类型化投影保留
   原始枚举码，任何未声明的顶层或嵌套字段都阻断构建。
-- **可验证**：源计数、悬空引用和全部表内容均由独立逻辑核验。
-- **可复现**：数据版本随 Parquet 保存；复用中间产物时执行版本核对。
+- **可验证**：源计数、悬空引用和全部表内容均由独立逻辑重建并核验。
+- **可复现**：Parquet generation 绑定来源和全部输出内容；版本名只作显示标签。
 - **易部署**：数据库是单文件产物，探索器是静态文件，二者都不依赖常驻服务。
 
 ## 2. 输入数据契约
@@ -86,6 +86,9 @@ flowchart LR
 | 历史枚举码无法解码 | 由验证器维护显式基线；基线增长会产生警告 |
 | 离线枚举快照来源不明或文件混用 | manifest 固定 `bangumi/common` commit 和逐文件 SHA-256；校验失败时阻断构建 |
 | `person-relations` 出现未知端点类型 | 阻断构建；先定义端点实体和关系表，不能跳过 |
+| Subject/Person/Character ID 超过 24 bit | 阻断 Parquet generation；升级 EntityKey 格式，不能转 `uint32` 后截断 |
+| dump 新增、缺少或重复 JSONL 文件 | 阻断 generation；先显式扩展表和字段策略，不能静默忽略 |
+| 解压 JSONL 与 `dump.zip` 成员内容不同 | 阻断 generation；逐成员 SHA-256、字节数和行数必须一致 |
 
 ## 3. 图模型
 
@@ -159,6 +162,8 @@ Parquet 是面向建图的类型化投影，不能反向还原为原始 JSONL。
   重新解释数据时，以这两个产物为来源。
 - `data/parquet` 和 LadybugDB 保存已声明 schema 的建图投影。重复记录和悬空关系会被
   筛选，`null` 与默认值的区别也可能被归一，因此不能将这些产物视为无损原始快照。
+  `data/parquet/generation.json` 记录原始、保留、筛选和重复行数，但被筛选行的完整内容
+  仍只存在于原始 JSONL。
 - `site/data` 是 SiteRelease：结构核心保留类型化 Parquet 的全部实体、事实和分集
   字段语义，简介、`infobox`、分集介绍等长字符串进入按需文本侧车。Episode 仍不进入
   Canvas；字段级 core/sidecar 策略由 manifest `field_policy` 声明。
@@ -181,7 +186,7 @@ SiteRelease 能恢复类型化 Parquet 的字段语义，但不是原始快照�
 
 | 命令 | 职责 |
 |---|---|
-| `scripts/fetch_dump.py` | 下载快照、校验 SHA-256、清理并重新解压 |
+| `scripts/fetch_dump.py` | 下载到临时归档、校验 SHA-256，在同目录完整解压后替换旧快照 |
 | `scripts/build_db.py` | 生成 Parquet，在临时路径 COPY 全量建库，完成后原子替换正式数据库 |
 | `scripts/verify_db.py` | 执行独立计数、全字段内容核验和查询冒烟测试 |
 | `scripts/layout.py` | 从 Parquet 生成 Canvas 3D 分层拓扑布局：最大分量形成 Leiden/UMAP 社区岛，小分量形成卫星岛，孤立节点形成外层球壳；所有随机算法播种，同一输入可复现 |
@@ -192,13 +197,16 @@ SiteRelease 能恢复类型化 Parquet 的字段语义，但不是原始快照�
 
 1. 从 `bangumi/common` 的单一 commit 刷新枚举映射并写入摘要 manifest；
    `--offline` 只接受 commit 和逐文件 SHA-256 校验通过的本地快照。
-2. 流式解析 JSONL，转换字段并写入 Parquet；`--skip-parquet` 可复用结果。
+2. 流式解析 JSONL，转换字段并写入 Parquet；独立 oracle 重建 11 张表的规范行内容，
+   与实际 Parquet 指纹完全一致后才发布 generation；`--skip-parquet` 只能复用通过完整
+   内容身份核验的结果。发布还逐成员证明 9 个 JSONL 确实来自所声明的归档。
 3. 在同目录临时文件中创建 LadybugDB，先导入节点再导入边；完整关闭后原子替换旧库。
 
-使用 `--skip-parquet` 时，dump 与 Parquet 必须都带有 `VERSION` 标记且内容一致；
-任一标记缺失或不一致都使构建失败。`bake_site.py` 在入口重复同一核对——它读取
-Parquet 却以 dump 版本标记发布物，落后的 Parquet 会被贴上未曾据以构建的版本号。
-每周发布始终重新生成 Parquet，不走该兼容路径。
+使用 `--skip-parquet` 时，`VERSION` 相同还不够；当前归档、映射、11 张 Parquet、schema、
+行数、语义 oracle 和 generation 自身摘要必须全部一致。9 个 JSONL 与归档的逐字节关系在
+generation 发布时证明，`verify_db.py` 会重新执行 raw→Parquet 深度语义核验；布局、烘焙和
+站点核验只检查各自实际依赖的当前制品，避免反复扫描不参与计算的原始文件。SiteRelease
+记录 Parquet generation 和布局 cache 身份，不能把旧投影或旧坐标贴上当前 dump 的版本号。
 离线校验只能证明快照来源和文件一致性，不能证明该 commit 仍是上游最新版本；需要最新
 枚举时必须运行默认的联网刷新阶段，构建日志会输出实际使用的 commit。
 
@@ -206,11 +214,12 @@ Parquet 却以 dump 版本标记发布物，落后的 Parquet 会被贴上未曾
 
 验证器独立于导入逻辑计算以下不变量：
 
-1. 源实体的唯一主键数，以及关联文件端点有效的行数。
-2. 每张节点表和边表的实际行数。
-3. Parquet 与 LadybugDB 之间每一行、每一列的内容指纹。
-4. 重复行敏感且与扫描顺序无关的多重集摘要。
-5. 代表性多跳查询结果。
+1. 独立从原始 JSONL 重建 11 张 Parquet 表的每个字段、端点和解码值。
+2. 源实体的唯一主键数，以及关联文件端点有效的行数。
+3. 每张节点表和边表的实际行数。
+4. Parquet 与 LadybugDB 之间每一行、每一列的内容指纹。
+5. 重复行敏感且与扫描顺序无关的多重集摘要。
+6. 代表性多跳查询结果。
 
 生成 Parquet 时，未知顶层字段、未知嵌套字段或无法建模的 `person_type` 会立即阻断
 构建。所有节点和关系原始枚举码都会按官方或显式声明的合同审计；合同外值保留原码并
