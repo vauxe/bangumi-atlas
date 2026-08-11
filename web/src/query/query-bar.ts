@@ -797,6 +797,20 @@ function scopeChoiceButton(owner: Owner): HTMLButtonElement {
   return result;
 }
 
+/** 建议行标题:类型色点 + 名称,色点与星图节点用同一套类型色。 */
+function suggestionTitle(owner: Owner, label: string): HTMLDivElement {
+  const result = document.createElement("div");
+  result.className = "query-suggestion-title";
+  result.dataset.owner = owner;
+  const mark = document.createElement("i");
+  mark.className = "query-owner-mark";
+  mark.setAttribute("aria-hidden", "true");
+  const name = document.createElement("strong");
+  name.textContent = label;
+  result.append(mark, name);
+  return result;
+}
+
 function iconButton(
   icon: QueryIconName,
   label: string,
@@ -1698,13 +1712,11 @@ export class QueryBar {
       choice.setAttribute("role", "option");
       choice.setAttribute("aria-selected", "false");
       choice.id = `${body.id}-name-${index}`;
-      const label = document.createElement("strong");
-      label.textContent = item.label;
       const detail = document.createElement("span");
       detail.textContent = item.match && item.match !== item.label
         ? `${item.detail ?? OWNER_LABEL[item.owner]} · 匹配：${item.match}`
         : item.detail ?? OWNER_LABEL[item.owner];
-      choice.append(label, detail);
+      choice.append(suggestionTitle(item.owner, item.label), detail);
       choice.addEventListener("pointermove", () => {
         this.nameIndex = index;
         this.syncActiveName(
@@ -3195,11 +3207,9 @@ export class QueryBar {
           const choice = button("", "query-entity-suggestion");
           choice.setAttribute("role", "option");
           choice.id = `${results.id}-option-${index}`;
-          const name = document.createElement("strong");
-          name.textContent = item.label;
           const detail = document.createElement("span");
           detail.textContent = item.detail || OWNER_LABEL[item.owner];
-          choice.append(name, detail);
+          choice.append(suggestionTitle(item.owner, item.label), detail);
           choice.addEventListener("pointermove", () => {
             activeIndex = index;
             syncActive();
