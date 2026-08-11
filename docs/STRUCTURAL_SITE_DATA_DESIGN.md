@@ -92,7 +92,8 @@ dump 并受同一 manifest 约束，不能混用不同发布版本。LadybugDB �
 短字符串仍按原值保留，例如名称、日期、`duration`、`career` 和 `appear_eps`。它们有
 结构语义，不能为了压缩而改写或推断。
 数值字段同样保留类型化值：`platform_code` 缺少显示映射时仍保存原码，`score=0` 和
-`rank=0` 不改写成 `null`；查询层可以自行解释零值，但存储层不能合并两种状态。
+`rank=0` 不改写成 `null`；查询投影统一把这两个上游哨兵解释为 `null`，使范围、排序和
+`isNull` 按“未评分/未排名”语义工作，但存储层不能合并两种状态。
 
 源字段 `Subject.rank` 在 Browser Data 中命名为 `bgmRank`。下文的 `VisualRank` 专指
 当前发布的几何数组下标，两者不能混用。

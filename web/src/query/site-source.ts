@@ -139,6 +139,18 @@ function personType(value: unknown): number | null {
   throw new TypeError(`unsupported Person type ${String(value)}`);
 }
 
+function subjectMetric(
+  value: unknown,
+  field: "score" | "rank",
+): number | null {
+  // The archive uses zero for an unavailable score or rank, while the query
+  // contract exposes absence as null.
+  if (value === 0 || value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value))
+    throw new TypeError(`Subject ${field} query value is invalid`);
+  return value;
+}
+
 function entityValue(
   entity: StructuralEntity,
   mappings: Mappings | null = null,
@@ -157,9 +169,9 @@ function entityValue(
         platform: platformName(entity.type, entity.platformCode, mappings),
         date: entity.date,
         year: subjectYear(entity.date),
-        score: entity.score,
+        score: subjectMetric(entity.score, "score"),
         ratingCount: entity.scoreDetails.reduce((sum, count) => sum + count, 0),
-        rank: entity.bgmRank,
+        rank: subjectMetric(entity.bgmRank, "rank"),
         nsfw: entity.nsfw,
         wish,
         done,
@@ -252,6 +264,12 @@ function projectedEntityValue(
       throw new TypeError(
         `SiteRelease projection omitted ${entity.kind}.${field}`,
       );
+  }
+  if (entity.kind === "subject") {
+    if (requested.has("score"))
+      fields.score = subjectMetric(fields.score, "score");
+    if (requested.has("rank"))
+      fields.rank = subjectMetric(fields.rank, "rank");
   }
   for (const field of Object.keys(fields))
     if (!requested.has(field)) delete fields[field];
