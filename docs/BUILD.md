@@ -45,6 +45,8 @@ uv run python -m scripts.verify_site
 全部一致才直接复用布局，且不会加载图数据结构或重写两份产物；任一项缺失、损坏或变化都
 视为未命中并完整重算。完整实现摘要允许无害改动产生保守的缓存未命中，但不会让改变输出的
 加载或编排逻辑误用旧坐标。
+UMAP 的迭代预算由 `LAYOUT_EPOCHS` 显式限定为 100，写入布局报告并参与
+`shape_digest`；修改预算会自动使旧布局失效，不能以缓存命中掩盖几何算法变化。
 
 `build_db.py` 只在枚举门禁、独立 raw→Parquet 内容对账和制品清单全部通过后，才最后
 发布 `data/parquet/generation.json`。该清单以 SHA-256 绑定 `dump.zip`、9 个 JSONL、
@@ -89,10 +91,14 @@ BLAS 或依赖二进制重新计算时会产生相同浮点结果。
 ### 内存与临时空间
 
 `layout.py` 以 `uint32` NumPy 数组保存边，并直接交给 igraph；最大分量和小分量拆开后
-立即释放全图。`bake_site.py` 将 pack 成员直接写入目标文件，实体与长文本按有界批次
+立即释放全图。`build_db.py` 在 Parquet 发布与 LadybugDB 导入之间回收不可达 Python
+对象，并要求 Arrow 内存池释放未用页，避免两个阶段的高水位叠加。`bake_site.py` 将
+pack 成员直接写入目标文件，实体与长文本按有界批次
 读取，事实排序段与 incidence 分片写入系统临时目录后逐段归并。因此内存不再随全部事实
-与 incidence 行数线性累积，但构建期间会使用额外临时磁盘空间；这些临时目录在正常完成
-或异常退出时自动清理。不要并行运行 `layout.py` 与 `bake_site.py`。
+与 incidence 行数线性累积。文本候选 postings 写出后立即释放；名称搜索先发布别名和
+子串 postings，释放二者后才构建前缀树，避免三份完整 Python 对象图叠加。分集完成分组
+后也立即释放 Arrow/Python 源列。构建期间会使用额外临时磁盘空间；这些临时目录在正常
+完成或异常退出时自动清理。不要并行运行 `layout.py` 与 `bake_site.py`。
 
 内存和耗时以当前完整构建日志为准，不设置跨机器的静态数字。验收以当前
 `shape_digest`、行级对账和 `verify_site.py` 全部通过为准，不能用曾中断的旧产物作为
@@ -128,10 +134,10 @@ kill %1
 3. `data/parquet/generation.json` —— 绑定原始归档、解压文件、映射、完整 Parquet 和
    独立语义 oracle；发布时完成全量 lineage 证明，日常消费者只复核它实际依赖的当前
    制品，`verify_db.py` 负责重新执行原始语义深度核验。
-4. `data/layout/report.json` —— `algo`、`seed` 与 `shape_digest` 描述整形算法；摘要由
-   `layout.py` 从整形代码算出，改了几何就自动变。它不包含输入和数值运行时，因此不能
-   单独作为整份坐标逐字节相同的证明。`depth_ratio`、邻距和 `edge_compactness` 由
-   数据实测，随上游版本漂移，读作几何质量。
+4. `data/layout/report.json` —— `algo`、`seed`、`epochs` 与 `shape_digest` 描述整形
+   算法；摘要由 `layout.py` 从整形代码算出，改了几何就自动变。它不包含输入和数值
+   运行时，因此不能单独作为整份坐标逐字节相同的证明。`depth_ratio`、邻距和
+   `edge_compactness` 由数据实测，随上游版本漂移，读作几何质量。
 5. `site/data/manifest.json` 的 `version` —— 标识发布使用的源数据版本；需要证明整份
    发布逐字节相同时，仍应比较 SiteRelease 文件清单及内容摘要。
 

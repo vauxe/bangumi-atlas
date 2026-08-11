@@ -405,6 +405,32 @@ class SearchIndexTests(unittest.TestCase):
             1,
         )
 
+    def test_text_search_write_releases_source_buffers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory)
+            with patch.object(bake_site, "SITE", site):
+                index = bake_site.TextSearchBuilder()
+                index.add(
+                    "entity-summary",
+                    1,
+                    [0, 12, 34],
+                    ["穿过星空的旅程"],
+                )
+                self.assertTrue(index.members)
+                self.assertTrue(any(index.postings))
+
+                index.write()
+
+                self.assertEqual(index.members, [])
+                self.assertEqual(index.postings, [])
+                with self.assertRaisesRegex(RuntimeError, "already written"):
+                    index.add(
+                        "entity-summary",
+                        1,
+                        [0, 56, 78],
+                        ["不能继续追加"],
+                    )
+
     def test_alias_pack_halves_block_width_until_members_fit(self) -> None:
         random_text = random.Random(0).randbytes(180_000).hex()
         cases = {

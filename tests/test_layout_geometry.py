@@ -102,6 +102,18 @@ class TopologyLayoutTests(unittest.TestCase):
         self.assertEqual(coords.shape, (4, 3))
         self.assertTrue(np.isfinite(coords).all())
 
+    def test_layout_uses_the_declared_epoch_budget(self) -> None:
+        graph = mock.Mock()
+        graph.layout_umap.return_value.coords = [[0.0, 0.0, 0.0]]
+
+        coords = run_layout(graph)
+
+        graph.layout_umap.assert_called_once_with(
+            dim=3,
+            epochs=layout.LAYOUT_EPOCHS,
+        )
+        self.assertEqual(coords.dtype, np.dtype(np.float32))
+
     def test_layout_is_reproducible_across_runs(self) -> None:
         graph = ig.Graph.Famous("Zachary")
 
