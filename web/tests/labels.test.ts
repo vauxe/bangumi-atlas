@@ -6,6 +6,10 @@ import { OrbitViewport } from "@deck.gl/core";
 import {
   buildWorkingLabels,
   declutter,
+  NEARBY_LABEL_LIMIT,
+  NEARBY_LABEL_ZOOM,
+  nearbyLabelLayers,
+  nearbyLabelRanks,
   perspectiveTextSize,
   workingLabelLayers,
 } from "../src/labels";
@@ -42,6 +46,86 @@ test("collects missing names for batched loading", () => {
   );
   assert.deepEqual(data.missing, [7]);
   assert.equal(data.nodes.length, 1);
+});
+
+test("reveals only the nearest bounded node names in close view", () => {
+  const positions = new Float32Array([
+    0, 0, 0,
+    2, 0, 0,
+    1, 0, 0,
+    20, 0, 0,
+  ]);
+
+  assert.deepEqual(
+    nearbyLabelRanks(
+      positions,
+      4,
+      [0, 0, 0],
+      NEARBY_LABEL_ZOOM - 0.01,
+      1_000,
+      600,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    nearbyLabelRanks(
+      positions,
+      4,
+      [0, 0, 0],
+      NEARBY_LABEL_ZOOM,
+      1_000,
+      600,
+      2,
+    ),
+    [0, 2],
+  );
+  const crowded = new Float32Array(30 * 3);
+  for (let rank = 0; rank < 30; rank++) crowded[rank * 3] = rank / 100;
+  assert.equal(
+    nearbyLabelRanks(
+      crowded,
+      30,
+      [0, 0, 0],
+      NEARBY_LABEL_ZOOM,
+      1_000,
+      600,
+      100,
+    ).length,
+    NEARBY_LABEL_LIMIT,
+  );
+});
+
+test("builds a subdued nearby-name layer and reports uncached ranks", () => {
+  const viewport = {
+    focalDistance: 1,
+    viewProjectionMatrix: [
+      1, 0, 0, 0,
+      0, 1, 0, 0,
+      0, 0, 1, 0,
+      0, 0, 0, 1,
+    ],
+  };
+  const { layers, missing } = nearbyLabelLayers(
+    members,
+    (rank) => rank === 0 ? "命运石之门" : null,
+    flat,
+    viewport,
+  );
+
+  assert.deepEqual(missing, [7]);
+  assert.equal(layers.length, 1);
+  const layer = layers[0] as {
+    id: string;
+    props: {
+      data: { text: string }[];
+      getColor: number[];
+      parameters: { depthCompare: string };
+    };
+  };
+  assert.equal(layer.id, "nearby-node-names");
+  assert.deepEqual(layer.props.data.map((item) => item.text), ["命运石之门"]);
+  assert.ok((layer.props.getColor[3] ?? 255) < 245);
+  assert.equal(layer.props.parameters.depthCompare, "always");
 });
 
 test("declutters by priority: the selected node's name always wins", () => {
