@@ -59,6 +59,32 @@ class MappingSnapshotTests(unittest.TestCase):
                 ):
                     build_db.validate_mapping_snapshot()
 
+    def test_online_refresh_failure_does_not_implicitly_go_offline(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mappings = Path(directory)
+            write_mapping_snapshot(mappings)
+
+            with (
+                patch.object(build_db, "MAPPINGS", mappings),
+                patch.object(
+                    build_db.enum_mappings,
+                    "_download",
+                    side_effect=OSError("network unavailable"),
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "mapping refresh failed.*--offline",
+                ),
+            ):
+                build_db.fetch_mappings()
+
+            self.assertEqual(
+                build_db.enum_mappings.validate_mapping_snapshot(mappings),
+                "a" * 40,
+            )
+
 
 class SourceSchemaTests(unittest.TestCase):
     def test_source_projection_uses_the_published_field_policy(self) -> None:

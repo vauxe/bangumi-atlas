@@ -186,7 +186,7 @@ SiteRelease 能恢复类型化 Parquet 的字段语义，但不是原始快照�
 
 | 命令 | 职责 |
 |---|---|
-| `scripts/fetch_dump.py` | 下载到临时归档、校验 SHA-256，在同目录完整解压后替换旧快照 |
+| `scripts/fetch_dump.py` | 在同目录暂存、校验并解压完整代际，再成对替换归档与目录；提交失败恢复旧代 |
 | `scripts/build_db.py` | 生成 Parquet，在临时路径 COPY 全量建库，完成后原子替换正式数据库 |
 | `scripts/verify_db.py` | 执行独立计数、全字段内容核验和查询冒烟测试 |
 | `scripts/layout.py` | 从 Parquet 生成 Canvas 3D 分层拓扑布局：最大分量形成 Leiden/UMAP 社区岛，小分量形成卫星岛，孤立节点形成外层球壳；所有随机算法播种，同一输入可复现 |
@@ -195,8 +195,9 @@ SiteRelease 能恢复类型化 Parquet 的字段语义，但不是原始快照�
 
 `build_db.py` 包含三个阶段：
 
-1. 从 `bangumi/common` 的单一 commit 刷新枚举映射并写入摘要 manifest；
-   `--offline` 只接受 commit 和逐文件 SHA-256 校验通过的本地快照。
+1. 从 `bangumi/common` 的单一 commit 刷新枚举映射并写入摘要 manifest；联网刷新失败会
+   中断构建，不会隐式复用旧数据。`--offline` 只接受 commit 和逐文件 SHA-256 校验通过的
+   本地快照。
 2. 流式解析 JSONL，转换字段并写入 Parquet；独立 oracle 重建 11 张表的规范行内容，
    与实际 Parquet 指纹完全一致后才发布 generation；`--skip-parquet` 只能复用通过完整
    内容身份核验的结果。发布还逐成员证明 9 个 JSONL 确实来自所声明的归档。
@@ -208,7 +209,8 @@ generation 发布时证明，`verify_db.py` 会重新执行 raw→Parquet 深度
 站点核验只检查各自实际依赖的当前制品，避免反复扫描不参与计算的原始文件。SiteRelease
 记录 Parquet generation 和布局 cache 身份，不能把旧投影或旧坐标贴上当前 dump 的版本号。
 离线校验只能证明快照来源和文件一致性，不能证明该 commit 仍是上游最新版本；需要最新
-枚举时必须运行默认的联网刷新阶段，构建日志会输出实际使用的 commit。
+枚举时必须运行默认的联网刷新阶段，构建日志会输出实际使用的 commit。网络或上游响应
+异常是该阶段的显式失败，只有操作者主动传入 `--offline` 才改变新鲜度契约。
 
 ## 6. 验证与失败策略
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import sys
 import tempfile
 import urllib.request
 from pathlib import Path
@@ -125,9 +124,9 @@ def validate_mapping_snapshot(mappings: Path) -> str:
 def fetch_mappings(mappings: Path) -> str:
     """Atomically refresh a commit-consistent bangumi/common snapshot.
 
-    If the network is unavailable, only a locally verified snapshot may be
-    reused. The manifest is replaced last so an interrupted refresh cannot be
-    mistaken for a valid snapshot.
+    Online refresh never silently becomes an offline build. The manifest is
+    replaced last so an interrupted refresh cannot be mistaken for a valid
+    snapshot.
     """
 
     mappings.mkdir(parents=True, exist_ok=True)
@@ -147,18 +146,10 @@ def fetch_mappings(mappings: Path) -> str:
             _parse_mapping(name, data)
             files[f"{name}.yml"] = data
     except (OSError, json.JSONDecodeError, ValueError) as error:
-        try:
-            local_revision = validate_mapping_snapshot(mappings)
-        except ValueError as local_error:
-            sys.exit(
-                "mapping refresh failed and the local snapshot is invalid: "
-                f"{error}; {local_error}"
-            )
-        print(
-            "  mapping refresh failed "
-            f"({error}), using verified revision {local_revision}"
-        )
-        return local_revision
+        raise RuntimeError(
+            f"mapping refresh failed: {error}; rerun with --offline only "
+            "when reusing the verified local snapshot is intentional"
+        ) from error
 
     changed = {
         name: not (mappings / name).exists()
