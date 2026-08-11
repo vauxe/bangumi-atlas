@@ -43,36 +43,15 @@ jobs:
 
       - name: Check pipeline tests, lint, formatting, and types
         run: |
-          uv run python -m unittest discover -s tests
-          uv run ruff check scripts tests
-          uv run ruff format --check scripts tests
-          uv run mypy scripts
-
-      - name: Fetch dump (SHA256 verified)
-        run: uv run python -m scripts.fetch_dump
-
-      - name: Build graph database
-        run: uv run python -m scripts.build_db
-
-      - name: Verify database against dump
-        run: uv run python -m scripts.verify_db
-
-      - name: Layout current snapshot
-        run: |
-          uv run python -m scripts.layout
-          echo "layout report:"
-          cat data/layout/report.json
+          uv run --frozen python -m unittest discover -s tests
+          uv run --frozen ruff check scripts tests
+          uv run --frozen ruff format --check scripts tests
+          uv run --frozen mypy scripts
 
       - name: Prepare isolated staging site
         run: |
           mkdir -p "$ATLAS_SITE_DIR"
           cp site/index.html "$ATLAS_SITE_DIR/index.html"
-
-      - name: Bake site data (row-level reconciliation inside)
-        run: uv run python -m scripts.bake_site --output "$ATLAS_SITE_DIR/data"
-
-      - name: Verify SiteRelease against parquet (independent)
-        run: uv run python -m scripts.verify_site --site "$ATLAS_SITE_DIR"
 
       - name: Install client dependencies
         run: npm ci
@@ -84,6 +63,27 @@ jobs:
           npm run check
           npm run build
         working-directory: web
+
+      - name: Fetch dump (SHA256 verified)
+        run: uv run --frozen python -m scripts.fetch_dump
+
+      - name: Build graph database
+        run: uv run --frozen python -m scripts.build_db
+
+      - name: Verify database against dump
+        run: uv run --frozen python -m scripts.verify_db
+
+      - name: Layout current snapshot
+        run: |
+          uv run --frozen python -m scripts.layout
+          echo "layout report:"
+          cat data/layout/report.json
+
+      - name: Bake site data (row-level reconciliation inside)
+        run: uv run --frozen python -m scripts.bake_site --output "$ATLAS_SITE_DIR/data"
+
+      - name: Verify SiteRelease against parquet (independent)
+        run: uv run --frozen python -m scripts.verify_site --site "$ATLAS_SITE_DIR"
 
       - name: Smoke-test the complete SiteRelease over HTTP
         run: |
@@ -110,7 +110,7 @@ jobs:
       # 数据在内的所有普通文件,不用 manifest total_bytes 代替。
       - name: Enforce size / file-count budgets on the full staging site
         run: |
-          uv run python - <<'EOF'
+          uv run --frozen python - <<'EOF'
           import os, pathlib, sys
           root = pathlib.Path(os.environ["ATLAS_SITE_DIR"])
           files = [p for p in root.rglob("*") if p.is_file()]

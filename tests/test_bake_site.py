@@ -786,6 +786,7 @@ class FactSummaryTests(unittest.TestCase):
             with patch.object(bake_site, "SITE", site):
                 index, stats, sizes = bake_site.emit_fact_summary(
                     items,
+                    non_empty_count=2,
                     empty_count=4,
                     raw_bytes=raw_bytes,
                 )
@@ -819,6 +820,31 @@ class FactSummaryTests(unittest.TestCase):
             },
         )
         self.assertTrue(all(size > 0 for size in sizes))
+
+    def test_counts_source_rows_separately_from_unique_fact_refs(self) -> None:
+        text = "重复配音说明"
+        raw_bytes = len(text.encode()) * 2
+
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory)
+            with patch.object(bake_site, "SITE", site):
+                index, stats, _sizes = bake_site.emit_fact_summary(
+                    [(7, text)],
+                    non_empty_count=2,
+                    empty_count=3,
+                    raw_bytes=raw_bytes,
+                )
+
+        self.assertEqual(len(index["ranges"]), 1)
+        self.assertEqual(
+            {key: stats[key] for key in ("non_empty", "empty", "raw_bytes")},
+            {
+                "non_empty": 2,
+                "empty": 3,
+                "raw_bytes": raw_bytes,
+            },
+        )
+        self.assertGreater(stats["compressed_bytes"], 0)
 
 
 class FactAccumulationTests(unittest.TestCase):

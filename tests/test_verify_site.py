@@ -181,6 +181,55 @@ class ExpectedFactStoreTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_fact_summary_expectation_preserves_fact_and_source_identities(
+        self,
+    ) -> None:
+        person = sr.entity_key(sr.KIND_PERSON, 1)
+        character = sr.entity_key(sr.KIND_CHARACTER, 2)
+        subject = sr.entity_key(sr.KIND_SUBJECT, 3)
+        text = "重复配音说明"
+        voiced = sr.canonical_fact(
+            "VOICE_CREDIT",
+            (person, character, subject),
+            (4, text),
+        )
+        empty = sr.canonical_fact(
+            "VOICE_CREDIT",
+            (person, character, subject),
+            (1, ""),
+        )
+        unrelated = sr.canonical_fact(
+            "WORKED_ON",
+            (person, subject),
+            (5, ""),
+        )
+
+        class OneShotFacts:
+            def __init__(self) -> None:
+                self._iterated = False
+
+            def __iter__(self):
+                if self._iterated:
+                    raise AssertionError("facts were traversed more than once")
+                self._iterated = True
+                return iter([(0, voiced, 2), (1, empty, 3), (2, unrelated, 4)])
+
+        anchors_match, summaries, stats = verify_site.expected_fact_metadata(
+            OneShotFacts(),
+            np.asarray([person, person, person], dtype=np.uint32),
+        )
+
+        self.assertTrue(anchors_match)
+        self.assertEqual(summaries, {0: text})
+        self.assertEqual(
+            stats,
+            {
+                "non_empty": 2,
+                "empty": 3,
+                "raw_bytes": len(text.encode()) * 2,
+            },
+        )
+
 
 class RoutingContractTests(unittest.TestCase):
     def test_text_posting_decoder_rejects_noncanonical_values(self) -> None:

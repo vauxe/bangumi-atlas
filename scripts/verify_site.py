@@ -711,9 +711,59 @@ class ExpectedFactStore:
     def multiplicities(self) -> np.ndarray:
         return self._index["multiplicity"]
 
+    def facts(self) -> Iterator[tuple[int, bytes, int]]:
+        for ref in range(self.count):
+            encoded, multiplicity, _incidence = self.lookup(ref)
+            yield ref, encoded, multiplicity
+
     def close(self) -> None:
         self._data._mmap.close()  # type: ignore[attr-defined]
         self._index._mmap.close()  # type: ignore[attr-defined]
+
+
+def expected_fact_metadata(
+    facts: Iterable[tuple[int, bytes, int]],
+    anchors: Sequence[int] | np.ndarray,
+) -> tuple[bool, dict[int, str], dict[str, int]]:
+    """Recover anchor and summary metadata in one canonical-fact pass."""
+
+    anchors_match = True
+    summaries: dict[int, str] = {}
+    non_empty = 0
+    empty = 0
+    raw_bytes = 0
+    fact_count = 0
+    for ref, encoded, multiplicity in facts:
+        fact_count += 1
+        if multiplicity <= 0:
+            raise ValueError("fact multiplicity must be positive")
+        kind, participants, attrs = orjson.loads(encoded)
+        if (
+            ref >= len(anchors)
+            or not participants
+            or int(anchors[ref]) != int(participants[0])
+        ):
+            anchors_match = False
+        if kind != "VOICE_CREDIT":
+            continue
+        text = attrs[1]
+        if not isinstance(text, str):
+            raise ValueError("VOICE_CREDIT.summary must be a string")
+        if text:
+            summaries[ref] = text
+            non_empty += multiplicity
+            raw_bytes += len(text.encode("utf-8")) * multiplicity
+        else:
+            empty += multiplicity
+    return (
+        anchors_match and fact_count == len(anchors),
+        summaries,
+        {
+            "non_empty": non_empty,
+            "empty": empty,
+            "raw_bytes": raw_bytes,
+        },
+    )
 
 
 def build_expected_fact_store(
@@ -1727,7 +1777,7 @@ def verify_release(  # noqa: PLR0915
     )
     del ep_t, fp_pq, fp_site, sizes
 
-    # fact-summary:当前全空快照必须产生零负载 + 规范空目录
+    # fact-summary:唯一 FactRef 负载与源行统计使用不同身份。
     fam = text_idx["fact-summary"]
     fact_summary: dict[int, str] = {}
     fact_summary_routes: list[list[int]] = []
@@ -1735,6 +1785,8 @@ def verify_release(  # noqa: PLR0915
         m = load_member(fam["files"][fidx], off, length)
         fact_summary_routes.append(m["i"])
         for ref, text in zip(m["i"], m["t"], strict=True):
+            if ref in fact_summary or not text:
+                check("fact-summary 身份唯一且非空", False, str(ref))
             fact_summary[ref] = text
     check(
         "fact-summary 二分目录可达",
@@ -1749,17 +1801,9 @@ def verify_release(  # noqa: PLR0915
         "fact-summary 目录与 pack 存在",
         all(site_file(f).exists() for f in fam["files"]),
     )
-    voiced_summary_count = 0
-    for vo in iter_parquet_dict_batches(
-        PARQUET / "voiced.parquet", ["summary"]
-    ):
-        voiced_summary_count += sum(1 for summary in vo["summary"] if summary)
-    reconcile(
-        "fact-summary 非空值 = parquet",
-        voiced_summary_count,
-        len(fact_summary),
+    fact_summary_compressed = sum(
+        int(artifact_files[name][0]) for name in fam["files"]
     )
-    del vo
 
     # 成员候选索引覆盖 Episode 名称和合同允许全文查询的原文；原始
     # infobox 仍在侧车中，但不得扩大全文索引或进入候选集。
@@ -2164,16 +2208,9 @@ def verify_release(  # noqa: PLR0915
                 and fact_index_meta.get("count") == len(fact_anchors)
                 and len(fact_anchors) == n_facts,
             )
-            anchors_match = len(fact_anchors) == n_facts
-            if anchors_match:
-                for ref in range(n_facts):
-                    encoded, _multiplicity, _incidence = expected.lookup(ref)
-                    participants = orjson.loads(encoded)[1]
-                    if not participants or int(fact_anchors[ref]) != int(
-                        participants[0]
-                    ):
-                        anchors_match = False
-                        break
+            anchors_match, expected_summaries, summary_stats = (
+                expected_fact_metadata(expected.facts(), fact_anchors)
+            )
             check("fact-anchor.bin = 每条规范事实的首个参与者", anchors_match)
             reconcile(
                 "事实源行数",
@@ -2184,6 +2221,30 @@ def verify_release(  # noqa: PLR0915
                 "multiplicity 总和 = 源行数",
                 fact_source_rows,
                 int(expected.multiplicities.sum(dtype=np.uint64)),
+            )
+            check(
+                "fact-summary FactRef 与内容 = parquet 规范事实",
+                fact_summary == expected_summaries,
+            )
+            reconcile(
+                "fact-summary 非空源行计数",
+                manifest["counts"]["text"]["fact-summary"]["non_empty"],
+                summary_stats["non_empty"],
+            )
+            reconcile(
+                "fact-summary 空源行计数",
+                manifest["counts"]["text"]["fact-summary"]["empty"],
+                summary_stats["empty"],
+            )
+            reconcile(
+                "fact-summary UTF-8 源字节数",
+                manifest["text_bytes"]["fact-summary"]["raw"],
+                summary_stats["raw_bytes"],
+            )
+            reconcile(
+                "fact-summary 压缩字节数",
+                manifest["text_bytes"]["fact-summary"]["compressed"],
+                fact_summary_compressed,
             )
 
             tag_to_kind = {v: k for k, v in sr.FACT_TAGS.items()}
