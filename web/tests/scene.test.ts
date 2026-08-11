@@ -5,8 +5,8 @@ import { test } from "node:test";
 import {
   interactionHint,
   NodeStyleExtension,
-  queryHighlightItems,
   Scene,
+  updateQueryResultMask,
 } from "../src/scene";
 import { FOCUS_ZOOM } from "../src/camera";
 import { NEARBY_LABEL_ZOOM } from "../src/labels";
@@ -161,19 +161,61 @@ test("does not interpolate per-node metadata across a billboard", () => {
 
   assert.match(vertexDecl, /flat out vec4 atlas_style;/);
   assert.match(fragmentDecl, /flat in vec4 atlas_style;/);
+  assert.match(vertexDecl, /flat out float atlas_query_result;/);
+  assert.match(fragmentDecl, /flat in float atlas_query_result;/);
 });
 
-test("keeps only unique query-result nodes whose graph positions are available", () => {
-  assert.deepEqual(queryHighlightItems(
-    [2, 1, 2, -1, 3],
-    (rank) => rank === 3 ? null : [rank, rank + 1, rank + 2],
-  ), [
-    { rank: 2, position: [2, 3, 4] },
-    { rank: 1, position: [1, 2, 3] },
-  ]);
+test("dims only non-result context nodes while a query is highlighted", () => {
+  const shaders = new NodeStyleExtension().getShaders() as {
+    inject: Record<string, string>;
+  };
+  const colorFilter = shaders.inject["fs:DECKGL_FILTER_COLOR"] ?? "";
+
+  assert.match(
+    colorFilter,
+    /if \(atlas\.spotlight > 0\.5 && atlas_query_result < 0\.5\)/,
+  );
+  assert.match(
+    colorFilter,
+    /visibility = min\(visibility, 64\.0 \/ 255\.0\);/,
+  );
 });
 
-test("dims context only when a query highlight can actually be drawn", () => {
+test("updates query-result membership without changing other nodes", () => {
+  const mask = new Uint8Array(5);
+
+  updateQueryResultMask(mask, new Uint32Array(), Uint32Array.of(1, 3));
+  assert.deepEqual([...mask], [0, 255, 0, 255, 0]);
+
+  updateQueryResultMask(mask, Uint32Array.of(1, 3), Uint32Array.of(2, 3, 8));
+  assert.deepEqual([...mask], [0, 0, 255, 255, 0]);
+});
+
+test("binds query-result membership to every context-node instance", () => {
+  const mask = Uint8Array.of(0, 255, 0);
+  const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
+    styled: 3,
+    contextLength: -1,
+    contextData: null,
+    gpu: null,
+    styleBuf: new Uint8Array(12),
+    queryResultMask: mask,
+    geo: {
+      positions: new Float32Array(9),
+      size: new Uint8Array(3),
+    },
+  });
+  const build = Reflect.get(scene, "buildContextData") as () => {
+    attributes: Record<string, { value?: Uint8Array; type?: string }>;
+  };
+
+  const data = build.call(scene);
+
+  assert.equal(data.attributes.getQueryResult?.value, mask);
+  assert.equal(data.attributes.getQueryResult?.type, "unorm8");
+});
+
+test("dims context only when a query result exists in the context layer", () => {
   const previous = {
     selection: state.selection,
     queryResultRanks: state.queryResultRanks,
@@ -181,19 +223,14 @@ test("dims context only when a query highlight can actually be drawn", () => {
   try {
     state.selection = null;
     state.queryResultRanks = Uint32Array.of(4);
-    const geometry = {
-      loaded: 0,
-      sparse: new Map<number, [number, number, number]>(),
-    };
-    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
-      geo: geometry,
-      posOf: () => geometry.loaded ? [0, 0, 0] : null,
-    });
+    const scene = Object.assign(Object.create(Scene.prototype), {
+      styled: 0,
+    }) as Scene;
     const uniforms = Reflect.get(scene, "atlasUniforms") as () => {
       spotlight: number;
     };
     assert.equal(uniforms.call(scene).spotlight, 0);
-    geometry.loaded = 1;
+    Reflect.set(scene, "styled", 5);
     assert.equal(uniforms.call(scene).spotlight, 1);
   } finally {
     state.selection = previous.selection;
@@ -201,73 +238,37 @@ test("dims context only when a query highlight can actually be drawn", () => {
   }
 });
 
-test("renders query results as a separate pickable graph layer", () => {
-  const queryState = state;
-  const previous = queryState.queryResultRanks;
-  const picked: number[] = [];
-  try {
-    queryState.queryResultRanks = Uint32Array.of(0, 1, 1, 2);
-    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
-      posOf: (rank: number): [number, number, number] | null =>
-        rank < 2 ? [rank, 0, 0] : null,
-      cb: {
-        onHover: () => undefined,
-        onPick: (rank: number) => picked.push(rank),
-      },
-    });
-    const buildLayers = Reflect.get(scene, "queryResultLayers") as () => {
-      id: string;
-      props: Record<string, unknown>;
-    }[];
-    const layers = buildLayers.call(scene);
-    assert.deepEqual(layers.map((layer) => layer.id), [
-      "query-results-xray",
-      "query-results-lit",
-    ]);
-    assert.equal(
-      (layers[1]?.props.data as { length: number }).length,
-      2,
-    );
-    assert.equal(layers[1]?.props.pickable, true);
-    (layers[1]?.props.onClick as (info: { index: number }) => void)({ index: 1 });
-    assert.deepEqual(picked, [1]);
-  } finally {
-    queryState.queryResultRanks = previous;
-  }
-});
-
-test("reuses query-result buffers until ranks or available geometry changes", () => {
+test("keeps query results in the base layer without color or outline overlays", () => {
   const previous = state.queryResultRanks;
-  const geometry = { loaded: 2, sparse: new Map<number, [number, number, number]>() };
-  let positionReads = 0;
+  let rendered: { id: string; props: Record<string, unknown> }[] = [];
   try {
-    state.queryResultRanks = Uint32Array.of(0, 2);
-    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
-      geo: geometry,
-      posOf: (rank: number): [number, number, number] | null => {
-        positionReads++;
-        return rank < geometry.loaded ? [rank, 0, 0] : null;
+    state.queryResultRanks = Uint32Array.of(0, 1);
+    const scene = Object.assign(Object.create(Scene.prototype), {
+      styled: 2,
+      queryResultMask: new Uint8Array(2),
+      queryResultMaskSource: new Uint32Array(),
+      gpu: null,
+      contextData: null,
+      contextLength: -1,
+      buildContextData: () => ({ length: 2, attributes: {} }),
+      nearbyLabelLayers: () => [],
+      workingSetLayers: () => [],
+      anchorFlash: null,
+      cb: { onHover: () => undefined },
+      deck: {
+        setProps: (props: { layers: typeof rendered }) => {
+          rendered = props.layers;
+        },
       },
-      cb: { onHover: () => undefined, onPick: () => undefined },
-    });
-    const buildLayers = Reflect.get(scene, "queryResultLayers") as () => {
-      props: Record<string, unknown>;
-    }[];
+    }) as Scene;
+    scene.render();
 
-    const first = buildLayers.call(scene);
-    const second = buildLayers.call(scene);
-    assert.equal(positionReads, 2);
-    assert.equal(first[0]?.props.data, second[0]?.props.data);
-    assert.equal((first[0]?.props.data as { length: number }).length, 1);
-
-    geometry.loaded = 3;
-    const grown = buildLayers.call(scene);
-    assert.equal(positionReads, 4);
-    assert.equal((grown[0]?.props.data as { length: number }).length, 2);
-
-    state.queryResultRanks = Uint32Array.of(0);
-    buildLayers.call(scene);
-    assert.equal(positionReads, 5);
+    assert.deepEqual(rendered.map((layer) => layer.id), ["context"]);
+    assert.equal(rendered[0]?.props.pickable, true);
+    assert.deepEqual(
+      [...(Reflect.get(scene, "queryResultMask") as Uint8Array)],
+      [255, 255],
+    );
   } finally {
     state.queryResultRanks = previous;
   }
@@ -421,56 +422,6 @@ test("rebuilds nearby label layout after a resize with the same ranks", () => {
     assert.deepEqual(renderedWidths, [1_000, 800]);
   } finally {
     state.selection = previousSelection;
-  }
-});
-
-test("keeps query-result markers subtle at overview and prominent through zoom", () => {
-  const previous = state.queryResultRanks;
-  try {
-    state.queryResultRanks = Uint32Array.of(0);
-    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
-      posOf: (): [number, number, number] => [0, 0, 0],
-      cb: {
-        onHover: () => undefined,
-        onPick: () => undefined,
-      },
-    });
-    const buildLayers = Reflect.get(scene, "queryResultLayers") as () => {
-      id: string;
-      props: Record<string, unknown>;
-    }[];
-    const layers = buildLayers.call(scene);
-    const layer = (id: string): Record<string, unknown> => {
-      const result = layers.find((candidate) => candidate.id === id);
-      assert.ok(result);
-      return result.props;
-    };
-    const lit = layer("query-results-lit");
-    const xray = layer("query-results-xray");
-    const radiusAt = (props: Record<string, unknown>, zoom: number): number =>
-      projectedCommonPixels(
-        props.getRadius as number,
-        zoom,
-        props.radiusMinPixels as number,
-        props.radiusMaxPixels as number,
-      );
-
-    assert.equal(lit.radiusUnits, "common");
-    assert.equal(xray.radiusUnits, "common");
-    const overviewLit = radiusAt(lit, 0);
-    const focusedLit = radiusAt(lit, FOCUS_ZOOM);
-    const closerLit = radiusAt(lit, FOCUS_ZOOM + 2);
-    assert.ok(overviewLit >= 3);
-    assert.ok(overviewLit <= 4);
-    assert.ok(radiusAt(xray, 0) <= 6);
-    assert.ok(focusedLit > overviewLit);
-    assert.ok(closerLit >= focusedLit);
-    assert.ok(closerLit <= 12);
-    assert.ok(radiusAt(xray, FOCUS_ZOOM + 2) <= 16);
-    for (const zoom of [0, FOCUS_ZOOM, FOCUS_ZOOM + 2])
-      assert.ok(radiusAt(xray, zoom) > radiusAt(lit, zoom));
-  } finally {
-    state.queryResultRanks = previous;
   }
 });
 

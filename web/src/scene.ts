@@ -2,8 +2,9 @@
  * 默认不显示任何边与名字;选中节点后由工作集显示相连关系边、
  * 节点名与关系名(方向 = 文案箭头 + 边亮度梯度,亮端为目标端)。
  *
- * 性能架构:节点颜色与聚光在 shader 里由静态 style 和一个 uniform
- * 推导，零 CPU 全图循环、零属性重传。
+ * 性能架构:节点颜色与聚光在 shader 里由静态 style、查询结果掩码和
+ * 一个 uniform 推导。查询提交时只更新一字节/节点的成员掩码，不重算
+ * 全图样式；几何与静态样式不重传。
  * 几何流式期间属性写入 GPU Buffer 增量区间,不整块重传。 */
 
 import { Deck, LayerExtension, OrbitView } from "@deck.gl/core";
@@ -57,10 +58,6 @@ const FOCUS_SCALE = 2 ** FOCUS_ZOOM;
 const WORKING_NODE_RADIUS = 9 / FOCUS_SCALE;
 const WORKING_COVER_SIZE = 16.5 / FOCUS_SCALE;
 const WORKING_GLOW_RADIUS = 36 / FOCUS_SCALE;
-// 查询结果与图中节点使用相同的缩放语义：远景只保证可见，靠近时随
-// 场景增长，并在近景上限处停止，避免视觉优先级随缩放反转。
-const QUERY_RESULT_RADIUS = 10 / FOCUS_SCALE;
-const QUERY_RESULT_XRAY_RADIUS = 14 / FOCUS_SCALE;
 
 class CircleCropExtension extends LayerExtension {
   static override extensionName = "CircleCropExtension";
@@ -78,11 +75,11 @@ class CircleCropExtension extends LayerExtension {
 }
 
 // ---- 节点样式扩展:着色与聚光都在 GPU ----
-// 实例属性:instanceStyle = [flags, etype, sizeLog, 0](u8×4)、
-// 其余全是 uniform。
+// 静态实例属性 instanceStyle = [flags, etype, sizeLog, 0](u8×4)；
+// 动态 instanceQueryResult 是查询结果成员掩码，其余全是 uniform。
 // 注意:luma 的 uniform block 解析按行取首个声明,必须一行一字段;
 // 全用 float——int 成员的默认精度 vs(highp)/fs(mediump)不一致,
-// 会在链接期报 precision mismatch,掩码值 ≤126 用 float 无损
+// 会在链接期报 precision mismatch；u8 离散值以 float 表达无损
 const ATLAS_UNIFORM_BLOCK = `uniform atlasUniforms {
   float spotlight;
 } atlas;`;
@@ -100,24 +97,15 @@ export interface AtlasUniforms {
   spotlight: number;
 }
 
-export interface QueryHighlightItem {
-  rank: number;
-  position: [number, number, number];
-}
-
-export function queryHighlightItems(
-  ranks: Iterable<number>,
-  positionOf: (rank: number) => [number, number, number] | null,
-): QueryHighlightItem[] {
-  const seen = new Set<number>();
-  const items: QueryHighlightItem[] = [];
-  for (const rank of ranks) {
-    if (rank < 0 || seen.has(rank)) continue;
-    seen.add(rank);
-    const position = positionOf(rank);
-    if (position) items.push({ rank, position });
-  }
-  return items;
+export function updateQueryResultMask(
+  mask: Uint8Array,
+  previous: Uint32Array,
+  next: Uint32Array,
+): void {
+  for (const rank of previous)
+    if (rank < mask.length) mask[rank] = 0;
+  for (const rank of next)
+    if (rank < mask.length) mask[rank] = 255;
 }
 
 export class NodeStyleExtension extends LayerExtension {
@@ -129,10 +117,13 @@ export class NodeStyleExtension extends LayerExtension {
       inject: {
         "vs:#decl": `
 in vec4 instanceStyle;
+in float instanceQueryResult;
 // 节点元数据是离散值；flat 防止 billboard 内插值篡改 flags 等字段。
-flat out vec4 atlas_style;`,
+flat out vec4 atlas_style;
+flat out float atlas_query_result;`,
         "vs:#main-end": `
-atlas_style = instanceStyle;`,
+atlas_style = instanceStyle;
+atlas_query_result = instanceQueryResult;`,
         // deck 先钳制再做透视；这里在最终屏幕空间补上同一上下限。
         "vs:DECKGL_FILTER_SIZE": `
 if (gl_Position.w > 0.0) {
@@ -143,7 +134,8 @@ if (gl_Position.w > 0.0) {
     scatterplot.radiusMaxPixels) / screenRadius;
 }`,
         "fs:#decl": `
-flat in vec4 atlas_style;`,
+flat in vec4 atlas_style;
+flat in float atlas_query_result;`,
         // 颜色与亮度统一在 shader 中推导。
         "fs:DECKGL_FILTER_COLOR": `
 {
@@ -157,8 +149,8 @@ flat in vec4 atlas_style;`,
   // 节点重要度已由半径表达，普通节点保持完整实体色，避免重复编码把
   // 中低热度节点系统性压暗。Alpha 只保留 SDF 圆边，不参与亮度。
   float visibility = a_iso ? 150.0 / 255.0 : 1.0;
-  if (atlas.spotlight > 0.5)
-    visibility = min(visibility, 80.0 / 255.0);
+  if (atlas.spotlight > 0.5 && atlas_query_result < 0.5)
+    visibility = min(visibility, 64.0 / 255.0);
   vec3 stableRgb = mix(vec3(15.0, 26.0, 28.0), rgb, visibility);
   // 入参 color.a 只携带圆边平滑因子(SDF AA)，中心像素固定为不透明。
   color = vec4(stableRgb / 255.0, color.a);
@@ -175,6 +167,11 @@ flat in vec4 atlas_style;`,
     };
     layer.getAttributeManager()?.addInstanced({
       instanceStyle: { size: 4, type: "uint8", accessor: "getStyle" },
+      instanceQueryResult: {
+        size: 1,
+        type: "unorm8",
+        accessor: "getQueryResult",
+      },
     });
   }
 
@@ -195,7 +192,7 @@ flat in vec4 atlas_style;`,
   }
 }
 
-/** 大缓冲的 GPU 常驻镜像:流式期间只写增量区间,不整块重传。 */
+/** CPU 数组的 GPU 常驻镜像：流式数据增量写，动态掩码按需刷新。 */
 class GrowingBuffer {
   private buf: LumaBuffer | null = null;
   private written = 0;
@@ -220,6 +217,13 @@ class GrowingBuffer {
     }
   }
 
+  /** 源数组已有区间发生原地变化时刷新该前缀。 */
+  refresh(upTo: number): void {
+    this.sync(0);
+    if (upTo > 0) this.buf?.write(this.source.subarray(0, upTo), 0);
+    this.written = Math.max(this.written, upTo);
+  }
+
   get handle(): LumaBuffer | null {
     return this.buf;
   }
@@ -228,19 +232,6 @@ class GrowingBuffer {
 interface ContextData {
   length: number;
   attributes: Record<string, unknown>;
-}
-
-interface QueryResultDrawing {
-  source: Uint32Array;
-  loaded: number;
-  sparseSize: number;
-  ranks: number[];
-  data: {
-    length: number;
-    attributes: {
-      getPosition: { value: Float32Array; size: number };
-    };
-  };
 }
 
 export interface SceneCallbacks {
@@ -260,6 +251,8 @@ export class Scene {
   private geo: Geometry;
   // 静态实例属性(随几何流一次性填充,之后永不重算)
   private styleBuf: Uint8Array; // [flags, etype, sizeLog, 0] × n
+  private queryResultMask: Uint8Array;
+  private queryResultMaskSource: Uint32Array = new Uint32Array();
   private styled = 0; // 已填充的节点数
 
   // GPU 常驻缓冲(设备就绪后接管;之前 render 退回 CPU 数组直灌)
@@ -267,11 +260,11 @@ export class Scene {
     positions: GrowingBuffer;
     radius: GrowingBuffer;
     style: GrowingBuffer;
+    queryResult: GrowingBuffer;
   } | null = null;
 
   private contextData: ContextData | null = null;
   private contextLength = -1;
-  private queryResultDrawingCache: QueryResultDrawing | null = null;
 
   private wsAnimStart = 0;
   private wsRaf = 0;
@@ -298,6 +291,7 @@ export class Scene {
     this.camera = new Camera(bounds);
     const n = geo.key.length;
     this.styleBuf = new Uint8Array(n * 4);
+    this.queryResultMask = new Uint8Array(n);
     this.deck = new Deck({
       parent,
       views: this.camera.view(),
@@ -337,6 +331,7 @@ export class Scene {
           ),
           radius: new GrowingBuffer(device, this.geo.size),
           style: new GrowingBuffer(device, this.styleBuf),
+          queryResult: new GrowingBuffer(device, this.queryResultMask),
         };
         this.contextLength = -1; // 重建 contextData,切换到 GPU 缓冲
         this.syncGpu();
@@ -540,7 +535,7 @@ export class Scene {
     return this.geo.sparse.get(rank) ?? null;
   }
 
-  /** 过滤/聚光/图层变化:现在只是 uniform 更新。 */
+  /** 选择只更新 uniform；查询变化另刷新结果成员掩码。 */
   recolor(): void {
     if (state.selection !== this.lastSelection) {
       this.lastSelection = state.selection;
@@ -570,6 +565,7 @@ export class Scene {
     this.gpu.positions.sync(m * 12);
     this.gpu.radius.sync(m);
     this.gpu.style.sync(m * 4);
+    this.gpu.queryResult.sync(m);
   }
 
   flyTo(rank: number, zoom?: number): void {
@@ -918,84 +914,31 @@ export class Scene {
     return layers;
   }
 
-  private queryResultDrawing(): QueryResultDrawing | null {
-    const source = state.queryResultRanks;
-    const geometry = this.geo as Geometry | undefined;
-    const loaded = geometry?.loaded ?? -1;
-    const sparseSize = geometry?.sparse.size ?? -1;
-    const cached = this.queryResultDrawingCache;
-    if (
-      cached?.source === source &&
-      cached.loaded === loaded &&
-      cached.sparseSize === sparseSize
-    ) return cached.data.length ? cached : null;
-    const items = queryHighlightItems(
-      source,
-      (rank) => this.posOf(rank),
+  private syncQueryResultMask(): void {
+    const next = state.queryResultRanks;
+    if (next === this.queryResultMaskSource) return;
+    updateQueryResultMask(
+      this.queryResultMask,
+      this.queryResultMaskSource,
+      next,
     );
-    const ranks = items.map((item) => item.rank);
-    const positions = new Float32Array(items.length * 3);
-    items.forEach((item, index) => positions.set(item.position, index * 3));
-    const data = {
-      length: items.length,
-      attributes: { getPosition: { value: positions, size: 3 } },
-    };
-    this.queryResultDrawingCache = { source, loaded, sparseSize, ranks, data };
-    return items.length ? this.queryResultDrawingCache : null;
+    this.queryResultMaskSource = next;
+    if (this.gpu) this.gpu.queryResult.refresh(this.styled);
+    else {
+      // CPU 回退路径的二进制属性由对象身份触发重传。
+      this.contextData = null;
+      this.contextLength = -1;
+    }
   }
 
-  private queryResultLayers(): unknown[] {
-    const drawing = this.queryResultDrawing();
-    if (!drawing) return [];
-    const { data, ranks } = drawing;
-    return [
-      // 被其他节点遮挡时只保留低亮轮廓，维持 3D 深度感。
-      new ScatterplotLayer({
-        id: "query-results-xray",
-        data,
-        radiusUnits: "common",
-        getRadius: QUERY_RESULT_XRAY_RADIUS,
-        radiusMinPixels: 5,
-        radiusMaxPixels: 16,
-        filled: false,
-        stroked: true,
-        getLineColor: [57, 197, 187, 105],
-        getLineWidth: 1.5,
-        lineWidthUnits: "pixels",
-        billboard: true,
-        parameters: { depthCompare: "greater", depthWriteEnabled: false },
-      }),
-      new ScatterplotLayer({
-        id: "query-results-lit",
-        data,
-        radiusUnits: "common",
-        getRadius: QUERY_RESULT_RADIUS,
-        radiusMinPixels: 3.5,
-        radiusMaxPixels: 12,
-        filled: true,
-        stroked: true,
-        getFillColor: [57, 197, 187, 170],
-        getLineColor: [234, 252, 250, 235],
-        getLineWidth: 1,
-        lineWidthUnits: "pixels",
-        billboard: true,
-        pickable: true,
-        onHover: (info: { index: number; x: number; y: number }) => {
-          const rank = info.index >= 0 ? ranks[info.index] : undefined;
-          this.cb.onHover(rank ?? null, info.x, info.y);
-        },
-        onClick: (info: { index: number }) => {
-          const rank = ranks[info.index];
-          if (rank !== undefined) this.cb.onPick(rank);
-          return true;
-        },
-        parameters: { depthWriteEnabled: false },
-      }),
-    ];
+  private hasVisibleQueryResult(): boolean {
+    for (const rank of state.queryResultRanks)
+      if (rank < this.styled) return true;
+    return false;
   }
 
   /** 语境层数据:属性引用恒定(GPU Buffer 或 CPU 数组),
-   * 对象只在填充进度变化时更换 → deck 不做无谓重传。
+   * 对象只在填充进度或 CPU 回退掩码变化时更换。
    * 长度用 styled 而非 geo.loaded:loaded 在流回调里实时推进,
    * 而样式属性/GPU 同步以 250ms 节流跟进,超前的区间会以
    * 原点零样式"幻影点"闪现。 */
@@ -1005,7 +948,10 @@ export class Scene {
       this.contextData = {
         length: this.styled,
         attributes:
-          g?.positions.handle && g.radius.handle && g.style.handle
+          g?.positions.handle &&
+          g.radius.handle &&
+          g.style.handle &&
+          g.queryResult.handle
             ? {
                 // 外部 buffer 必须显式 stride:deck 只在 {value}
                 // 分支按数组重算布局,{buffer} 分支沿用属性默认类型
@@ -1028,6 +974,12 @@ export class Scene {
                   type: "uint8",
                   stride: 4,
                 },
+                getQueryResult: {
+                  buffer: g.queryResult.handle,
+                  size: 1,
+                  type: "unorm8",
+                  stride: 1,
+                },
               }
             : {
                 getPosition: { value: this.geo.positions, size: 3 },
@@ -1041,6 +993,11 @@ export class Scene {
                   size: 4,
                   type: "uint8",
                 },
+                getQueryResult: {
+                  value: this.queryResultMask,
+                  size: 1,
+                  type: "unorm8",
+                },
               },
       };
       this.contextLength = this.styled;
@@ -1050,13 +1007,14 @@ export class Scene {
 
   private atlasUniforms(): AtlasUniforms {
     return {
-      spotlight: state.selection !== null || this.queryResultDrawing() !== null
+      spotlight: state.selection !== null || this.hasVisibleQueryResult()
         ? 1
         : 0,
     };
   }
 
   render(): void {
+    this.syncQueryResultMask();
     const layers: unknown[] = [
       new ScatterplotLayer({
         id: "context",
@@ -1085,7 +1043,6 @@ export class Scene {
         },
       } as never),
     ];
-    layers.push(...this.queryResultLayers());
     layers.push(...this.nearbyLabelLayers());
     layers.push(...this.workingSetLayers());
     const flash = this.anchorFlash;
