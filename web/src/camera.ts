@@ -41,6 +41,126 @@ export function cruiseStepForZoom(distance: number, dz: number): number {
   return distance * Math.expm1(Math.LN2 * dz);
 }
 
+const CRUISE_EPSILON = 1e-9;
+type Vec3 = [number, number, number];
+type CruiseMotion = {
+  direction: Vec3 | null;
+  travel: number;
+  zoom: number;
+  zoomAnchor: Vec3 | null;
+};
+
+function unitVector(
+  vector: readonly [number, number, number],
+): Vec3 | null {
+  const length = Math.hypot(vector[0], vector[1], vector[2]);
+  return length > CRUISE_EPSILON
+    ? [vector[0] / length, vector[1] / length, vector[2] / length]
+    : null;
+}
+
+function cruisePose(state: OrbitState): number[] {
+  return [
+    ...state.target,
+    state.zoom,
+    state.rotationX,
+    state.rotationOrbit,
+    typeof state.width === "number" ? state.width : 0,
+    typeof state.height === "number" ? state.height : 0,
+  ];
+}
+
+/** 最深层后的可逆巡航余量。正向同时累计输入量和实际世界距离，
+ * 反向按输入量原路偿还；只有超出的部分才交还普通 zoom-out。 */
+export class ReversibleCruise {
+  private distance = 0;
+  private zoomDebt = 0;
+  private direction: Vec3 | null = null;
+  private zoomAnchor: Vec3 | null = null;
+
+  get pendingDistance(): number {
+    return this.distance;
+  }
+
+  reset(): void {
+    this.distance = 0;
+    this.zoomDebt = 0;
+    this.direction = null;
+    this.zoomAnchor = null;
+  }
+
+  advance(
+    orbitDistance: number,
+    dz: number,
+    direction: readonly [number, number, number] | null,
+    zoomAnchor: readonly [number, number, number] | null = null,
+  ): CruiseMotion {
+    if (!Number.isFinite(dz) || dz === 0)
+      return {
+        direction: this.direction,
+        travel: 0,
+        zoom: 0,
+        zoomAnchor: this.zoomAnchor,
+      };
+    if (!(Number.isFinite(orbitDistance) && orbitDistance > CRUISE_EPSILON))
+      return {
+        direction: this.direction,
+        travel: 0,
+        zoom: dz < 0 ? dz : 0,
+        zoomAnchor: this.zoomAnchor,
+      };
+
+    if (dz > 0) {
+      if (!this.direction) {
+        this.direction = direction ? unitVector(direction) : null;
+        this.zoomAnchor = zoomAnchor ? [...zoomAnchor] : null;
+      }
+      if (!this.direction) {
+        this.zoomAnchor = null;
+        return { direction: null, travel: 0, zoom: 0, zoomAnchor: null };
+      }
+      const travel = cruiseStepForZoom(orbitDistance, dz);
+      this.distance += travel;
+      this.zoomDebt += dz;
+      return {
+        direction: [...this.direction],
+        travel,
+        zoom: 0,
+        zoomAnchor: this.zoomAnchor ? [...this.zoomAnchor] : null,
+      };
+    }
+
+    if (
+      !this.direction ||
+      this.distance <= CRUISE_EPSILON ||
+      this.zoomDebt <= CRUISE_EPSILON
+    ) {
+      this.reset();
+      return { direction: null, travel: 0, zoom: dz, zoomAnchor: null };
+    }
+    const lockedDirection: Vec3 = [...this.direction];
+    const lockedZoomAnchor: Vec3 | null = this.zoomAnchor
+      ? [...this.zoomAnchor]
+      : null;
+    const consumedZoom = Math.min(-dz, this.zoomDebt);
+    const travel = this.distance * (consumedZoom / this.zoomDebt);
+    this.distance -= travel;
+    this.zoomDebt -= consumedZoom;
+    const zoom = dz + consumedZoom;
+    if (
+      this.distance <= CRUISE_EPSILON ||
+      this.zoomDebt <= CRUISE_EPSILON
+    )
+      this.reset();
+    return {
+      direction: lockedDirection,
+      travel: -travel,
+      zoom: Math.abs(zoom) <= CRUISE_EPSILON ? 0 : zoom,
+      zoomAnchor: lockedZoomAnchor,
+    };
+  }
+}
+
 /** deck 的滚轮曲线，但不把鼠标所在的空平面误当成新的关注点。 */
 export function zoomWithoutRetarget<T extends OrbitState>(
   state: T,
@@ -81,29 +201,31 @@ export type ZoomAnchorQuery = (
   py: number,
 ) => [number, number, number] | null;
 
-/** 巡航前进:滚轮越过缩放上限后,滚动量转为等速位移——锚点
- * 仍在前方时朝它飞(到达后穿过),否则沿视线直进,相机永不停。 */
+/** 巡航前进:滚轮越过缩放上限后,滚动量转为等速位移。首次越界
+ * 锁定锚点方向形成一段可原路退回的直线；平移或旋转后开启新段。 */
+export function cruiseDirection(
+  target: readonly [number, number, number],
+  anchor: readonly [number, number, number] | null,
+  forward: readonly [number, number, number],
+): [number, number, number] {
+  if (anchor) {
+    const ax = anchor[0] - target[0];
+    const ay = anchor[1] - target[1];
+    const az = anchor[2] - target[2];
+    const ahead = ax * forward[0] + ay * forward[1] + az * forward[2];
+    const towardAnchor = unitVector([ax, ay, az]);
+    if (ahead > 0 && towardAnchor) return towardAnchor;
+  }
+  return unitVector(forward) ?? [0, 0, 0];
+}
+
 export function cruiseTarget(
   target: readonly [number, number, number],
   anchor: readonly [number, number, number] | null,
   forward: readonly [number, number, number],
   step: number,
 ): [number, number, number] {
-  let dx = forward[0];
-  let dy = forward[1];
-  let dz = forward[2];
-  if (anchor) {
-    const ax = anchor[0] - target[0];
-    const ay = anchor[1] - target[1];
-    const az = anchor[2] - target[2];
-    const ahead = ax * dx + ay * dy + az * dz;
-    const len = Math.hypot(ax, ay, az);
-    if (ahead > 0 && len > 1e-6) {
-      dx = ax / len;
-      dy = ay / len;
-      dz = az / len;
-    }
-  }
+  const [dx, dy, dz] = cruiseDirection(target, anchor, forward);
   return [
     target[0] + dx * step,
     target[1] + dy * step,
@@ -142,10 +264,12 @@ export class WheelAnchorLatch {
 
 /** 放大朝真实内容收敛：光标下有节点用 GPU 拾取，脱靶时退回
  * zoomAnchor 视线锚点，手势内锁定同一锚点；都没有才原地缩放。
- * 缩小保持原语义——只改变缩放，关注点不漂移，空平面永远不会
- * 成为新关注点。 */
+ * 最深层巡航可原路退回，余额耗尽后再恢复普通缩小；空平面永远
+ * 不会成为新关注点。 */
 export class AtlasOrbitController extends OrbitController {
   private latch = new WheelAnchorLatch();
+  private cruise = new ReversibleCruise();
+  private cruisePose: number[] | null = null;
 
   protected override _onWheel(event: MjolnirWheelEvent): boolean {
     if (!this.scrollZoom) return false;
@@ -173,6 +297,17 @@ export class AtlasOrbitController extends OrbitController {
       this.scrollZoom === true ? {} : this.scrollZoom;
     const state =
       this.controllerState.getViewportProps() as unknown as OrbitState;
+    const pose = cruisePose(state);
+    if (
+      this.cruise.pendingDistance > CRUISE_EPSILON &&
+      (!this.cruisePose ||
+        this.cruisePose.some(
+          (value, index) =>
+            Math.abs(value - (pose[index] ?? 0)) > CRUISE_EPSILON,
+        ))
+    ) {
+      this.cruise.reset();
+    }
     const dzRaw = wheelDeltaToZoom(event.delta, speed);
     let nextState;
     if (dzRaw > 0) {
@@ -180,21 +315,23 @@ export class AtlasOrbitController extends OrbitController {
       // 越过上限的滚动量转为等速前进——相机持续深入,永不停住
       const dzZoom = Math.min(dzRaw, Math.max(0, maxZoom - state.zoom));
       const dzFly = dzRaw - dzZoom;
-      const anchor = this.latch.resolve(
-        performance.now(),
-        pos[0],
-        pos[1],
-        () => {
-          const a =
-            (this.pickPosition?.(x + pos[0], y + pos[1])?.coordinate as
-              | [number, number, number]
-              | undefined) ??
-            zoomAnchor?.(x + pos[0], y + pos[1]) ??
-            null;
-          onWheelAnchor?.(a); // 只在手势起点触发,滚动途中不重复
-          return a;
-        },
-      );
+      const anchor = this.cruise.pendingDistance > CRUISE_EPSILON
+        ? null
+        : this.latch.resolve(
+            performance.now(),
+            pos[0],
+            pos[1],
+            () => {
+              const a =
+                (this.pickPosition?.(x + pos[0], y + pos[1])?.coordinate as
+                  | [number, number, number]
+                  | undefined) ??
+                zoomAnchor?.(x + pos[0], y + pos[1]) ??
+                null;
+              onWheelAnchor?.(a); // 只在手势起点触发,滚动途中不重复
+              return a;
+            },
+          );
       let zoom = state.zoom;
       let target: [number, number, number] = [
         state.target[0],
@@ -209,31 +346,64 @@ export class AtlasOrbitController extends OrbitController {
         target = next.target;
       }
       if (dzFly > 0) {
-        const viewport = this.controllerState.makeViewport(
-          this.controllerState.getViewportProps(),
-        ) as { cameraPosition: number[] };
-        const cam = viewport.cameraPosition;
-        const fx = target[0] - (cam[0] ?? 0);
-        const fy = target[1] - (cam[1] ?? 0);
-        const fz = target[2] - (cam[2] ?? 0);
-        const dist = Math.hypot(fx, fy, fz);
-        if (dist > 1e-9) {
+        const frame = this.orbitFrame(target, zoom);
+        if (frame) {
+          const motion = this.cruise.advance(
+            frame.distance,
+            dzFly,
+            cruiseDirection(target, anchor, frame.forward),
+            anchor,
+          );
           target = cruiseTarget(
             target,
-            anchor,
-            [fx / dist, fy / dist, fz / dist],
-            cruiseStepForZoom(dist, dzFly),
+            null,
+            motion.direction ?? [0, 0, 0],
+            motion.travel,
           );
         }
       }
       nextState = this.controllerState._getUpdatedState({ zoom, target });
     } else {
-      const dz = Math.max(dzRaw, minZoom - state.zoom);
-      if (dz === 0) return true;
+      let target: [number, number, number] = [...state.target];
+      let remainingZoom = dzRaw;
+      let traveled = false;
+      let reverseZoomAnchor: Vec3 | null | undefined;
+      if (this.cruise.pendingDistance > CRUISE_EPSILON) {
+        const frame = this.orbitFrame(target, state.zoom);
+        if (frame) {
+          const motion = this.cruise.advance(frame.distance, dzRaw, null);
+          remainingZoom = motion.zoom;
+          reverseZoomAnchor = motion.zoomAnchor;
+          if (motion.direction && motion.travel !== 0) {
+            target = cruiseTarget(
+              target,
+              null,
+              motion.direction,
+              motion.travel,
+            );
+            traveled = true;
+          }
+        }
+      }
+      const dz = Math.max(remainingZoom, minZoom - state.zoom);
+      if (dz === 0 && !traveled) return true;
+      let zoom = state.zoom + dz;
+      if (dz < 0 && reverseZoomAnchor) {
+        const anchored = zoomTowardAnchor(
+          { ...state, target, zoom: state.zoom },
+          reverseZoomAnchor,
+          dz,
+        );
+        target = anchored.target;
+        zoom = anchored.zoom;
+      }
       nextState = this.controllerState._getUpdatedState({
-        zoom: state.zoom + dz,
+        zoom,
+        target,
       });
-      const picked = this.pickPosition?.(x + pos[0], y + pos[1]);
+      const picked = dz < 0 && reverseZoomAnchor === undefined
+        ? this.pickPosition?.(x + pos[0], y + pos[1])
+        : null;
       if (picked?.coordinate) {
         const viewport = nextState.makeViewport(nextState.getViewportProps());
         nextState = nextState._getUpdatedState(
@@ -241,12 +411,36 @@ export class AtlasOrbitController extends OrbitController {
         );
       }
     }
+    const next = nextState.getViewportProps() as OrbitState;
+    this.cruisePose = this.cruise.pendingDistance > CRUISE_EPSILON
+      ? cruisePose(next)
+      : null;
     this.updateViewport(
       nextState,
       null,
       { isZooming: false, isPanning: false },
     );
     return true;
+  }
+
+  private orbitFrame(
+    target: OrbitState["target"],
+    zoom: number,
+  ): { distance: number; forward: Vec3 } | null {
+    const viewport = this.controllerState.makeViewport({
+      ...this.controllerState.getViewportProps(),
+      target,
+      zoom,
+    }) as { cameraPosition: number[] };
+    const camera = viewport.cameraPosition;
+    const forward: Vec3 = [
+      target[0] - (camera[0] ?? 0),
+      target[1] - (camera[1] ?? 0),
+      target[2] - (camera[2] ?? 0),
+    ];
+    const distance = Math.hypot(...forward);
+    const unit = unitVector(forward);
+    return unit ? { distance, forward: unit } : null;
   }
 }
 

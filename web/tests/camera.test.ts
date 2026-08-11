@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   Camera,
+  ReversibleCruise,
   WheelAnchorLatch,
   cruiseStepForZoom,
   cruiseTarget,
@@ -173,6 +174,73 @@ test("max-zoom cruise balances the same wheel delta zooming out", () => {
     const cameraAfterZoomOut = target[2] - orbitDistance * 2 ** dz;
     assert.ok(Math.abs(cameraAfterZoomOut + orbitDistance) < 1e-9);
   }
+});
+
+test("max-zoom cruise reverses repeated wheel input before zooming out", () => {
+  const cruise = new ReversibleCruise();
+  const orbitDistance = 100;
+  const dz = wheelDeltaToZoom(100);
+  const forwardSteps = Array.from({ length: 5 }, () =>
+    cruise.advance(orbitDistance, dz, [0, 0, 1]),
+  );
+
+  assert.ok(forwardSteps.every((motion) => motion.zoom === 0));
+  assert.ok(
+    forwardSteps.every(
+      (motion) =>
+        Math.abs(motion.travel - (forwardSteps[0]?.travel ?? 0)) < 1e-9,
+    ),
+  );
+
+  for (const expected of [...forwardSteps].reverse()) {
+    const reversed = cruise.advance(orbitDistance, -dz, [1, 0, 0]);
+    assert.equal(reversed.zoom, 0);
+    assert.deepEqual(reversed.direction, [0, 0, 1]);
+    assert.ok(Math.abs(reversed.travel + expected.travel) < 1e-9);
+  }
+  assert.ok(cruise.pendingDistance < 1e-9);
+
+  const zoomOut = cruise.advance(orbitDistance, -dz, [1, 0, 0]);
+  assert.equal(zoomOut.travel, 0);
+  assert.equal(zoomOut.zoom, -dz);
+});
+
+test("max-zoom cruise passes excess reverse input to ordinary zoom", () => {
+  const cruise = new ReversibleCruise();
+  const orbitDistance = 100;
+  const forwardDz = 0.25;
+  const reverseDz = -0.75;
+  const zoomAnchor: [number, number, number] = [12, -4, 8];
+
+  const forward = cruise.advance(
+    orbitDistance,
+    forwardDz,
+    [2, 0, 0],
+    zoomAnchor,
+  );
+  assert.deepEqual(forward.direction, [1, 0, 0]);
+
+  const reversed = cruise.advance(orbitDistance, reverseDz, [0, 1, 0]);
+  assert.deepEqual(reversed.direction, [1, 0, 0]);
+  assert.deepEqual(reversed.zoomAnchor, zoomAnchor);
+  assert.ok(Math.abs(reversed.travel + forward.travel) < 1e-9);
+  assert.ok(Math.abs(reversed.zoom + 0.5) < 1e-9);
+  assert.ok(cruise.pendingDistance < 1e-9);
+});
+
+test("max-zoom cruise is independent of reverse wheel event batching", () => {
+  const cruise = new ReversibleCruise();
+  const orbitDistance = 100;
+  const dz = 0.2;
+  const forwards = Array.from({ length: 3 }, () =>
+    cruise.advance(orbitDistance, dz, [0, 0, 1]),
+  );
+  const totalTravel = forwards.reduce((sum, motion) => sum + motion.travel, 0);
+
+  const reversed = cruise.advance(orbitDistance, -3 * dz, null);
+  assert.equal(reversed.zoom, 0);
+  assert.ok(Math.abs(reversed.travel + totalTravel) < 1e-9);
+  assert.ok(cruise.pendingDistance < 1e-9);
 });
 
 test("anchored zoom-in converges the pivot onto the anchor", () => {
