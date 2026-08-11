@@ -417,6 +417,33 @@
   font-size: 11px;
 }
 
+/* 建议行标题:色点复用星图节点类型色,让结果一眼可按类型扫读；
+ * 副标题缩进与名称左缘对齐(8px 色点 + 7px 间距)。 */
+.query-suggestion-title {
+  --owner-color: var(--ink-2);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.query-suggestion-title[data-owner="subject"] { --owner-color: var(--c-subject, #3d8ede); }
+.query-suggestion-title[data-owner="person"] { --owner-color: var(--c-person, #e56a40); }
+.query-suggestion-title[data-owner="character"] { --owner-color: var(--c-character, #27ab7c); }
+.query-suggestion-title[data-owner="episode"] { --owner-color: #8b6bc7; }
+
+.query-owner-mark {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--owner-color);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .28);
+}
+
+.query-name-suggestion > span,
+.query-entity-suggestion > span { margin-left: 15px; }
+
 .query-add-choice-condition {
   display: flex;
   align-items: center;
