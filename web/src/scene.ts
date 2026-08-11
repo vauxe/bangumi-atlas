@@ -59,12 +59,34 @@ const WORKING_NODE_RADIUS = 9 / FOCUS_SCALE;
 const WORKING_COVER_SIZE = 16.5 / FOCUS_SCALE;
 const WORKING_GLOW_RADIUS = 36 / FOCUS_SCALE;
 
-class CircleCropExtension extends LayerExtension {
+const circleCropShaderModule = {
+  name: "circleCrop",
+  vs: "vec2 circle_crop_frame_size;",
+} as const;
+
+export class CircleCropExtension extends LayerExtension {
   static override extensionName = "CircleCropExtension";
 
   override getShaders(): Record<string, unknown> {
     return {
+      modules: [circleCropShaderModule],
       inject: {
+        "vs:#main-start": `
+  circle_crop_frame_size = instanceIconFrames.zw;`,
+        "vs:DECKGL_FILTER_SIZE": `
+  vec2 coverFrameSize = max(circle_crop_frame_size, vec2(1.0));
+  float coverConstraint = icon.sizeBasis == 0.0 ? coverFrameSize.x : coverFrameSize.y;
+  size.xy *= coverConstraint / coverFrameSize;`,
+        "vs:#main-end": `
+  vec2 coverFrameSize = max(instanceIconFrames.zw, vec2(1.0));
+  float coverSide = min(coverFrameSize.x, coverFrameSize.y);
+  vec2 coverOrigin =
+    instanceIconFrames.xy + (coverFrameSize - vec2(coverSide)) * 0.5;
+  vTextureCoords = mix(
+    coverOrigin,
+    coverOrigin + vec2(coverSide),
+    (geometry.uv + 1.0) / 2.0
+  ) / icon.iconsTextureDim;`,
         "fs:DECKGL_FILTER_COLOR": `
   float cover_r = length(geometry.uv);
   if (cover_r > 1.0) discard;
