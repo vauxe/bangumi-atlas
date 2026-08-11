@@ -6,6 +6,7 @@ into db/bangumi.lb with COPY FROM. Full rebuild on every run.
 """
 
 import argparse
+import gc
 import shutil
 import sys
 import time
@@ -752,6 +753,12 @@ def build_db() -> None:
     replace_database(DB_PATH, _populate_database)
 
 
+def release_stage_memory() -> None:
+    """Return unreachable Python and Arrow pages before LadybugDB loads."""
+    gc.collect()
+    pa.default_memory_pool().release_unused()
+
+
 def report_unknown_codes() -> None:
     if not unknown_codes:
         print("  all enum codes decoded")
@@ -853,6 +860,7 @@ def main() -> None:
                     f"--skip-parquet 无法证明制品同代: {error};"
                     "去掉 --skip-parquet 重建"
                 )
+        release_stage_memory()
         print("[阶段 2] parquet -> ladybug db")
         build_db()
     print(f"done in {time.time() - t0:.0f}s -> {DB_PATH}")

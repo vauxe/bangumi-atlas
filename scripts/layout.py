@@ -73,6 +73,7 @@ ALGO = "hierarchical-community-islands"
 
 # python-igraph draws from the stdlib random module, not numpy.
 SEED = 7
+LAYOUT_EPOCHS = 100
 
 # Keep the connected graph volumetric and place structureless nodes around it.
 TYPICAL_NODE_DISTANCE = 0.28
@@ -188,7 +189,7 @@ def build_graph(count: int, edges: np.ndarray) -> ig.Graph:
 def run_layout(g: ig.Graph) -> np.ndarray:
     """Embed graph topology directly into three dimensions."""
     random.seed(SEED)
-    layout = g.layout_umap(dim=3, epochs=200)
+    layout = g.layout_umap(dim=3, epochs=LAYOUT_EPOCHS)
     return np.asarray(layout.coords, dtype=np.float32)
 
 
@@ -809,6 +810,7 @@ _SHAPE_LOGIC = (
 _SHAPE_CONSTANTS = {
     "algo": ALGO,
     "seed": SEED,
+    "layout_epochs": LAYOUT_EPOCHS,
     "typical_node_distance": TYPICAL_NODE_DISTANCE,
     "jitter_radius": _JITTER_RADIUS,
     "island_gap": ISLAND_GAP,
@@ -1092,6 +1094,7 @@ def build_layout(force: bool, generation: dict[str, Any]) -> None:
     report: dict[str, object] = {
         "algo": ALGO,
         "seed": SEED,
+        "epochs": LAYOUT_EPOCHS,
         "dimensions": int(coords.shape[1]),
         "geometry": "topology-3d-community-islands",
         "shape_digest": current_shape_digest,

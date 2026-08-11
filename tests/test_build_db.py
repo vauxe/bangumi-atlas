@@ -541,6 +541,11 @@ class PipelineGenerationLockTests(unittest.TestCase):
             ),
             patch.object(
                 build_db,
+                "release_stage_memory",
+                side_effect=lambda: events.append("release-memory"),
+            ),
+            patch.object(
+                build_db,
                 "build_db",
                 side_effect=lambda: events.append("database"),
             ),
@@ -554,6 +559,7 @@ class PipelineGenerationLockTests(unittest.TestCase):
                 "lock-enter",
                 "mappings",
                 "parquet",
+                "release-memory",
                 "database",
                 "lock-exit",
             ],

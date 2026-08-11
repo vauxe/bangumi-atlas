@@ -682,6 +682,7 @@ class TextSearchBuilder:
     def __init__(self) -> None:
         self.members: list[list[Any]] = []
         self.postings = [array("I") for _ in range(sr.SEARCH_NGRAM_BUCKETS)]
+        self._written = False
 
     def add(
         self,
@@ -690,6 +691,8 @@ class TextSearchBuilder:
         loc: list[int],
         texts: Iterable[str],
     ) -> None:
+        if self._written:
+            raise RuntimeError("text search index is already written")
         if len(loc) != 3:
             raise ValueError("text search requires a rollover-pack locator")
         member_id = len(self.members)
@@ -709,6 +712,8 @@ class TextSearchBuilder:
             self.postings[bucket].append(member_id)
 
     def write(self) -> None:
+        if self._written:
+            raise RuntimeError("text search index is already written")
         write_gzip_json(
             "text.search.members",
             {"schema": "text-search-members-v1", "members": self.members},
@@ -751,11 +756,15 @@ class TextSearchBuilder:
             + np.asarray(last, dtype="<u4").tobytes()
             + counts.tobytes()
         )
+        member_count = len(self.members)
+        posting_count = sum(len(posting) for posting in self.postings)
         log(
-            f"文本候选索引:{len(self.members):,} 成员,"
-            f"{sum(len(posting) for posting in self.postings):,} postings,"
-            f"{pack.size / 1e6:,.1f}MB"
+            f"文本候选索引:{member_count:,} 成员,"
+            f"{posting_count:,} postings,{pack.size / 1e6:,.1f}MB"
         )
+        self.members.clear()
+        self.postings.clear()
+        self._written = True
 
 
 def collect_fact_encodings(
@@ -1028,8 +1037,6 @@ def build_search_index(
     """Build prefix autocomplete and an exact substring candidate index."""
     if len(names) != len(cn_names) or len(names) != len(entity_kinds):
         raise ValueError("search names and entity kinds must align")
-    charmap = sr.search_charmap()
-    entries: list[SearchEntry] = []
     alias_rows: list[list[Any]] = []
     postings = [array("I") for _ in range(sr.SEARCH_NGRAM_BUCKETS)]
     aligned = zip(names, cn_names, entity_kinds, strict=True)
@@ -1040,10 +1047,6 @@ def build_search_index(
         display = str(cn_name or name)
         aliases = sr.search_aliases(str(name), str(cn_name or ""))
         alias_rows.append([[list(alias) for alias in aliases], display, kind])
-        entries.extend(
-            (normalized, matched, rank, display, kind)
-            for normalized, matched in aliases
-        )
         rank_buckets = {
             sr.search_gram_bucket(
                 normalized[start : start + sr.SEARCH_NGRAM_WIDTH]
@@ -1055,6 +1058,7 @@ def build_search_index(
             postings[bucket].append(rank)
 
     alias_block_size = write_search_alias_pack(alias_rows)
+    del alias_rows
 
     # 每个规范化名称的连续二元字符进入固定散列桶；桶内只保存按
     # VisualRank 升序的 u24 候选。散列碰撞由客户端读取完整名称后过滤，
@@ -1105,6 +1109,22 @@ def build_search_index(
         ngram_counts,
     )
 
+    # 名称别名负载、子串 postings 与前缀树条目都很大，但彼此没有
+    # 身份依赖。前两类发布并释放后再构建前缀条目，避免三份完整
+    # Python 对象图在同一峰值内存窗口中共存。
+    entries: list[SearchEntry] = []
+    aligned = zip(names, cn_names, entity_kinds, strict=True)
+    for rank, (name, cn_name, entity_kind) in enumerate(aligned):
+        kind = int(entity_kind)
+        display = str(cn_name or name)
+        entries.extend(
+            (normalized, matched, rank, display, kind)
+            for normalized, matched in sr.search_aliases(
+                str(name), str(cn_name or "")
+            )
+        )
+
+    charmap = sr.search_charmap()
     search_pack = PackFile("search.pack")
     search_level = sr.GZIP_LEVELS["search"]
     search_dir: dict[str, Any] = {}
@@ -2065,6 +2085,7 @@ def bake_release(  # noqa: PLR0915
                 int(bool(eps_desc_bits[i])),
             ]
         )
+    del eps, eps_desc_bits
     orphan_groups = sum(
         1
         for subject_id in eps_by_subject
@@ -2163,8 +2184,6 @@ def bake_release(  # noqa: PLR0915
         f"{episodes_pack.size / 1e6:,.1f}MB"
     )
     del (
-        eps,
-        eps_desc_bits,
         eps_by_subject,
         eps_items,
         episodes_pack,
@@ -2377,8 +2396,8 @@ def bake_release(  # noqa: PLR0915
     text_stats[family] = fact_summary_stats
     text_quantile_gate(family, fact_summary_sizes)
     write_gzip_json("text.idx", {"families": text_dir}, 6)
-    text_search.write()
     del fs_items
+    text_search.write()
 
     # ---- 显示映射 ----
     mappings, _ = collect_mappings()
