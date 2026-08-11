@@ -25,7 +25,12 @@ import {
 import type { OrbitState } from "./camera";
 import { COVER_SIZES, coverItems, coverUrl } from "./covers";
 import type { CoverItem } from "./covers";
-import { workingLabelLayers } from "./labels";
+import {
+  NEARBY_LABEL_ZOOM,
+  nearbyLabelLayers as makeNearbyLabelLayers,
+  nearbyLabelRanks,
+  workingLabelLayers,
+} from "./labels";
 import { state } from "./store";
 import { TYPE_COLORS, etype } from "./types";
 import type { Bounds3D, Geometry } from "./types";
@@ -44,6 +49,7 @@ const CASCADE_STEP_MS = 30;
 const CASCADE_FADE_MS = 200;
 const PULSE_MS = 500;
 const ANCHOR_FLASH_MS = 500;
+const NEARBY_LABEL_SETTLE_MS = 140;
 // 持久节点使用世界尺寸：在标准聚焦层级保持原有屏幕观感，继续靠近时
 // 则遵循 3D 投影自然放大。只保留远景最小像素尺寸，不设近景上限。
 const FOCUS_SCALE = 2 ** FOCUS_ZOOM;
@@ -264,6 +270,8 @@ export class Scene {
     at: number;
   } | null = null;
   private anchorFlashRaf = 0;
+  private nearbyRanks: number[] = [];
+  private nearbyTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     parent: HTMLDivElement,
@@ -304,6 +312,7 @@ export class Scene {
       onResize: ({ height }) => {
         this.camera.resize(height);
         this.deck.setProps({ views: this.camera.view() });
+        this.scheduleNearbyLabels();
       },
       onDeviceInitialized: (device: Device) => {
         this.gpu = {
@@ -346,6 +355,7 @@ export class Scene {
       interactionState.isDragging === false;
     this.camera.absorb(viewState as Record<string, unknown>);
     this.cb.onViewChange(this.camera.viewState);
+    this.scheduleNearbyLabels();
     queueMicrotask(() => {
       if (refreshView) this.deck.setProps({ views: this.camera.view() });
       this.render();
@@ -365,6 +375,79 @@ export class Scene {
       .finally(() => {
         this.labelNamesPending = false;
       });
+  }
+
+  /** 相机连续运动时只重置一个定时器；稳定后才扫描坐标，避免把
+   * 99 万节点的近邻选择放进逐帧渲染。 */
+  private scheduleNearbyLabels(): void {
+    if (this.nearbyTimer !== null) clearTimeout(this.nearbyTimer);
+    this.nearbyTimer = null;
+    if (
+      state.selection !== null ||
+      !this.cb.nameOf ||
+      this.camera.viewState.zoom < NEARBY_LABEL_ZOOM
+    ) {
+      this.nearbyRanks = [];
+      return;
+    }
+    this.nearbyTimer = setTimeout(() => {
+      this.nearbyTimer = null;
+      this.refreshNearbyLabels();
+    }, NEARBY_LABEL_SETTLE_MS);
+  }
+
+  private refreshNearbyLabels(): void {
+    const viewport = this.deck.getViewports()[0];
+    const next =
+      state.selection === null && viewport
+        ? nearbyLabelRanks(
+            this.geo.positions,
+            this.geo.loaded,
+            this.camera.viewState.target,
+            this.camera.viewState.zoom,
+            viewport.width,
+            viewport.height,
+          )
+        : [];
+    if (
+      next.length === this.nearbyRanks.length &&
+      next.every((rank, index) => rank === this.nearbyRanks[index])
+    ) return;
+    this.nearbyRanks = next;
+    this.render();
+  }
+
+  private nearbyLabelLayers(): unknown[] {
+    const { nameOf } = this.cb;
+    if (state.selection !== null || !nameOf || !this.nearbyRanks.length)
+      return [];
+    const viewport = this.deck.getViewports()[0];
+    if (!viewport) return [];
+    const members = this.nearbyRanks.flatMap((rank) => {
+      const pos = this.posOf(rank);
+      return pos ? [{ rank, pos }] : [];
+    });
+    const { layers, missing } = makeNearbyLabelLayers(
+      members,
+      nameOf,
+      (position) => {
+        const projected = viewport.project(position) as number[];
+        const x = projected[0] ?? NaN;
+        const y = projected[1] ?? NaN;
+        if (
+          !Number.isFinite(x) ||
+          !Number.isFinite(y) ||
+          x < 0 ||
+          y < 0 ||
+          x > viewport.width ||
+          y > viewport.height
+        ) return null;
+        return [x, y];
+      },
+      viewport,
+    );
+    if (missing.length) this.requestLabelNames(missing);
+    return layers;
   }
 
   /** 飞行目标反馈:滚轮手势锁定新锚点时,在锚点上闪一个淡出环,
@@ -440,6 +523,7 @@ export class Scene {
       this.lastSelection = state.selection;
       this.startWorkingSetAnim();
     }
+    this.scheduleNearbyLabels();
     this.render();
   }
 
@@ -453,6 +537,7 @@ export class Scene {
     }
     this.styled = geo.loaded;
     this.syncGpu();
+    this.scheduleNearbyLabels();
     this.render();
   }
 
@@ -488,6 +573,7 @@ export class Scene {
       initialViewState: next,
     });
     this.cb.onViewChange(this.camera.viewState);
+    this.scheduleNearbyLabels();
     this.render();
   }
 
@@ -522,6 +608,7 @@ export class Scene {
       initialViewState: { ...this.camera.viewState },
     });
     this.cb.onViewChange(this.camera.viewState);
+    this.scheduleNearbyLabels();
     this.render();
   }
 
@@ -959,6 +1046,7 @@ export class Scene {
       } as never),
     ];
     layers.push(...this.queryResultLayers());
+    layers.push(...this.nearbyLabelLayers());
     layers.push(...this.workingSetLayers());
     const flash = this.anchorFlash;
     if (flash) {

@@ -9,6 +9,7 @@ import {
   Scene,
 } from "../src/scene";
 import { FOCUS_ZOOM } from "../src/camera";
+import { NEARBY_LABEL_ZOOM } from "../src/labels";
 import type { OrbitState } from "../src/camera";
 import { state } from "../src/store";
 
@@ -227,6 +228,71 @@ test("renders query results as a separate pickable graph layer", () => {
     assert.deepEqual(picked, [1]);
   } finally {
     queryState.queryResultRanks = previous;
+  }
+});
+
+test("loads and draws nearby names only while no working set is selected", async () => {
+  const previousSelection = state.selection;
+  const loaded: number[][] = [];
+  try {
+    state.selection = null;
+    const viewport = {
+      width: 1_000,
+      height: 600,
+      focalDistance: 1,
+      viewProjectionMatrix: [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+      ],
+      project: (position: [number, number, number]) => [
+        position[0] * 100 + 200,
+        position[1] * 100 + 200,
+      ],
+    };
+    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
+      geo: {
+        positions: new Float32Array([0, 0, 0, 1, 0, 0, 20, 0, 0]),
+        loaded: 3,
+      },
+      camera: {
+        viewState: {
+          target: [0, 0, 0],
+          zoom: NEARBY_LABEL_ZOOM,
+          rotationX: 25,
+          rotationOrbit: 0,
+        },
+      },
+      deck: { getViewports: () => [viewport] },
+      cb: {
+        nameOf: (rank: number) => rank === 0 ? "近节点" : null,
+        loadNames: async (ranks: number[]) => {
+          loaded.push([...ranks]);
+        },
+      },
+      nearbyRanks: [],
+      labelNamesPending: false,
+      render: () => undefined,
+    });
+    const refresh = Reflect.get(scene, "refreshNearbyLabels") as () => void;
+    refresh.call(scene);
+    assert.deepEqual(Reflect.get(scene, "nearbyRanks"), [0, 1]);
+
+    const buildLayers = Reflect.get(scene, "nearbyLabelLayers") as () => {
+      id: string;
+    }[];
+    assert.deepEqual(buildLayers.call(scene).map((layer) => layer.id), [
+      "nearby-node-names",
+    ]);
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(loaded, [[1]]);
+
+    state.selection = 0;
+    assert.deepEqual(buildLayers.call(scene), []);
+  } finally {
+    state.selection = previousSelection;
   }
 });
 

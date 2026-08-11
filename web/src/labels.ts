@@ -1,6 +1,6 @@
-/** 工作集标签:默认无任何标签;选中节点后为工作集(选中节点 +
- * 相连节点)显示节点名与关系名,不设 zoom 门槛——远距离也可读
- * (像素字号)。节点名亮白、悬于节点上方;关系名品红、位于边中点。
+/** 标签分两层:未选中时只在近景显示少量普通节点名；选中节点后改为
+ * 工作集(选中节点 + 相连节点)的节点名与关系名,不设 zoom 门槛——
+ * 远距离也可读(像素字号)。节点名亮白、悬于节点上方;关系名品红、位于边中点。
  * 定向关系的文案带 "← " 前缀(指向选中节点),与边的亮度梯度
  * (亮端 = 目标端)互证。
  * 去重叠在 CPU 端按优先级贪心完成(选中名 > 邻居名 > 关系名);
@@ -27,6 +27,13 @@ const LABEL_DEPTH = {
 // 平面之后，不补偿会随自身深度变小。
 const NODE_NAME_SIZE = 14;
 const EDGE_NAME_SIZE = 12;
+const NEARBY_NODE_NAME_SIZE = 13;
+
+/** 普通节点只在聚焦层级继续深入后显示名字，避免概览阶段文字成墙。 */
+export const NEARBY_LABEL_ZOOM = FOCUS_ZOOM + 1.3;
+/** 每个稳定视图最多补载并绘制这些普通节点名称。 */
+export const NEARBY_LABEL_LIMIT = 24;
+const NEARBY_LABEL_VIEW_RADIUS = 0.55;
 
 export interface WorkingMember {
   rank: number;
@@ -37,6 +44,66 @@ export interface WorkingEdge {
   a: [number, number, number];
   b: [number, number, number];
   label: string;
+}
+
+interface RankedDistance {
+  rank: number;
+  distance2: number;
+}
+
+/** 在枢轴平面可见范围内选最近节点。调用方只在相机稳定后执行，
+ * 因而一次线性坐标扫描不会进入逐帧渲染路径。 */
+export function nearbyLabelRanks(
+  positions: Float32Array,
+  loaded: number,
+  target: readonly [number, number, number],
+  zoom: number,
+  viewportWidth: number,
+  viewportHeight: number,
+  limit = NEARBY_LABEL_LIMIT,
+): number[] {
+  if (
+    zoom < NEARBY_LABEL_ZOOM ||
+    !Number.isFinite(zoom) ||
+    !Number.isFinite(viewportWidth) ||
+    !Number.isFinite(viewportHeight) ||
+    viewportWidth <= 0 ||
+    viewportHeight <= 0 ||
+    !target.every(Number.isFinite)
+  ) return [];
+
+  const cap = Math.min(
+    NEARBY_LABEL_LIMIT,
+    Math.max(0, Math.floor(limit)),
+  );
+  if (!cap) return [];
+  const radius =
+    (Math.hypot(viewportWidth, viewportHeight) * NEARBY_LABEL_VIEW_RADIUS) /
+    2 ** zoom;
+  const radius2 = radius * radius;
+  const count = Math.min(
+    Math.max(0, Math.floor(loaded)),
+    Math.floor(positions.length / 3),
+  );
+  const nearest: RankedDistance[] = [];
+  const compare = (a: RankedDistance, b: RankedDistance): number =>
+    a.distance2 - b.distance2 || a.rank - b.rank;
+
+  for (let rank = 0; rank < count; rank++) {
+    const offset = rank * 3;
+    const dx = (positions[offset] ?? 0) - target[0];
+    const dy = (positions[offset + 1] ?? 0) - target[1];
+    const dz = (positions[offset + 2] ?? 0) - target[2];
+    const distance2 = dx * dx + dy * dy + dz * dz;
+    if (!Number.isFinite(distance2) || distance2 > radius2) continue;
+    const candidate = { rank, distance2 };
+    if (nearest.length === cap && compare(candidate, nearest[cap - 1]!) >= 0)
+      continue;
+    const index = nearest.findIndex((current) => compare(candidate, current) < 0);
+    nearest.splice(index < 0 ? nearest.length : index, 0, candidate);
+    if (nearest.length > cap) nearest.pop();
+  }
+  return nearest.map(({ rank }) => rank);
 }
 
 /** 世界坐标 → 屏幕像素;视口未就绪时返回 null。 */
@@ -79,7 +146,7 @@ export function perspectiveTextSize(
 interface LabelItem {
   position: [number, number, number];
   text: string;
-  /** 去重叠顺位:选中节点名 > 邻居名 > 关系名。 */
+  /** 数值越大越优先；工作集中为选中节点名 > 邻居名 > 关系名。 */
   priority: number;
 }
 
@@ -167,6 +234,64 @@ export function declutter(
     kept.push(it);
   }
   return kept;
+}
+
+/** 未选中状态的近景节点名。候选已由距离筛选，这里只负责名称缓存
+ * 缺口、屏幕去重叠和轻于工作集的视觉层级。 */
+export function nearbyLabelLayers(
+  members: WorkingMember[],
+  nameOf: (rank: number) => string | null,
+  project: ScreenProjector,
+  viewport: PerspectiveViewport,
+): { layers: unknown[]; missing: number[] } {
+  const items: LabelItem[] = [];
+  const missing: number[] = [];
+  members.forEach((member, index) => {
+    const text = nameOf(member.rank);
+    if (text) {
+      items.push({
+        position: member.pos,
+        text,
+        priority: NEARBY_LABEL_LIMIT - index,
+      });
+    } else {
+      missing.push(member.rank);
+    }
+  });
+  const nodes = declutter(
+    items,
+    (position) => clipW(position, viewport) > 0 ? project(position) : null,
+    NEARBY_NODE_NAME_SIZE,
+    [],
+  );
+  if (!nodes.length) return { layers: [], missing };
+  const chars = new Set("0123456789…");
+  for (const node of nodes) for (const ch of node.text) chars.add(ch);
+  return {
+    layers: [
+      new TextLayer({
+        id: "nearby-node-names",
+        data: nodes,
+        characterSet: [...chars].join(""),
+        fontFamily: LABEL_FONT,
+        sizeUnits: "pixels",
+        fontSettings: { sdf: true, fontSize: 32, buffer: 4 },
+        billboard: true,
+        // 密集星图里同深度的节点及前景点会遮掉整段文字；标签已限制
+        // 数量并做屏幕去重叠，因此与工作集标签一样放在节点之上。
+        parameters: LABEL_DEPTH,
+        getPosition: (d: LabelItem) => d.position,
+        getText: (d: LabelItem) => d.text,
+        getSize: (d: LabelItem) =>
+          perspectiveTextSize(d.position, NEARBY_NODE_NAME_SIZE, viewport),
+        getPixelOffset: [0, -13],
+        getColor: [226, 236, 240, 235],
+        outlineWidth: 2,
+        outlineColor: [11, 14, 26, 225],
+      }),
+    ],
+    missing,
+  };
 }
 
 /** 工作集的两个文本图层(节点名 / 关系名),已在 CPU 端去重叠。 */
