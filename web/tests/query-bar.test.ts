@@ -147,7 +147,7 @@ const relationMappings: Mappings = {
   episode_type: {},
 };
 
-test("does not execute a query from the name input keyboard handler", () => {
+test("executes a runnable query with Enter when no name suggestion is active", () => {
   const inputKeydown = queryBarSource.match(
     /private inputKeydown\([\s\S]*?\n  }(?=\n\n  private keydown)/,
   )?.[0];
@@ -156,7 +156,22 @@ test("does not execute a query from the name input keyboard handler", () => {
   )?.[0];
   assert.ok(inputKeydown);
   assert.ok(keydown);
-  assert.doesNotMatch(inputKeydown, /activateSubmit|onSubmit/);
+  assert.match(inputKeydown, /if \(event\.isComposing\) return;/);
+  const acceptSuggestion = inputKeydown.indexOf(
+    "choices[this.nameIndex]!.click()",
+  );
+  const minimumLengthGuard = inputKeydown.indexOf(
+    "literalCount(this.text.value)",
+  );
+  const submit = inputKeydown.indexOf("this.activateSubmit()");
+  assert.ok(acceptSuggestion >= 0);
+  assert.ok(minimumLengthGuard >= 0);
+  assert.ok(submit > acceptSuggestion);
+  assert.ok(submit > minimumLengthGuard);
+  assert.match(
+    inputKeydown,
+    /if \(event\.key === "Enter"\) \{[\s\S]*event\.preventDefault\(\);[\s\S]*this\.closePanel\(\);[\s\S]*this\.activateSubmit\(\);/,
+  );
   assert.doesNotMatch(keydown, /activateSubmit|onSubmit/);
 });
 
