@@ -124,8 +124,8 @@ Episode 保留独立的 `u32 EpisodeId`，但没有 EntityKey、实体索引或 
 | `CHARACTER_REL` | `source: Character`、`target: Character`、`relation_type`、`spoiler`、`ended` | 无 |
 
 `VOICE_CREDIT` 对应当前数据库的 `VOICED`。作品上下文是事实参与者而不是普通展示属性；
-即使该 Subject 已删除，也保留这个未解析引用。当前快照的 `VOICED.summary` 全部为空，
-所以不产生文本负载；schema 仍保留该字段，未来出现非空值时以 FactRef 寻址。
+即使该 Subject 已删除，也保留这个未解析引用。`VOICED.summary` 全空时产生规范空目录和
+零长度 pack；出现非空值时以 FactRef 寻址。
 
 关系方向由角色字段表达，不能编码成 `"← 关系名"`。反向文案、颜色和线型都是
 Scene Model 的显示规则，不是数据事实。
@@ -469,7 +469,7 @@ Data 用 Promise memo 合并进行中的相同请求；请求完成后只进入�
 - 每个 `sidecar` 字段的非空值、空值、UTF-8 字节数和内容指纹与 Parquet 一致；包括
   `infobox` 在内的文本没有被截断、归一或混入错误身份。
 - 结构存在位与文本侧车一致；空值无需网络请求，声明未发布与源值为空可以区分。
-- 仅 `VOICE_CREDIT.summary` 不同的事实不会合并；当前全空快照产生零条事实文本负载。
+- 仅 `VOICE_CREDIT.summary` 不同的事实不会合并；该字段全空的发布产生零条事实文本负载。
 - Episode 分组键可恢复每条 `subject_id`；结构字段、描述、EpisodeId 和孤儿分组可对账。
 - 所有分页、桶索引、gzip 成员、pack 边界、文件大小、SHA-256 和内容版本一致；每个
   gzip 成员解压后不超过 2,000,000 字节。

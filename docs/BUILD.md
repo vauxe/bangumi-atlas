@@ -67,7 +67,7 @@ SHA-256、字节数和行数与 `data/dump` 严格对齐；因此“新 zip + �
 跨进程代际锁。消费者在锁内核对 generation 自身、当前归档、映射和 Parquet，不能观察到
 正在替换的文件；解压 JSONL 的逐字节 lineage 证明只在 generation 发布时执行，
 `verify_db.py` 另行重算其投影语义，避免布局、烘焙和站点核验反复扫描不参与其计算的
-1.7GB 原始文件。
+大体量原始文件。
 布局在发布前再次核对输入与实现身份，缓存标记只在两份产物完整写出后原子发布到
 `data/layout/cache.json`。需要主动重算时使用：
 
@@ -112,11 +112,12 @@ npm --prefix web run check
 npm --prefix web run build
 ```
 
-产出压缩后的 `site/app.js`。
+产出压缩后的 `site/app.js`、`site/query-worker.js` 和 `site/query.css`。
 
 ## 5. 发布前验证
 
-在完整的 staging `site/` 上做端到端冒烟，再核对体积门禁（阈值见 `weekly.yml`）。
+在完整的 staging `site/` 上做端到端冒烟，再由 `verify_site.py` 核对体积门禁；
+`weekly.yml` 仅在接近托管上限时补充告警。
 smoke 要求其实际发出的每个 Range 请求得到精确 `206` 与 `Content-Range`。通过后整个
 `site/` 目录作为 Pages artifact 发布。生产托管的传输语义不由本地 smoke 证明。
 
