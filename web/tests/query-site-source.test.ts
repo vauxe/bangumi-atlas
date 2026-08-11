@@ -99,6 +99,71 @@ test("maps the existing complete structural entity to query fields", async () =>
   }]);
 });
 
+test("normalizes unavailable Subject score and rank at the query boundary", async () => {
+  const unavailableMetrics: StructuralEntity = {
+    ...subject,
+    score: 0,
+    bgmRank: 0,
+    scoreDetails: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  };
+  const fullReader: SiteQueryReader = {
+    entities: async function* () {
+      yield unavailableMetrics;
+    },
+    entity: async () => unavailableMetrics,
+    mappings: async () => mappings,
+    factsFor: async () => ({ items: [], total: 0, next: null }),
+  };
+  const fullSource = new SiteQueryDataSource(fullReader);
+  const fullRows = [];
+
+  for await (const entity of fullSource.scan("subject")) fullRows.push(entity);
+  const fullEntity = await fullSource.entity("subject:3");
+
+  assert.deepEqual({
+    score: fullRows[0]?.fields.score,
+    rank: fullRows[0]?.fields.rank,
+    ratingCount: fullRows[0]?.fields.ratingCount,
+  }, {
+    score: null,
+    rank: null,
+    ratingCount: 0,
+  });
+  assert.deepEqual({
+    score: fullEntity?.fields.score,
+    rank: fullEntity?.fields.rank,
+  }, {
+    score: null,
+    rank: null,
+  });
+
+  const projectedReader: SiteQueryReader = {
+    entities: async function* () {
+      throw new Error("full entity scan should not run");
+    },
+    projectEntities: async function* (_owner, fields) {
+      assert.deepEqual(fields, ["score", "rank"]);
+      yield {
+        kind: "subject",
+        key: key(1, 3),
+        fields: { score: 0, rank: 0 },
+      };
+    },
+    entity: async () => unavailableMetrics,
+    factsFor: async () => ({ items: [], total: 0, next: null }),
+  };
+  const projectedSource = new SiteQueryDataSource(projectedReader);
+  const projectedRows = [];
+
+  for await (const entity of projectedSource.scan(
+    "subject",
+    undefined,
+    ["score", "rank"],
+  )) projectedRows.push(entity);
+
+  assert.deepEqual(projectedRows[0]?.fields, { score: null, rank: null });
+});
+
 test("derives Subject totals while projecting only their existing source fields", async () => {
   let requested: readonly string[] = [];
   const reader: SiteQueryReader = {
