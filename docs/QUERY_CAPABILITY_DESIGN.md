@@ -176,10 +176,10 @@ Episode 则定位所属 Subject 并打开分集。
 ### 4.1 权威与重建
 
 - Archive 是重新解释上游数据的权威。
-- 已验证 Parquet 是 AtlasRelease 的类型化构建输入。
-- AtlasRelease 是浏览器读取投影，不成为新的数据权威。
+- 已验证 Parquet 是 SiteRelease 的类型化构建输入。
+- SiteRelease 是浏览器读取投影，不成为新的数据权威。
 
-源字段、索引或物理布局变化时，从同版本 Parquet 重建 AtlasRelease；完全由现有结构字段确定的派生查询字段可复用
+源字段、索引或物理布局变化时，从同版本 Parquet 重建 SiteRelease；完全由现有结构字段确定的派生查询字段可复用
 内容寻址数据文件，但必须重新生成并验证查询合同摘要和 manifest。只有上游投影、schema 或枚举解释变化时才重新
 解析 Archive。
 
