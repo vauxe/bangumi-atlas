@@ -58,8 +58,9 @@ SHA-256、字节数和行数与 `data/dump` 严格对齐；因此“新 zip + �
 语义 oracle 绑定实际参与投影的代码、EntityKey 实现与关键运行时版本；布局缓存绑定完整
 `layout.py`、独立 EntityKey 实现和数值库版本，不因其他脚本或锁文件变化而失效。
 
-下载先写入同目录临时归档，摘要通过后才替换；解压也先在同目录完成，失败时保留上一份
-完整 dump，并拒绝归档、dump 目录或其数据根为符号链接。
+下载、摘要校验和解压先在同一个同目录临时代际中完成，全部成功后才成对替换
+`dump.zip` 与 `dump/`；提交中任一替换失败会恢复两份旧产物。脚本同时拒绝归档、dump
+目录或其数据根为符号链接。
 下载、映射刷新、Parquet、LadybugDB、数据库核验、布局、烘焙和站点核验使用同一把
 跨进程代际锁。消费者在锁内核对 generation 自身、当前归档、映射和 Parquet，不能观察到
 正在替换的文件；解压 JSONL 的逐字节 lineage 证明只在 generation 发布时执行，
@@ -147,8 +148,8 @@ kill %1
   任一来源、schema、文件或实现身份不一致即失败。
 - `build_db.py --skip-parquet`：复用现有 Parquet，只重建数据库，受 `VERSION`
   与完整 generation 内容护栏约束。
-- `build_db.py --offline`：改用本地枚举快照，校验其来源 commit 与逐文件 SHA-256。
-  上游是否有更新仍需联网刷新阶段确认。
+- `build_db.py --offline`：显式改用本地枚举快照，校验其来源 commit 与逐文件 SHA-256。
+  默认联网刷新失败会中断，不会隐式退回旧快照；上游是否有更新仍需联网刷新阶段确认。
 - `layout.py --force`：忽略已通过全部摘要与 schema 校验的布局缓存，强制重算坐标；
   正常构建无需使用。
 - `npm --prefix web run dev`：写出未压缩的 `site/app.js`，发布前重跑 §4 的 build。

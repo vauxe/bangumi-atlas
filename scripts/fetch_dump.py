@@ -1,9 +1,9 @@
 """Download the latest bangumi/Archive dump, verify it, extract it.
 
-Resolves aux/latest.json for the current release asset, streams the zip
-to data/dump.zip, checks its SHA256 against the published digest, then
-extracts into data/dump/. Skips the download when the local zip already
-matches the digest.
+Resolves aux/latest.json for the current release asset, stages the zip
+and extracted directory together, verifies the published digest, then
+installs both paths as one recoverable generation. Skips the download
+when the local zip already matches the digest.
 """
 
 import hashlib
@@ -48,73 +48,122 @@ def _require_safe_storage_paths() -> None:
         raise ValueError(f"dump path must be a directory: {DUMP_DIR}")
 
 
-def _download_archive(url: str, expected: str, size_mb: float) -> None:
-    ZIP_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        prefix=".dump-download-",
-        suffix=".zip",
-        dir=ZIP_PATH.parent,
-        delete=False,
-    ) as output:
-        staging = Path(output.name)
-        try:
-            print(f"downloading {url}")
-            with urllib.request.urlopen(url, timeout=60) as response:
-                done = 0
-                while chunk := response.read(1 << 20):
-                    output.write(chunk)
-                    done += len(chunk)
-                    print(
-                        f"\r  {done / 1e6:.0f}/{size_mb:.0f} MB",
-                        end="",
-                        flush=True,
-                    )
-                print()
-            output.flush()
-            actual = sha256_of(staging)
-            if actual != expected:
-                sys.exit(f"SHA256 mismatch: expected {expected}, got {actual}")
-            staging.replace(ZIP_PATH)
-        finally:
-            staging.unlink(missing_ok=True)
+def _download_archive(
+    url: str,
+    expected: str,
+    size_mb: float,
+    staging: Path,
+) -> None:
+    print(f"downloading {url}")
+    with staging.open("wb") as output:
+        with urllib.request.urlopen(url, timeout=60) as response:
+            done = 0
+            while chunk := response.read(1 << 20):
+                output.write(chunk)
+                done += len(chunk)
+                print(
+                    f"\r  {done / 1e6:.0f}/{size_mb:.0f} MB",
+                    end="",
+                    flush=True,
+                )
+            print()
+        output.flush()
+    actual = sha256_of(staging)
+    if actual != expected:
+        sys.exit(f"SHA256 mismatch: expected {expected}, got {actual}")
     print("SHA256 verified")
 
 
-def _extract_dump(version: str) -> None:
+def _extract_dump(archive_path: Path, staging: Path, version: str) -> None:
     print(f"extracting to {DUMP_DIR}")
-    with tempfile.TemporaryDirectory(
-        prefix=".dump-extract-", dir=DUMP_DIR.parent
-    ) as directory:
-        staging = Path(directory) / "dump"
-        staging.mkdir()
-        with zipfile.ZipFile(ZIP_PATH) as archive:
-            root = staging.resolve()
-            for member in archive.namelist():
-                if not (root / member).resolve().is_relative_to(root):
-                    sys.exit(f"zip member escapes extract dir: {member}")
-            archive.extractall(staging)
-        (staging / "VERSION").write_text(f"{version}\n")
+    staging.mkdir()
+    with zipfile.ZipFile(archive_path) as archive:
+        root = staging.resolve()
+        for member in archive.namelist():
+            if not (root / member).resolve().is_relative_to(root):
+                sys.exit(f"zip member escapes extract dir: {member}")
+        archive.extractall(staging)
+    (staging / "VERSION").write_text(f"{version}\n")
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _install_generation(
+    staged_archive: Path | None,
+    staged_dump: Path,
+    transaction_dir: Path,
+) -> None:
+    archive_backup = transaction_dir / "previous-dump.zip"
+    dump_backup = transaction_dir / "previous-dump"
+    commit_started = False
+
+    try:
+        if staged_archive is not None and ZIP_PATH.exists():
+            ZIP_PATH.replace(archive_backup)
         if DUMP_DIR.exists():
-            shutil.rmtree(DUMP_DIR)
-        staging.replace(DUMP_DIR)
+            DUMP_DIR.replace(dump_backup)
+        commit_started = True
+        if staged_archive is not None:
+            staged_archive.replace(ZIP_PATH)
+        staged_dump.replace(DUMP_DIR)
+    except BaseException:
+        if commit_started:
+            _remove_path(DUMP_DIR)
+            if staged_archive is not None:
+                _remove_path(ZIP_PATH)
+        if dump_backup.exists():
+            dump_backup.replace(DUMP_DIR)
+        if archive_backup.exists():
+            archive_backup.replace(ZIP_PATH)
+        raise
 
 
 def _fetch_dump() -> None:
     _require_safe_storage_paths()
+    ZIP_PATH.parent.mkdir(parents=True, exist_ok=True)
     with urllib.request.urlopen(LATEST_URL, timeout=15) as resp:
         latest = json.load(resp)
     expected = latest["digest"].removeprefix("sha256:")
     size_mb = latest["size"] / 1e6
     print(f"latest: {latest['name']} ({size_mb:.0f} MB)")
 
-    if ZIP_PATH.exists() and sha256_of(ZIP_PATH) == expected:
-        print("local zip already matches digest, skipping download")
-    else:
-        _download_archive(latest["browser_download_url"], expected, size_mb)
+    with tempfile.TemporaryDirectory(
+        prefix=".dump-generation-",
+        dir=ZIP_PATH.parent,
+    ) as directory:
+        transaction_dir = Path(directory)
+        staged_archive: Path | None = None
+        if ZIP_PATH.exists() and sha256_of(ZIP_PATH) == expected:
+            print("local zip already matches digest, skipping download")
+            archive_path = ZIP_PATH
+        else:
+            staged_archive = transaction_dir / "dump.zip"
+            _download_archive(
+                latest["browser_download_url"],
+                expected,
+                size_mb,
+                staged_archive,
+            )
+            archive_path = staged_archive
 
-    _require_safe_storage_paths()
-    _extract_dump(Path(latest["name"]).stem)
-    print("done; next: uv run python -m scripts.build_db")
+        staged_dump = transaction_dir / "dump"
+        _extract_dump(
+            archive_path,
+            staged_dump,
+            Path(latest["name"]).stem,
+        )
+        _require_safe_storage_paths()
+        _install_generation(
+            staged_archive,
+            staged_dump,
+            transaction_dir,
+        )
+    print("done; next: uv run --frozen python -m scripts.build_db")
 
 
 def main() -> None:

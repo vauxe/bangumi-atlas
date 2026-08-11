@@ -206,6 +206,130 @@ class DumpStorageSafetyTests(unittest.TestCase):
 
             self.assertEqual(sentinel.read_text(), "previous generation\n")
 
+    def test_failed_new_archive_extraction_preserves_previous_generation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            dump = data / "dump"
+            data.mkdir()
+            dump.mkdir()
+            sentinel = dump / "sentinel.jsonlines"
+            sentinel.write_text("previous generation\n")
+            archive = data / "dump.zip"
+            archive.write_bytes(b"previous archive")
+            new_payload = b"not a zip archive"
+
+            with (
+                patch.object(fetch_dump, "DUMP_DIR", dump),
+                patch.object(fetch_dump, "ZIP_PATH", archive),
+                patch.object(
+                    fetch_dump.urllib.request,
+                    "urlopen",
+                    side_effect=[
+                        latest_response(payload=new_payload),
+                        io.BytesIO(new_payload),
+                    ],
+                ),
+                self.assertRaises(zipfile.BadZipFile),
+            ):
+                fetch_dump._fetch_dump()
+
+            self.assertEqual(archive.read_bytes(), b"previous archive")
+            self.assertEqual(sentinel.read_text(), "previous generation\n")
+
+    def test_failed_final_install_restores_previous_generation(self) -> None:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as zip_file:
+            zip_file.writestr("subject.jsonlines", b"{}\n")
+        payload = buffer.getvalue()
+        original_replace = Path.replace
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            dump = data / "dump"
+            data.mkdir()
+            dump.mkdir()
+            sentinel = dump / "sentinel.jsonlines"
+            sentinel.write_text("previous generation\n")
+            archive = data / "dump.zip"
+            archive.write_bytes(b"previous archive")
+
+            def fail_dump_install(source: Path, target: Path) -> Path:
+                if source.name == "dump" and Path(target) == dump:
+                    raise OSError("install interrupted")
+                return original_replace(source, target)
+
+            with (
+                patch.object(fetch_dump, "DUMP_DIR", dump),
+                patch.object(fetch_dump, "ZIP_PATH", archive),
+                patch.object(Path, "replace", fail_dump_install),
+                patch.object(
+                    fetch_dump.urllib.request,
+                    "urlopen",
+                    side_effect=[
+                        latest_response(payload=payload),
+                        io.BytesIO(payload),
+                    ],
+                ),
+                self.assertRaisesRegex(OSError, "install interrupted"),
+            ):
+                fetch_dump._fetch_dump()
+
+            self.assertEqual(archive.read_bytes(), b"previous archive")
+            self.assertEqual(sentinel.read_text(), "previous generation\n")
+
+    def test_interrupt_after_dump_install_restores_previous_generation(
+        self,
+    ) -> None:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as zip_file:
+            zip_file.writestr("subject.jsonlines", b"{}\n")
+        payload = buffer.getvalue()
+        original_replace = Path.replace
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            dump = data / "dump"
+            data.mkdir()
+            dump.mkdir()
+            sentinel = dump / "sentinel.jsonlines"
+            sentinel.write_text("previous generation\n")
+            archive = data / "dump.zip"
+            archive.write_bytes(b"previous archive")
+
+            def interrupt_after_dump_install(
+                source: Path, target: Path
+            ) -> Path:
+                installed = original_replace(source, target)
+                if source.name == "dump" and Path(target) == dump:
+                    raise KeyboardInterrupt("install interrupted")
+                return installed
+
+            with (
+                patch.object(fetch_dump, "DUMP_DIR", dump),
+                patch.object(fetch_dump, "ZIP_PATH", archive),
+                patch.object(Path, "replace", interrupt_after_dump_install),
+                patch.object(
+                    fetch_dump.urllib.request,
+                    "urlopen",
+                    side_effect=[
+                        latest_response(payload=payload),
+                        io.BytesIO(payload),
+                    ],
+                ),
+                self.assertRaisesRegex(
+                    KeyboardInterrupt, "install interrupted"
+                ),
+            ):
+                fetch_dump._fetch_dump()
+
+            self.assertEqual(archive.read_bytes(), b"previous archive")
+            self.assertEqual(sentinel.read_text(), "previous generation\n")
+
 
 if __name__ == "__main__":
     unittest.main()
