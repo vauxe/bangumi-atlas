@@ -1,6 +1,12 @@
 import { Data } from "../data";
-import { loadManifest } from "../loader";
+import {
+  ensureRankIndex,
+  loadManifest,
+  rankOfKey,
+} from "../loader";
 import { executeQuery } from "./engine";
+import { QueryHighlightBuilder } from "./highlights";
+import { queryGraphEntityKey } from "./graph-results";
 import { SiteQueryDataSource } from "./site-source";
 import { SiteQuerySearchIndex } from "./site-search";
 import { createQueryWorkerRuntime } from "./worker-runtime";
@@ -10,7 +16,7 @@ import { SiteRuntimeError } from "../site-error";
 
 interface WorkerScope {
   onmessage: ((event: MessageEvent<unknown>) => void) | null;
-  postMessage(message: unknown): void;
+  postMessage(message: unknown, transfer?: Transferable[]): void;
 }
 
 const scope = self as unknown as WorkerScope;
@@ -26,7 +32,7 @@ async function contractDigest(): Promise<string> {
   return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-const source = loadManifest().then(async (manifest) => {
+const runtimeSource = loadManifest().then(async (manifest) => {
   if (
     manifest.query?.schema !== "atlas-release-query-v1" ||
     manifest.query.contractDigest !== await contractDigest() ||
@@ -39,11 +45,14 @@ const source = loadManifest().then(async (manifest) => {
       "当前 AtlasRelease 与查询客户端不兼容",
     );
   const data = new Data();
-  return new SiteQueryDataSource(
-    data,
-    new SiteQuerySearchIndex(data, manifest),
-    manifest.version,
-  );
+  return {
+    manifest,
+    source: new SiteQueryDataSource(
+      data,
+      new SiteQuerySearchIndex(data, manifest),
+      manifest.version,
+    ),
+  };
 });
 
 async function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -61,18 +70,38 @@ async function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T
   }
 }
 
-const runtime = createQueryWorkerRuntime(async (request, signal) =>
-  executeQuery(
+const runtime = createQueryWorkerRuntime(async (request, signal) => {
+  const { manifest, source } = await abortable(runtimeSource, signal);
+  const highlights = request.includeHighlights
+    ? new QueryHighlightBuilder(manifest.n_nodes)
+    : null;
+  if (highlights) await abortable(ensureRankIndex(), signal);
+  const result = await executeQuery(
     request.document,
     request.parameters,
-    await abortable(source, signal),
+    source,
     {
       pageSize: request.pageSize,
       offset: request.offset,
       signal,
+      ...(highlights
+        ? {
+            onResultEntities: (entities) => {
+              for (const entity of entities) {
+                if (!entity.graphRef) continue;
+                const key = queryGraphEntityKey(entity.graphRef);
+                const rank = key === null ? null : rankOfKey(key);
+                if (rank !== null) highlights.add(rank);
+              }
+            },
+          }
+        : {}),
     },
-  ),
-  (response) => scope.postMessage(response),
-);
+  );
+  return {
+    result,
+    ...(highlights ? { highlights: highlights.finish() } : {}),
+  };
+}, (response, transfer) => scope.postMessage(response, transfer));
 
 scope.onmessage = (event) => runtime.receive(event.data);

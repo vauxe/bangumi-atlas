@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import type { QueryDocument } from "../src/query/document";
 import type { QueryResult } from "../src/query/engine";
+import { QueryHighlightBuilder } from "../src/query/highlights";
 import { MISSING } from "../src/query/value";
 import {
   decodeQueryResult,
@@ -123,6 +124,56 @@ test("preserves actionable site failure categories at the worker boundary", asyn
   }]);
 });
 
+test("posts compact full-result highlights with a transferable buffer", async () => {
+  const responses: QueryWorkerResponse[] = [];
+  const transfers: Transferable[][] = [];
+  const builder = new QueryHighlightBuilder(1_000);
+  builder.add(2);
+  builder.add(700);
+  const highlights = builder.finish();
+  const runtime = createQueryWorkerRuntime(
+    async () => ({
+      result: {
+        ...metadata,
+        rows: [{ n: 1 }],
+        totalMatches: 1,
+        visibleMatches: 1,
+        hasMore: false,
+        stability: "exact" as const,
+      },
+      highlights,
+    }),
+    (response, transfer = []) => {
+      responses.push(response);
+      transfers.push(transfer);
+    },
+  );
+
+  runtime.receive({
+    schema: "atlas-query-wire-v1",
+    type: "execute",
+    requestId: "q-highlights",
+    document: query,
+    parameters: {},
+    pageSize: 20,
+    offset: 0,
+    includeHighlights: true,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const response = responses[0];
+  assert.equal(response?.type, "result");
+  assert.deepEqual(
+    response?.type === "result" ? response.highlights : null,
+    highlights,
+  );
+  assert.deepEqual(transfers, [[
+    highlights.encoding === "ranks-u32"
+      ? highlights.ranks.buffer
+      : highlights.bits.buffer,
+  ]]);
+});
+
 test("client correlates results and forwards cancellation", async () => {
   const sent: unknown[] = [];
   let listener: ((event: MessageEvent<unknown>) => void) | undefined;
@@ -207,4 +258,44 @@ test("hard cancellation terminates a busy worker and recreates it", async () => 
   assert.equal((ports[1]?.sent.at(-1) as { type?: string })?.type, "execute");
   client.dispose();
   await assert.rejects(replacement, /disposed/);
+});
+
+test("client requests and validates full-result highlights separately from pages", async () => {
+  const sent: unknown[] = [];
+  let listener: ((event: MessageEvent<unknown>) => void) | undefined;
+  const port = {
+    postMessage(message: unknown) { sent.push(message); },
+    addEventListener(_type: "message", next: (event: MessageEvent<unknown>) => void) {
+      listener = next;
+    },
+    removeEventListener() {},
+  };
+  const client = new QueryWorkerClient(port);
+  const pending = client.executeWithHighlights(query, {}, { pageSize: 20 });
+  const request = sent[0] as { requestId: string; includeHighlights?: boolean };
+  assert.equal(request.includeHighlights, true);
+  const builder = new QueryHighlightBuilder(100);
+  builder.add(7);
+  const highlights = builder.finish();
+  listener?.({
+    data: {
+      schema: "atlas-query-wire-v1",
+      type: "result",
+      requestId: request.requestId,
+      result: encodeQueryResult({
+        ...metadata,
+        rows: [{ n: 1 }],
+        totalMatches: 1,
+        visibleMatches: 1,
+        hasMore: false,
+        stability: "exact",
+      }),
+      highlights,
+    },
+  } as MessageEvent<unknown>);
+
+  const execution = await pending;
+  assert.deepEqual(execution.result.rows, [{ n: 1 }]);
+  assert.deepEqual(execution.highlights, highlights);
+  client.dispose();
 });

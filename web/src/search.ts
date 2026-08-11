@@ -28,8 +28,10 @@ type SubstringPageLoader = (
 ) => Promise<SearchRankPage>;
 
 export interface SubstringSearchOptions {
+  acceptRank?: (rank: number) => boolean;
   cursor?: number;
   loadPage?: SubstringPageLoader;
+  prefetchAliases?: boolean;
   signal?: AbortSignal;
 }
 
@@ -194,21 +196,36 @@ export async function findSubstringEntries(
       (page.next <= requestCursor || page.next !== endpoint)
     )
       throw new Error("substring search cursor did not advance");
-    const loadedRows = await aliases.read(page.ranks, signal);
-    signal.throwIfAborted();
+    const accepted: boolean[] = [];
+    let previousRank = scannedThroughRank;
     for (const rank of page.ranks) {
       if (
         !Number.isInteger(rank) ||
         rank < 0 ||
-        (scannedThroughRank !== null && rank <= scannedThroughRank)
+        (previousRank !== null && rank <= previousRank)
       )
         throw new Error("substring candidates must be increasing ranks");
-      const row = loadedRows.get(rank);
-      if (!row)
-        throw new Error(`search alias row ${rank} missing after load`);
+      accepted.push(options.acceptRank?.(rank) ?? true);
+      previousRank = rank;
+    }
+    const acceptedRanks = page.ranks.filter((_rank, index) => accepted[index]);
+    if (options.prefetchAliases && page.next !== null && aliases.prefetch)
+      await aliases.prefetch(signal);
+    const loadedRows = acceptedRanks.length
+      ? await aliases.read(acceptedRanks, signal)
+      : new Map<number, SearchAliasRow>();
+    signal.throwIfAborted();
+    for (let index = 0; index < page.ranks.length; index++) {
+      const rank = page.ranks[index];
+      if (rank === undefined)
+        throw new Error("substring candidate rank is missing");
       candidateCursor++;
       scanned++;
       scannedThroughRank = rank;
+      if (!accepted[index]) continue;
+      const row = loadedRows.get(rank);
+      if (!row)
+        throw new Error(`search alias row ${rank} missing after load`);
       const entry = matchingAliasEntry(query, row, rank);
       if (entry) entries.push(entry);
     }

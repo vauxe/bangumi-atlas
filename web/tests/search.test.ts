@@ -219,6 +219,32 @@ test("filters hash collisions and continues substring candidate pages", async ()
   assert.deepEqual(cursors, [0, 3]);
 });
 
+test("filters ranks before loading alias rows without changing cursor accounting", async () => {
+  const loaded: number[][] = [];
+  const aliases: SearchAliases = {
+    row: () => null,
+    load: async () => undefined,
+    read: async (ranks) => {
+      const requested = [...ranks];
+      loaded.push(requested);
+      return new Map(requested.map((rank) => [
+        rank,
+        [[[`ab ${rank}`, `ab ${rank}`]], `ab ${rank}`, 2] as SearchAliasRow,
+      ]));
+    },
+  };
+
+  const page = await findSubstringEntries("ab", aliases, {
+    acceptRank: (rank) => rank % 2 === 1,
+    loadPage: async () => ({ ranks: [0, 1, 2, 3], next: null }),
+  });
+
+  assert.deepEqual(loaded, [[1, 3]]);
+  assert.deepEqual(page.entries.map((entry) => entry[2]), [1, 3]);
+  assert.equal(page.next, null);
+  assert.equal(page.scannedThroughRank, 3);
+});
+
 test("bounds collision scanning and returns the next candidate cursor", async () => {
   const total = 1_000;
   const names: SearchAliases = {
@@ -289,6 +315,32 @@ test("validates substring candidates from one stable alias snapshot", async () =
   });
 
   assert.deepEqual(page.entries.map((entry) => entry[2]), ranks);
+});
+
+test("prefetches aliases only when an exhaustive caller opts in", async () => {
+  const events: string[] = [];
+  const aliases: SearchAliases = {
+    row: () => null,
+    load: async () => {},
+    prefetch: async () => { events.push("prefetch"); },
+    read: async () => {
+      events.push("read");
+      return new Map([[0, [[["ab", "ab"]], "ab", 1]]]);
+    },
+  };
+  const loadPage = async (_query: string, cursor: number) => cursor === 0
+    ? { ranks: [0], next: 1 }
+    : { ranks: [], next: null };
+
+  await findSubstringEntries("ab", aliases, { loadPage });
+  assert.deepEqual(events, ["read"]);
+
+  events.length = 0;
+  await findSubstringEntries("ab", aliases, {
+    loadPage,
+    prefetchAliases: true,
+  });
+  assert.deepEqual(events, ["prefetch", "read"]);
 });
 
 test("returns every match from one bounded candidate batch", async () => {

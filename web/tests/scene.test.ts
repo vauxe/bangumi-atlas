@@ -180,15 +180,20 @@ test("dims context only when a query highlight can actually be drawn", () => {
   };
   try {
     state.selection = null;
-    state.queryResultRanks = [4];
+    state.queryResultRanks = Uint32Array.of(4);
+    const geometry = {
+      loaded: 0,
+      sparse: new Map<number, [number, number, number]>(),
+    };
     const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
-      posOf: () => null,
+      geo: geometry,
+      posOf: () => geometry.loaded ? [0, 0, 0] : null,
     });
     const uniforms = Reflect.get(scene, "atlasUniforms") as () => {
       spotlight: number;
     };
     assert.equal(uniforms.call(scene).spotlight, 0);
-    Reflect.set(scene, "posOf", () => [0, 0, 0]);
+    geometry.loaded = 1;
     assert.equal(uniforms.call(scene).spotlight, 1);
   } finally {
     state.selection = previous.selection;
@@ -197,11 +202,11 @@ test("dims context only when a query highlight can actually be drawn", () => {
 });
 
 test("renders query results as a separate pickable graph layer", () => {
-  const queryState = state as typeof state & { queryResultRanks: number[] };
+  const queryState = state;
   const previous = queryState.queryResultRanks;
   const picked: number[] = [];
   try {
-    queryState.queryResultRanks = [0, 1, 1, 2];
+    queryState.queryResultRanks = Uint32Array.of(0, 1, 1, 2);
     const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
       posOf: (rank: number): [number, number, number] | null =>
         rank < 2 ? [rank, 0, 0] : null,
@@ -228,6 +233,43 @@ test("renders query results as a separate pickable graph layer", () => {
     assert.deepEqual(picked, [1]);
   } finally {
     queryState.queryResultRanks = previous;
+  }
+});
+
+test("reuses query-result buffers until ranks or available geometry changes", () => {
+  const previous = state.queryResultRanks;
+  const geometry = { loaded: 2, sparse: new Map<number, [number, number, number]>() };
+  let positionReads = 0;
+  try {
+    state.queryResultRanks = Uint32Array.of(0, 2);
+    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
+      geo: geometry,
+      posOf: (rank: number): [number, number, number] | null => {
+        positionReads++;
+        return rank < geometry.loaded ? [rank, 0, 0] : null;
+      },
+      cb: { onHover: () => undefined, onPick: () => undefined },
+    });
+    const buildLayers = Reflect.get(scene, "queryResultLayers") as () => {
+      props: Record<string, unknown>;
+    }[];
+
+    const first = buildLayers.call(scene);
+    const second = buildLayers.call(scene);
+    assert.equal(positionReads, 2);
+    assert.equal(first[0]?.props.data, second[0]?.props.data);
+    assert.equal((first[0]?.props.data as { length: number }).length, 1);
+
+    geometry.loaded = 3;
+    const grown = buildLayers.call(scene);
+    assert.equal(positionReads, 4);
+    assert.equal((grown[0]?.props.data as { length: number }).length, 2);
+
+    state.queryResultRanks = Uint32Array.of(0);
+    buildLayers.call(scene);
+    assert.equal(positionReads, 5);
+  } finally {
+    state.queryResultRanks = previous;
   }
 });
 
@@ -299,7 +341,7 @@ test("loads and draws nearby names only while no working set is selected", async
 test("keeps query-result markers subtle at overview and prominent through zoom", () => {
   const previous = state.queryResultRanks;
   try {
-    state.queryResultRanks = [0];
+    state.queryResultRanks = Uint32Array.of(0);
     const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
       posOf: (): [number, number, number] => [0, 0, 0],
       cb: {

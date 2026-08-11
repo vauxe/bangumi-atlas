@@ -4,6 +4,7 @@ import { afterEach, test } from "node:test";
 import {
   Data,
   buildVocabularyIndex,
+  contiguousPackSpan,
   requireLongTextValue,
   suggestVocabularyValues,
 } from "../src/data";
@@ -12,6 +13,22 @@ const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+});
+
+test("derives one exact byte span from contiguous member locators", () => {
+  assert.deepEqual(contiguousPackSpan([
+    [1, 10, 100, 25],
+    [11, 20, 125, 40],
+    [21, 30, 165, 15],
+  ]), [100, 80]);
+  assert.equal(contiguousPackSpan([]), null);
+  assert.throws(
+    () => contiguousPackSpan([
+      [1, 10, 100, 25],
+      [11, 20, 126, 40],
+    ]),
+    /not contiguous/,
+  );
 });
 
 test("returns an absent long text without loading the text index", async () => {

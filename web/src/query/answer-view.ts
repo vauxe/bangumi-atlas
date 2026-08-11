@@ -26,6 +26,11 @@ import {
   OWNER_LABEL,
   factEnumValues,
 } from "./workbench-model";
+import {
+  projectedEntityRef,
+  queryRowVisibleEntityRefs,
+} from "./result-entities";
+export { queryResultEntityRefs } from "./result-entities";
 
 export interface AnswerViewOptions {
   onEntity?(ref: string): void;
@@ -169,66 +174,14 @@ function readableRef(ref: string): string {
   return factRef ? `关系事实 #${factRef[1]}` : ref;
 }
 
-function collectEntityRefs(value: RuntimeValue, refs: Set<string>): void {
-  if (typeof value === "string" && ENTITY_REF.test(value)) {
-    refs.add(value);
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) collectEntityRefs(item, refs);
-    return;
-  }
-  if (entity(value)) {
-    refs.add(value.ref);
-    return;
-  }
-  if (fact(value)) {
-    for (const ref of Object.values(value.roles)) refs.add(ref);
-    return;
-  }
-  if (path(value))
-    for (const node of value.nodes) refs.add(node.ref);
-}
-
-function projectedEntityRef(
-  row: Record<string, RuntimeValue>,
-  evidence: RowEvidence | undefined,
-): string | null {
-  const refs = new Set<string>();
-  for (const [column, items] of Object.entries(evidence ?? {})) {
-    if (!Object.hasOwn(row, column)) continue;
-    for (const item of items)
-      if (item.kind === "entity-field") refs.add(item.ref);
-  }
-  return refs.size === 1 ? [...refs][0] as string : null;
-}
-
 function rowEntityRef(
   row: Record<string, RuntimeValue>,
   evidence: RowEvidence | undefined,
 ): string | null {
   if (typeof row.ref === "string" && ENTITY_REF.test(row.ref)) return row.ref;
-  const visible = new Set<string>();
-  for (const value of Object.values(row)) collectEntityRefs(value, visible);
-  return visible.size ? null : projectedEntityRef(row, evidence);
-}
-
-/** Entity identities present in the currently rendered answer rows. */
-export function queryResultEntityRefs(
-  result: Pick<QueryResult, "rows"> & Partial<Pick<QueryResult, "evidence">>,
-): string[] {
-  const refs = new Set<string>();
-  result.rows.forEach((row, index) => {
-    const visible = new Set<string>();
-    for (const value of Object.values(row)) collectEntityRefs(value, visible);
-    if (visible.size)
-      for (const ref of visible) refs.add(ref);
-    else {
-      const inferred = projectedEntityRef(row, result.evidence?.[index]);
-      if (inferred) refs.add(inferred);
-    }
-  });
-  return [...refs];
+  return queryRowVisibleEntityRefs(row).length
+    ? null
+    : projectedEntityRef(row, evidence);
 }
 
 function isFullTextMatch(

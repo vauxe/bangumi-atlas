@@ -230,6 +230,53 @@ test("uses the query projection reader when scan fields are known", async () => 
   });
 });
 
+test("keeps lookup point hydration projected to downstream fields", async () => {
+  let requested: readonly string[] = [];
+  const reader: SiteQueryReader = {
+    entities: async function* () {},
+    entity: async () => {
+      throw new Error("full entity hydration should not run");
+    },
+    mappings: async () => mappings,
+    factsFor: async () => ({ items: [], total: 0, next: null }),
+  };
+  const search: SiteQuerySearch = {
+    lookup: async function* (_text, _owner, _lookupFields, _signal, entityFields) {
+      requested = entityFields ?? [];
+      yield {
+        entity: {
+          kind: "subject",
+          key: key(1, 3),
+          fields: {
+            type: 2,
+            platformCode: 1,
+            scoreDetails: subject.scoreDetails,
+            name: "internal identity",
+          },
+        },
+        field: "name",
+        text: "internal identity",
+        utf8Range: [0, 8],
+      };
+    },
+    fullText: async function* () {},
+    factFullText: async function* () {},
+  };
+  const source = new SiteQueryDataSource(reader, search);
+  const rows = [];
+
+  for await (const entity of source.lookup!(
+    "internal",
+    "subject",
+    ["name"],
+    undefined,
+    ["platform", "ratingCount"],
+  )) rows.push(entity);
+
+  assert.deepEqual(requested, ["type", "platformCode", "scoreDetails"]);
+  assert.deepEqual(rows[0]?.fields, { platform: "TV", ratingCount: 6 });
+});
+
 test("rejects a projected field missing from the SiteRelease implementation", async () => {
   const source = new SiteQueryDataSource({
     entities: async function* () {},

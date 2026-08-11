@@ -294,6 +294,37 @@ test("recovers one row entity from field evidence when ref is not projected", ()
   }), ["subject:7"]);
 });
 
+test("recovers every evidence entity when scalar columns represent multiple nodes", () => {
+  assert.deepEqual(queryResultEntityRefs({
+    rows: [{ subjectName: "作品", personName: "人物" }],
+    evidence: [{
+      subjectName: [{
+        kind: "entity-field",
+        ref: "subject:7",
+        field: "name",
+      }],
+      personName: [{
+        kind: "entity-field",
+        ref: "person:8",
+        field: "name",
+      }],
+    }],
+  }), ["subject:7", "person:8"]);
+});
+
+test("combines visible references with other evidence-backed result entities", () => {
+  assert.deepEqual(queryResultEntityRefs({
+    rows: [{ ref: "subject:7", personName: "人物" }],
+    evidence: [{
+      personName: [{
+        kind: "entity-field",
+        ref: "person:8",
+        field: "name",
+      }],
+    }],
+  }), ["subject:7", "person:8"]);
+});
+
 test("keeps an evidence-backed entity clickable after choosing display columns", () => {
   const originalDocument = globalThis.document;
   globalThis.document = {

@@ -35,8 +35,11 @@ test("aggregates groups while ignoring null and missing measure values", async (
         groupBy: [{ name: "type", value: { kind: "field", binding: "s", field: "type" } }],
         metrics: [
           { name: "rows", function: "count" },
+          { name: "unique", function: "countDistinct", value: { kind: "field", binding: "s", field: "id" } },
           { name: "scored", function: "count", value: { kind: "field", binding: "s", field: "score" } },
           { name: "wish", function: "sum", value: { kind: "field", binding: "s", field: "wish" } },
+          { name: "minimum", function: "min", value: { kind: "field", binding: "s", field: "score" } },
+          { name: "maximum", function: "max", value: { kind: "field", binding: "s", field: "score" } },
           { name: "average", function: "avg", value: { kind: "field", binding: "s", field: "score" } },
         ],
       },
@@ -47,8 +50,8 @@ test("aggregates groups while ignoring null and missing measure values", async (
   const result = await executeQuery(query, {}, source, { pageSize: 20 });
 
   assert.deepEqual(result.rows, [
-    { type: 1, rows: 1, scored: 1, wish: 5, average: 6 },
-    { type: 2, rows: 3, scored: 1, wish: 60, average: 8 },
+    { type: 1, rows: 1, unique: 1, scored: 1, wish: 5, minimum: 6, maximum: 6, average: 6 },
+    { type: 2, rows: 3, unique: 3, scored: 1, wish: 60, minimum: 8, maximum: 8, average: 8 },
   ]);
   assert.equal(result.evidence[0]?.average?.[0]?.kind, "aggregate-lineage");
 });

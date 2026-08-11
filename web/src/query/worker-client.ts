@@ -4,6 +4,10 @@ import type {
 } from "./document";
 import type { QueryResult } from "./engine";
 import {
+  validateQueryHighlights,
+  type QueryHighlights,
+} from "./highlights";
+import {
   QUERY_WIRE_SCHEMA,
   decodeQueryResult,
   type QueryErrorCode,
@@ -41,10 +45,21 @@ export class QueryClientError extends Error {
 }
 
 interface PendingRequest {
-  resolve(result: QueryResult): void;
+  resolve(result: QueryExecution): void;
   reject(error: unknown): void;
+  includeHighlights: boolean;
   signal?: AbortSignal;
   onAbort?: () => void;
+}
+
+interface QueryExecution {
+  result: QueryResult;
+  highlights?: QueryHighlights;
+}
+
+export interface QueryExecutionWithHighlights {
+  result: QueryResult;
+  highlights: QueryHighlights;
 }
 
 export class QueryWorkerClient {
@@ -62,9 +77,21 @@ export class QueryWorkerClient {
     const request = this.pending.get(response.requestId);
     if (!request) return;
     this.finish(response.requestId, request);
-    if (response.type === "result" && response.result)
-      request.resolve(decodeQueryResult(response.result));
-    else if (
+    if (response.type === "result" && response.result) {
+      try {
+        const highlights = response.highlights === undefined
+          ? undefined
+          : validateQueryHighlights(response.highlights);
+        if (request.includeHighlights && !highlights)
+          throw new TypeError("query worker omitted requested highlights");
+        request.resolve({
+          result: decodeQueryResult(response.result),
+          ...(highlights ? { highlights } : {}),
+        });
+      } catch {
+        request.reject(new QueryClientError("QUERY_FAILED", "查询响应无效"));
+      }
+    } else if (
       response.type === "error" &&
       typeof response.code === "string" &&
       typeof response.message === "string"
@@ -89,14 +116,28 @@ export class QueryWorkerClient {
     parameters: ParameterValues,
     options: QueryClientOptions,
   ): Promise<QueryResult> {
-    return this.request(document, parameters, options);
+    return this.request(document, parameters, options, false)
+      .then((execution) => execution.result);
+  }
+
+  executeWithHighlights(
+    document: QueryDocument,
+    parameters: ParameterValues,
+    options: QueryClientOptions,
+  ): Promise<QueryExecutionWithHighlights> {
+    return this.request(document, parameters, options, true)
+      .then((execution) => ({
+        result: execution.result,
+        highlights: execution.highlights as QueryHighlights,
+      }));
   }
 
   private request(
     document: QueryDocument,
     parameters: ParameterValues,
     options: QueryClientOptions,
-  ): Promise<QueryResult> {
+    includeHighlights: boolean,
+  ): Promise<QueryExecution> {
     if (options.signal?.aborted)
       return Promise.reject(options.signal.reason);
     const requestId = `q${this.nextId++}`;
@@ -104,6 +145,7 @@ export class QueryWorkerClient {
       const pending: PendingRequest = {
         resolve,
         reject,
+        includeHighlights,
         ...(options.signal ? { signal: options.signal } : {}),
       };
       if (options.signal) {
@@ -132,6 +174,7 @@ export class QueryWorkerClient {
         parameters,
         pageSize: options.pageSize,
         offset: options.offset ?? 0,
+        ...(includeHighlights ? { includeHighlights: true } : {}),
       });
     });
   }

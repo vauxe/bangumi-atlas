@@ -69,6 +69,65 @@ export function canonicalJson(value: unknown): string {
     .join(",")}}`;
 }
 
+/** Canonical equality with an allocation-free path for JSON scalars. */
+export class CanonicalValueSet {
+  private readonly scalars = new Set<string | number | boolean>();
+  private readonly structured = new Set<string>();
+
+  add(value: unknown): void {
+    if (typeof value === "number" && !Number.isFinite(value))
+      throw new TypeError("query numbers must be finite");
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      this.scalars.add(value);
+      return;
+    }
+    this.structured.add(canonicalJson(value));
+  }
+
+  get size(): number {
+    return this.scalars.size + this.structured.size;
+  }
+}
+
+/** Canonical-key map with separate scalar and structured namespaces. */
+export class CanonicalValueMap<T> {
+  private readonly scalars = new Map<string | number | boolean, T>();
+  private readonly structured = new Map<string, T>();
+
+  getOrCreate(value: unknown, create: () => T): T {
+    if (typeof value === "number" && !Number.isFinite(value))
+      throw new TypeError("query numbers must be finite");
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      if (this.scalars.has(value)) return this.scalars.get(value) as T;
+      const created = create();
+      this.scalars.set(value, created);
+      return created;
+    }
+    const key = canonicalJson(value);
+    if (this.structured.has(key)) return this.structured.get(key) as T;
+    const created = create();
+    this.structured.set(key, created);
+    return created;
+  }
+
+  *values(): IterableIterator<T> {
+    yield* this.scalars.values();
+    yield* this.structured.values();
+  }
+
+  get size(): number {
+    return this.scalars.size + this.structured.size;
+  }
+}
+
 function validateParameter(
   name: string,
   type: ParameterType,

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
+import type { QueryResult } from "../src/query/engine";
+
 import {
   combineExplorerConditions,
   conditionEditorOperator,
@@ -38,6 +40,7 @@ import {
 import {
   mergeQueryResultRefs,
   queryHighlightStatus,
+  queryResultPresentation,
   queryWorkspaceVisibility,
 } from "../src/query/workbench";
 
@@ -76,11 +79,56 @@ test("collapses results without cancelling the query or hiding the way back", ()
   assert.match(workbenchSource, /action\("清空查询", "query-reset"\)/);
 });
 
-test("merges visible answer entities in stable section order", () => {
+test("merges buffered answer entities in stable section order", () => {
   assert.deepEqual(mergeQueryResultRefs(new Map([
     ["matches", ["subject:1", "person:2"]],
     ["paths", ["person:2", "character:3"]],
   ])), ["subject:1", "person:2", "character:3"]);
+});
+
+test("highlights every buffered query result while rendering only the first 50", () => {
+  const rows = Array.from({ length: 120 }, (_, index) => ({
+    ref: `subject:${index + 1}`,
+  }));
+  const result: QueryResult = {
+    rows,
+    evidence: rows.map(() => ({})),
+    columns: { ref: { type: "string", semantic: "subject.ref" } },
+    totalMatches: rows.length,
+    visibleMatches: rows.length,
+    hasMore: false,
+    stability: "exact",
+    queryDigest: "query",
+    releaseId: "release",
+    coverage: { schema: "atlas-coverage-v1", atoms: [], digest: "coverage" },
+    terminalEvidence: [],
+  };
+
+  const presentation = queryResultPresentation(result, 50);
+
+  assert.equal(presentation.visible.rows.length, 50);
+  assert.equal(presentation.visible.evidence.length, 50);
+  assert.equal(presentation.visible.hasMore, true);
+  assert.equal(presentation.highlightRefs.length, 120);
+  assert.deepEqual(presentation.highlightRefs.slice(0, 2), [
+    "subject:1",
+    "subject:2",
+  ]);
+  assert.equal(presentation.highlightRefs.at(-1), "subject:120");
+});
+
+test("requests complete highlights only for the initial section execution", () => {
+  const loadSection = workbenchSource.match(
+    /private async loadSection\([\s\S]*?\n  }(?=\n\n  private showError)/,
+  )?.[0];
+  assert.ok(loadSection);
+  assert.match(loadSection, /dependencies\.executeWithHighlights/);
+  const showMore = loadSection.match(
+    /const showMore = async \(\): Promise<void> => \{[\s\S]*?\n      };/,
+  )?.[0];
+  assert.ok(showMore);
+  assert.match(showMore, /dependencies\.execute\(section/);
+  assert.doesNotMatch(showMore, /executeWithHighlights/);
 });
 
 test("labels retained graph highlights as previous results after query edits", () => {

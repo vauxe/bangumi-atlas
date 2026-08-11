@@ -66,6 +66,8 @@ const CACHE_BUDGET = {
   search: 8_000_000,
   text: 20_000_000,
 } as const;
+const EPISODE_SUBJECT_CACHE_BUDGET = 256_000;
+const EPISODE_SUBJECT_ENTRY_WEIGHT = 64;
 const GEOMETRY_STRIDES = {
   "positions.bin": 12,
   "year.bin": 2,
@@ -141,7 +143,17 @@ const caches: Record<CacheFamily, WeightedLru<string, unknown>> = {
   search: new WeightedLru(CACHE_BUDGET.search),
   text: new WeightedLru(CACHE_BUDGET.text),
 };
-const wholePacks = new WeightedLru<string, ArrayBuffer>(PACK_CAP);
+interface PrefetchedPack {
+  off: number;
+  buffer: ArrayBuffer;
+}
+
+const prefetchedPacks = new WeightedLru<string, PrefetchedPack>(PACK_CAP);
+const prefetchedPackKeys = new Map<string, string[]>();
+const episodeSubjects = new WeightedLru<number, number | null>(
+  EPISODE_SUBJECT_CACHE_BUDGET,
+);
+const episodeSubjectLoads = new SharedAbortableMemo<number, number | null>();
 
 export function cacheUsage(): Record<CacheFamily, number> {
   return {
@@ -387,7 +399,7 @@ export async function loadManifest(): Promise<Manifest> {
   caches.structure.setBudget(budget.structure);
   caches.search.setBudget(budget.search);
   caches.text.setBudget(budget.text);
-  wholePacks.setBudget(limits.pack_cap);
+  prefetchedPacks.setBudget(limits.pack_cap);
   // 新 SiteRelease:清空不再被当前文件摘要引用的条目与更新状态
   releaseChanged = false;
   for (const cache of Object.values(caches)) cache.clear();
@@ -396,8 +408,12 @@ export async function loadManifest(): Promise<Manifest> {
   idxCache.clear();
   packAccess.clear();
   wholePackLoads.clear();
+  packRangeLoads.clear();
   packModes.clear();
-  wholePacks.clear();
+  prefetchedPacks.clear();
+  prefetchedPackKeys.clear();
+  episodeSubjects.clear();
+  episodeSubjectLoads.clear();
   rankBytes = null;
   rankPromise = null;
   charmap = null;
@@ -720,7 +736,48 @@ type PackMode = "range" | "whole";
  * 缓存一次,后续切片全部本地完成,并发调用合并为一个请求。 */
 const packAccess = new SharedAbortableMemo<string, PackAccess>();
 const wholePackLoads = new SharedAbortableMemo<string, ArrayBuffer>();
+const packRangeLoads = new SharedAbortableMemo<string, PackAccess>();
 const packModes = new Map<string, PackMode>();
+
+function packPrefetchKey(path: string, off: number, len: number): string {
+  return `${path}:${off}:${len}`;
+}
+
+function storePrefetchedPack(
+  path: string,
+  off: number,
+  buffer: ArrayBuffer,
+): void {
+  const key = packPrefetchKey(path, off, buffer.byteLength);
+  prefetchedPacks.set(key, { off, buffer }, buffer.byteLength);
+  const keys = prefetchedPackKeys.get(path) ?? [];
+  const previous = keys.indexOf(key);
+  if (previous >= 0) keys.splice(previous, 1);
+  keys.push(key);
+  prefetchedPackKeys.set(path, keys);
+}
+
+function prefetchedPack(
+  path: string,
+  off: number,
+  len: number,
+): PrefetchedPack | undefined {
+  const keys = prefetchedPackKeys.get(path);
+  if (!keys) return undefined;
+  for (let index = keys.length - 1; index >= 0; index--) {
+    const key = keys[index];
+    if (!key) continue;
+    const value = prefetchedPacks.get(key);
+    if (!value) {
+      keys.splice(index, 1);
+      continue;
+    }
+    if (off >= value.off && off + len <= value.off + value.buffer.byteLength)
+      return value;
+  }
+  if (!keys.length) prefetchedPackKeys.delete(path);
+  return undefined;
+}
 
 /** 全量扫描前显式预取一个受上限约束、内容寻址且摘要校验过的 pack。
  * 点查不调用它，仍保持 Range 成员读取。 */
@@ -729,8 +786,8 @@ export async function prefetchPack(
   signal?: AbortSignal,
 ): Promise<void> {
   signal?.throwIfAborted();
-  if (wholePacks.get(path)) return;
   const [size] = publishedMeta(path);
+  if (prefetchedPack(path, 0, size)) return;
   const cap = manifestRef?.limits.pack_cap ?? 0;
   if (size > cap)
     throw new SiteDataContractError(`${path} 超过整包预取上限 ${cap}`);
@@ -746,16 +803,57 @@ export async function prefetchPack(
         bytes.byteOffset,
         bytes.byteOffset + bytes.byteLength,
       ) as ArrayBuffer;
-      wholePacks.set(path, whole, whole.byteLength);
+      storePrefetchedPack(path, 0, whole);
       packModes.set(path, "whole");
       return whole;
     },
     signal,
   );
   // 同一时刻另一个大包可能触发 LRU；调用方仍可安全回退 Range。
-  if (!wholePacks.get(path))
-    wholePacks.set(path, buffer, buffer.byteLength);
+  if (!prefetchedPack(path, 0, size)) storePrefetchedPack(path, 0, buffer);
   packModes.set(path, "whole");
+}
+
+/** 全量扫描已知的连续成员区间时只预取该区间。Range 响应依赖成员
+ * CRC 与 Content-Range 校验；不支持 Range 的服务器仍回退完整 pack。 */
+export async function prefetchPackRange(
+  path: string,
+  off: number,
+  len: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  signal?.throwIfAborted();
+  const [size] = publishedMeta(path);
+  const cap = manifestRef?.limits.pack_cap ?? 0;
+  if (
+    !Number.isInteger(off) ||
+    off < 0 ||
+    !Number.isInteger(len) ||
+    len <= 0 ||
+    off + len > size ||
+    len > cap
+  ) throw new RangeError(`${path}: prefetch range [${off}, ${off + len}) is invalid`);
+  if (prefetchedPack(path, off, len)) return;
+  const key = packPrefetchKey(path, off, len);
+  const access = await packRangeLoads.get(
+    key,
+    async (workSignal) => {
+      const result = await rangeFetch(path, off, len, workSignal);
+      if (result.kind === "whole") {
+        storePrefetchedPack(path, 0, result.buffer);
+        packModes.set(path, "whole");
+      } else {
+        storePrefetchedPack(path, result.off, result.buffer);
+        packModes.set(path, "range");
+      }
+      return result;
+    },
+    signal,
+  );
+  if (!prefetchedPack(path, off, len)) {
+    if (access.kind === "whole") storePrefetchedPack(path, 0, access.buffer);
+    else storePrefetchedPack(path, access.off, access.buffer);
+  }
 }
 
 async function packSlice(
@@ -765,8 +863,12 @@ async function packSlice(
   signal?: AbortSignal,
 ): Promise<ArrayBuffer> {
   signal?.throwIfAborted();
-  const prefetched = wholePacks.get(path);
-  if (prefetched) return prefetched.slice(off, off + len);
+  const prefetched = prefetchedPack(path, off, len);
+  if (prefetched)
+    return prefetched.buffer.slice(
+      off - prefetched.off,
+      off - prefetched.off + len,
+    );
   const mode = packModes.get(path);
   if (mode === "whole") {
     // 整包被 LRU 淘汰后重新探测，兼容 Range 与无 Range 服务器。
@@ -782,7 +884,7 @@ async function packSlice(
       const result = await rangeFetch(path, off, len, workSignal);
       packModes.set(path, result.kind);
       if (result.kind === "whole")
-        wholePacks.set(path, result.buffer, result.buffer.byteLength);
+        storePrefetchedPack(path, 0, result.buffer);
       return result;
     },
     signal,
@@ -990,14 +1092,28 @@ export async function subjectForEpisode(
     episodeId >= index.count
   )
     return null;
-  const bytes = await packSlice(
-    "episode-subject.bin",
-    episodeId * 4,
-    4,
+  const cached = episodeSubjects.get(episodeId);
+  if (cached !== undefined) return cached;
+  return episodeSubjectLoads.get(
+    episodeId,
+    async (workSignal) => {
+      const bytes = await packSlice(
+        "episode-subject.bin",
+        episodeId * 4,
+        4,
+        workSignal,
+      );
+      const value = new DataView(bytes).getUint32(0, true);
+      const subject = value === EPISODE_SUBJECT_SENTINEL ? null : value;
+      episodeSubjects.set(
+        episodeId,
+        subject,
+        EPISODE_SUBJECT_ENTRY_WEIGHT,
+      );
+      return subject;
+    },
     signal,
   );
-  const value = new DataView(bytes).getUint32(0, true);
-  return value === EPISODE_SUBJECT_SENTINEL ? null : value;
 }
 
 /** FactRef -> one canonical participant EntityKey; the incidence remains authoritative. */
@@ -1228,12 +1344,14 @@ export function openNames(manifest: Manifest): Names {
     },
     row: rows.row,
     load: rows.load,
+    read: rows.read,
+    prefetch: (signal) => prefetchPack("names.pack", signal),
   };
 }
 
 /** 子串索引只保存 rank；完整匹配由独立别名块确认。 */
 export function openSearchAliases(manifest: Manifest): SearchAliases {
-  return openRankRows<SearchAliasRow>(
+  const rows = openRankRows<SearchAliasRow>(
     manifest,
     "search.alias",
     "search",
@@ -1253,6 +1371,10 @@ export function openSearchAliases(manifest: Manifest): SearchAliases {
       typeof row[1] === "string" &&
       (row[2] === 1 || row[2] === 2 || row[2] === 3),
   );
+  return {
+    ...rows,
+    prefetch: (signal) => prefetchPack("search.alias.pack", signal),
+  };
 }
 
 // ---- 搜索:自适应前缀目录 + 按需成员 ----

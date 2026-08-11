@@ -212,3 +212,45 @@ test("does not impose a hidden fact-read quota on paths", async () => {
   const result = await executeQuery(query, {}, boundedSource, { pageSize: 10 });
   assert.equal(result.rows.length, 2);
 });
+
+test("does not resolve non-target neighbors when the current depth reaches the target", async () => {
+  const direct: FactValue = {
+    kind: "fact",
+    factKind: "RELATES_TO",
+    ref: "fact:21",
+    multiplicity: 1,
+    roles: { source: "subject:2", target: "subject:3" },
+    fields: { relationType: 1, sortOrder: 0 },
+  };
+  const distractor: FactValue = {
+    kind: "fact",
+    factKind: "RELATES_TO",
+    ref: "fact:20",
+    multiplicity: 1,
+    roles: { source: "subject:2", target: "subject:4" },
+    fields: { relationType: 1, sortOrder: 0 },
+  };
+  const requested: string[] = [];
+  const focusedSource: QueryDataSource = {
+    scan: async function* () {},
+    entity: async (ref) => {
+      requested.push(ref);
+      return entityByRef.get(ref) ?? null;
+    },
+    facts: async function* (ref) {
+      if (ref === "subject:2") yield* [distractor, direct];
+    },
+  };
+
+  const query = pathQuery("subject:3");
+  const endpoints = query.operators.endpoints;
+  assert.equal(endpoints?.kind, "values");
+  if (endpoints?.kind === "values")
+    endpoints.rows = [["subject:2", "subject:3"]];
+  const result = await executeQuery(query, {}, focusedSource, {
+    pageSize: 10,
+  });
+
+  assert.equal(result.rows.length, 1);
+  assert.deepEqual(requested, ["subject:2", "subject:3"]);
+});

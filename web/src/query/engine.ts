@@ -1,4 +1,10 @@
-import { canonicalJson, normalizeQuery, queryDigest } from "./canonical";
+import {
+  CanonicalValueMap,
+  CanonicalValueSet,
+  canonicalJson,
+  normalizeQuery,
+  queryDigest,
+} from "./canonical";
 import {
   QUERY_CONTRACT,
   fieldDefinition,
@@ -37,6 +43,10 @@ import {
   type TagValue,
   type Truth,
 } from "./value";
+import {
+  queryRowEntityRefs,
+  type QueryEntityRef,
+} from "./result-entities";
 
 export type FieldValue =
   | LiteralValue
@@ -100,12 +110,14 @@ export interface QueryDataSource {
     owner: Owner,
     fields: readonly LookupField[],
     signal?: AbortSignal,
+    entityFields?: readonly string[],
   ): AsyncIterable<EntityValue>;
   fullText?(
     text: string,
     owner: Owner,
     field: FullTextField,
     signal?: AbortSignal,
+    entityFields?: readonly string[],
   ): AsyncIterable<EntityValue>;
   fullTextFact?(
     text: string,
@@ -138,6 +150,17 @@ export interface ExecutionOptions {
   pageSize: number;
   offset?: number;
   signal?: AbortSignal;
+  /** Receives every entity represented by the complete semantic result set.
+   * Delivery is independent from transport pagination and row order. */
+  onResultEntities?(entities: readonly QueryResultEntity[]): void;
+}
+
+export type QueryGraphEntityRef = `${Exclude<Owner, "episode">}:${number}`;
+
+export interface QueryResultEntity {
+  ref: QueryEntityRef;
+  /** Episode results resolve to their owning Subject on the star map. */
+  graphRef: QueryGraphEntityRef | null;
 }
 
 export interface QueryResult {
@@ -187,11 +210,13 @@ export type RowEvidence = Record<string, Evidence[]>;
 
 interface ExecutionContext {
   evidence: WeakMap<QueryRow, RowEvidence | (() => RowEvidence)>;
+  episodeGraphRefs: Map<QueryEntityRef, QueryGraphEntityRef | null>;
   scanFields: Map<string, readonly string[]>;
   scanAccess: ScanAccess;
 }
 
 interface ScanOrigin {
+  source: string;
   binding: string;
   owner: Owner;
 }
@@ -210,9 +235,9 @@ function collectExpressionFields(
       return;
     case "field": {
       for (const origin of origins.get(expression.binding) ?? []) {
-        const binding = fields.get(origin.binding) ?? new Set<string>();
-        binding.add(expression.field);
-        fields.set(origin.binding, binding);
+        const sourceFields = fields.get(origin.source) ?? new Set<string>();
+        sourceFields.add(expression.field);
+        fields.set(origin.source, sourceFields);
       }
       return;
     }
@@ -249,7 +274,7 @@ function scanFieldRequirements(
       case "scan":
         origins = new Map([[
           operator.binding,
-          [{ binding: operator.binding, owner: operator.owner }],
+          [{ source: id, binding: operator.binding, owner: operator.owner }],
         ]]);
         break;
       case "filter":
@@ -285,7 +310,7 @@ function scanFieldRequirements(
             if (!source) continue;
             const previous = origins.get(column.output) ?? [];
             const merged = new Map(
-              [...previous, ...source].map((origin) => [origin.binding, origin]),
+              [...previous, ...source].map((origin) => [origin.source, origin]),
             );
             origins.set(column.output, [...merged.values()]);
           }
@@ -293,7 +318,19 @@ function scanFieldRequirements(
         break;
       }
       case "lookup":
+        origins = new Map([[
+          operator.binding,
+          [{ source: id, binding: operator.binding, owner: operator.owner }],
+        ]]);
+        break;
       case "fullText":
+        origins = operator.target === "entity"
+          ? new Map([[
+              operator.binding,
+              [{ source: id, binding: operator.binding, owner: operator.owner }],
+            ]])
+          : new Map();
+        break;
       case "factLookup":
       case "values":
       case "aggregate":
@@ -330,11 +367,11 @@ function scanFieldRequirements(
   for (const [columnName, column] of Object.entries(resultColumns)) {
     for (const origin of resultOrigins.get(columnName) ?? []) {
       if (column.type !== `entity:${origin.owner}`) continue;
-      const required = fields.get(origin.binding) ?? new Set<string>();
+      const required = fields.get(origin.source) ?? new Set<string>();
       required.add("name");
       if (origin.owner === "subject" || origin.owner === "episode")
         required.add("nameCn");
-      fields.set(origin.binding, required);
+      fields.set(origin.source, required);
     }
   }
   return new Map(
@@ -492,11 +529,36 @@ function rowEvidence(context: ExecutionContext, row: QueryRow): RowEvidence {
   return inferred;
 }
 
+function rememberGraphEntities(context: ExecutionContext, row: QueryRow): QueryRow {
+  const remember = (value: RuntimeValue): void => {
+    if (Array.isArray(value)) return;
+    if (isEntityValue(value)) {
+      if (value.owner === "episode") {
+        const subjectRef = value.fields.subjectRef;
+        let graphRef: QueryGraphEntityRef | null = null;
+        if (typeof subjectRef === "string") {
+          const parsed = parseEntityRef(subjectRef);
+          if (parsed.owner !== "subject")
+            throw new TypeError("Episode subjectRef must identify a Subject");
+          graphRef = subjectRef as QueryGraphEntityRef;
+        }
+        context.episodeGraphRefs.set(value.ref, graphRef);
+      }
+      return;
+    }
+    if (isPathValue(value))
+      for (const node of value.nodes) remember(node);
+  };
+  for (const value of Object.values(row)) remember(value);
+  return row;
+}
+
 function rememberEvidence(
   context: ExecutionContext,
   row: QueryRow,
   evidence: RowEvidence,
 ): QueryRow {
+  rememberGraphEntities(context, row);
   context.evidence.set(row, evidence);
   return row;
 }
@@ -506,6 +568,7 @@ function rememberLazyEvidence(
   row: QueryRow,
   evidence: () => RowEvidence,
 ): QueryRow {
+  rememberGraphEntities(context, row);
   context.evidence.set(row, evidence);
   return row;
 }
@@ -571,7 +634,7 @@ interface AggregateState {
     sum: number;
     min: RuntimeValue | null;
     max: RuntimeValue | null;
-    distinct?: Set<string>;
+    distinct?: CanonicalValueSet;
   }[];
 }
 
@@ -589,7 +652,7 @@ function createAggregateState(
       min: null,
       max: null,
       ...(metric.function === "countDistinct"
-        ? { distinct: new Set<string>() }
+        ? { distinct: new CanonicalValueSet() }
         : {}),
     })),
   };
@@ -611,10 +674,7 @@ function addAggregateValue(
     const value = evaluate(metric.value, input);
     if (value === null || isMissing(value)) return;
     if (metric.function === "countDistinct") {
-      const key = canonicalJson(jsonValue(value));
-      if (!accumulator.distinct?.has(key)) {
-        accumulator.distinct?.add(key);
-      }
+      accumulator.distinct?.add(jsonValue(value));
       return;
     }
     accumulator.count++;
@@ -690,6 +750,12 @@ interface PathCandidate {
   value: PathValue;
   nodeRefs: Set<string>;
   factRefs: Set<string>;
+}
+
+interface PendingPathCandidate {
+  previous: PathCandidate;
+  toRef: `${Owner}:${number}`;
+  steps: PathStepValue[];
 }
 
 function endpoint(
@@ -779,9 +845,35 @@ async function findShortestPaths(
     factRefs: new Set(),
   }];
 
+  const materialize = async (
+    pending: ReadonlyMap<string, PendingPathCandidate>,
+  ): Promise<Map<string, PathCandidate>> => {
+    const result = new Map<string, PathCandidate>();
+    for (const [key, candidate] of pending) {
+      signal?.throwIfAborted();
+      const entity = await loadEntity(candidate.toRef);
+      if (!entity) continue;
+      result.set(key, {
+        value: {
+          kind: "path",
+          policy: "fewest-hops",
+          cost: candidate.previous.value.cost + 1,
+          nodes: [...candidate.previous.value.nodes, entity],
+          steps: candidate.steps,
+        },
+        nodeRefs: new Set([...candidate.previous.nodeRefs, candidate.toRef]),
+        factRefs: new Set([
+          ...candidate.previous.factRefs,
+          candidate.steps.at(-1)!.fact.ref,
+        ]),
+      });
+    }
+    return result;
+  };
+
   for (let depth = 0; depth < operator.maxHops && frontier.length; depth++) {
-    const next = new Map<string, PathCandidate>();
-    const found = new Map<string, PathCandidate>();
+    const nextPending = new Map<string, PendingPathCandidate>();
+    const foundPending = new Map<string, PendingPathCandidate>();
     for (const candidate of frontier) {
       signal?.throwIfAborted();
       const current = candidate.value.nodes.at(-1);
@@ -808,24 +900,17 @@ async function findShortestPaths(
               step.toRole,
             ]),
           });
-          const destination = toRef === target.ref ? found : next;
+          const destination = toRef === target.ref ? foundPending : nextPending;
           if (destination.has(key)) continue;
-          const entity = await loadEntity(toRef);
-          if (!entity) continue;
           destination.set(key, {
-            value: {
-              kind: "path",
-              policy: "fewest-hops",
-              cost: depth + 1,
-              nodes: [...candidate.value.nodes, entity],
-              steps,
-            },
-            nodeRefs: new Set([...candidate.nodeRefs, toRef]),
-            factRefs: new Set([...candidate.factRefs, fact.ref]),
+            previous: candidate,
+            toRef,
+            steps,
           });
         }
       }
     }
+    const found = await materialize(foundPending);
     if (found.size)
       return [...found.values()]
         .sort((left, right) => {
@@ -835,6 +920,7 @@ async function findShortestPaths(
         })
         .slice(0, operator.maxPaths)
         .map((candidate) => candidate.value);
+    const next = await materialize(nextPending);
     frontier = [...next.entries()]
       .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
       .map(([, candidate]) => candidate);
@@ -857,13 +943,13 @@ async function* rowsFor(
       for await (const entity of source.scan(
         operator.owner,
         signal,
-        context.scanFields.get(operator.binding) ?? [],
+        context.scanFields.get(id) ?? [],
         context.scanAccess,
       )) {
         signal?.throwIfAborted();
         if (entity.owner !== operator.owner)
           throw new TypeError("data source returned the wrong entity owner");
-        yield { [operator.binding]: entity };
+        yield rememberGraphEntities(context, { [operator.binding]: entity });
       }
       return;
     case "lookup": {
@@ -876,6 +962,7 @@ async function* rowsFor(
         operator.owner,
         operator.fields ?? ["name"],
         signal,
+        context.scanFields.get(id) ?? [],
       )) {
         signal?.throwIfAborted();
         if (entity.owner !== operator.owner)
@@ -957,6 +1044,7 @@ async function* rowsFor(
         operator.owner,
         operator.field,
         signal,
+        context.scanFields.get(id) ?? [],
       )) {
         signal?.throwIfAborted();
         if (entity.owner !== operator.owner)
@@ -1159,6 +1247,9 @@ async function* rowsFor(
     }
     case "aggregate": {
       const groups = new Map<string, AggregateState>();
+      const scalarGroups = operator.groupBy.length === 1
+        ? new CanonicalValueMap<AggregateState>()
+        : null;
       for await (const row of rowsFor(operator.input, operators, source, context, signal)) {
         signal?.throwIfAborted();
         const groupRow: QueryRow = {};
@@ -1167,21 +1258,34 @@ async function* rowsFor(
           groupRow[group.name] = evaluate(group.value, row);
           groupEvidence[group.name] = expressionEvidence(group.value, row, context);
         }
-        const key = rowKey(groupRow);
-        let state = groups.get(key);
-        if (!state) {
-          state = createAggregateState(operator, groupRow, groupEvidence);
-          groups.set(key, state);
+        const create = (): AggregateState =>
+          createAggregateState(operator, groupRow, groupEvidence);
+        let state: AggregateState;
+        if (scalarGroups) {
+          const groupName = operator.groupBy[0]!.name;
+          state = scalarGroups.getOrCreate(jsonValue(own(groupRow, groupName)), create);
+        } else {
+          const key = rowKey(groupRow);
+          state = groups.get(key) ?? create();
+          if (!groups.has(key)) groups.set(key, state);
         }
         addAggregateValue(operator, state, row);
       }
-      if (!groups.size && !operator.groupBy.length) {
+      if (!(scalarGroups?.size ?? groups.size) && !operator.groupBy.length) {
         const state = createAggregateState(operator, {}, {});
         groups.set(rowKey(state.row), state);
       }
-      for (const key of [...groups.keys()].sort()) {
+      const states = scalarGroups
+        ? [...scalarGroups.values()]
+        : [...groups.values()];
+      states.sort((left, right) => {
+        const a = rowKey(left.row);
+        const b = rowKey(right.row);
+        return a < b ? -1 : a > b ? 1 : 0;
+      });
+      for (const state of states) {
         signal?.throwIfAborted();
-        yield finishAggregate(id, operator, groups.get(key) as AggregateState, context);
+        yield finishAggregate(id, operator, state, context);
       }
       return;
     }
@@ -1314,7 +1418,8 @@ function rowKey(row: QueryRow): string {
   );
 }
 
-function compareOrderedValue(
+/** @internal Exported for deterministic performance-contract coverage. */
+export function compareOrderedValue(
   left: RuntimeValue,
   right: RuntimeValue,
   direction: "asc" | "desc",
@@ -1329,18 +1434,21 @@ function compareOrderedValue(
     }
     return leftNull === (nulls === "first") ? -1 : 1;
   }
-  const a = canonicalJson(jsonValue(left));
-  const b = canonicalJson(jsonValue(right));
   let order: number;
   if (typeof left === "number" && typeof right === "number")
     order = left < right ? -1 : left > right ? 1 : 0;
   else if (typeof left === "string" && typeof right === "string")
     order = left < right ? -1 : left > right ? 1 : 0;
-  else order = a < b ? -1 : a > b ? 1 : 0;
+  else {
+    const a = canonicalJson(jsonValue(left));
+    const b = canonicalJson(jsonValue(right));
+    order = a < b ? -1 : a > b ? 1 : 0;
+  }
   return direction === "asc" ? order : -order;
 }
 
-interface RankedRow {
+/** @internal Exported for deterministic performance-contract coverage. */
+export interface RankedRow {
   row: QueryRow;
   key: string | null;
   ordinal: number;
@@ -1371,13 +1479,16 @@ function compareRows(
   return left.ordinal - right.ordinal;
 }
 
-function insertTop(
+/** @internal Exported for deterministic performance-contract coverage. */
+export function insertTop(
   rows: RankedRow[],
   value: RankedRow,
   cap: number,
   orderBy: NonNullable<QueryDocument["orderBy"]>,
 ): void {
   if (cap === 0) return;
+  const boundary = rows.length === cap ? rows.at(-1) : undefined;
+  if (boundary && compareRows(boundary, value, orderBy) <= 0) return;
   let lo = 0;
   let hi = rows.length;
   while (lo < hi) {
@@ -1387,6 +1498,66 @@ function insertTop(
   }
   rows.splice(lo, 0, value);
   if (rows.length > cap) rows.pop();
+}
+
+interface RankedResultEntities {
+  ranked: RankedRow;
+  entities: QueryResultEntity[];
+}
+
+function compareRankedResultEntities(
+  left: RankedResultEntities,
+  right: RankedResultEntities,
+  orderBy: NonNullable<QueryDocument["orderBy"]>,
+): number {
+  return compareRows(left.ranked, right.ranked, orderBy);
+}
+
+/** Maintain a max-heap whose root is the worst row retained by the Top-N. */
+function insertResultEntityTop(
+  heap: RankedResultEntities[],
+  value: RankedResultEntities,
+  cap: number,
+  orderBy: NonNullable<QueryDocument["orderBy"]>,
+): void {
+  if (cap === 0) return;
+  const worse = (left: RankedResultEntities, right: RankedResultEntities): boolean =>
+    compareRankedResultEntities(left, right, orderBy) > 0;
+  const siftUp = (start: number): void => {
+    let index = start;
+    while (index > 0) {
+      const parent = (index - 1) >> 1;
+      if (!worse(heap[index] as RankedResultEntities, heap[parent] as RankedResultEntities))
+        break;
+      [heap[index], heap[parent]] = [heap[parent]!, heap[index]!];
+      index = parent;
+    }
+  };
+  const siftDown = (): void => {
+    let index = 0;
+    while (true) {
+      const left = index * 2 + 1;
+      if (left >= heap.length) return;
+      const right = left + 1;
+      const child = right < heap.length &&
+          worse(heap[right] as RankedResultEntities, heap[left] as RankedResultEntities)
+        ? right
+        : left;
+      if (!worse(heap[child] as RankedResultEntities, heap[index] as RankedResultEntities))
+        return;
+      [heap[index], heap[child]] = [heap[child]!, heap[index]!];
+      index = child;
+    }
+  };
+  if (heap.length < cap) {
+    heap.push(value);
+    siftUp(heap.length - 1);
+    return;
+  }
+  if (compareRankedResultEntities(value, heap[0] as RankedResultEntities, orderBy) >= 0)
+    return;
+  heap[0] = value;
+  siftDown();
 }
 
 export async function executeQuery(
@@ -1422,13 +1593,51 @@ export async function executeQuery(
   const top: RankedRow[] = [];
   const context: ExecutionContext = {
     evidence: new WeakMap(),
+    episodeGraphRefs: new Map(),
     scanFields: scanFieldRequirements(query.operators, query.root, columns),
     scanAccess: canStopAtLimit ? "stream" : "whole",
   };
   const metadata = Promise.all([queryDigest(query), coverageFor(query)]);
+  if (limit === 0) {
+    const [digest, coverage] = await metadata;
+    return {
+      rows: [],
+      evidence: [],
+      columns,
+      totalMatches: 0,
+      visibleMatches: 0,
+      hasMore: false,
+      stability: "exact",
+      queryDigest: digest,
+      releaseId: source.releaseId ?? null,
+      coverage,
+      terminalEvidence: [{ kind: "completed-domain", coverage: coverage.digest }],
+    };
+  }
   const distinct = query.distinct ? new Set<string>() : null;
+  const deferredEntities = options.onResultEntities &&
+      orderBy.length > 0 && Number.isFinite(limit)
+    ? [] as RankedResultEntities[]
+    : null;
   let totalMatches = 0;
   let ordinal = 0;
+  const publicEvidence = (row: QueryRow): RowEvidence => Object.fromEntries(
+    Object.entries(rowEvidence(context, row))
+      .filter(([column]) => visibleColumns.has(column)),
+  );
+  const resultEntities = (row: QueryRow): QueryResultEntity[] => {
+    const visibleRow = publicRow(row);
+    const refs = queryRowEntityRefs(visibleRow, publicEvidence(row));
+    return refs.map((ref) => {
+      const parsed = parseEntityRef(ref);
+      return {
+        ref,
+        graphRef: parsed.owner === "episode"
+          ? context.episodeGraphRefs.get(ref) ?? null
+          : ref as QueryGraphEntityRef,
+      };
+    });
+  };
 
   for await (const row of rowsFor(
     query.root,
@@ -1438,23 +1647,39 @@ export async function executeQuery(
     options.signal,
   )) {
     options.signal?.throwIfAborted();
+    rememberGraphEntities(context, row);
     const key = distinct ? rowKey(publicRow(row)) : null;
     if (key !== null && distinct?.has(key)) continue;
     if (key !== null) distinct?.add(key);
     totalMatches++;
-    const ranked = { row, key, ordinal: ordinal++ };
+    const currentOrdinal = ordinal++;
+    const ranked = { row, key, ordinal: currentOrdinal };
+    if (options.onResultEntities) {
+      const entities = resultEntities(row);
+      if (deferredEntities) {
+        insertResultEntityTop(
+          deferredEntities,
+          {
+            ranked,
+            entities,
+          },
+          limit,
+          orderBy,
+        );
+      } else if (entities.length) options.onResultEntities(entities);
+    }
     if (orderBy.length) insertTop(top, ranked, cap, orderBy);
     else if (top.length < cap) top.push(ranked);
     if (canStopAtLimit && totalMatches >= limit) break;
   }
 
+  if (deferredEntities)
+    for (const row of deferredEntities)
+      if (row.entities.length) options.onResultEntities?.(row.entities);
+
   totalMatches = Math.min(totalMatches, limit);
   const visibleMatches = totalMatches;
   const page = top.slice(offset, Math.min(offset + options.pageSize, visibleMatches));
-  const publicEvidence = (row: QueryRow): RowEvidence => Object.fromEntries(
-    Object.entries(rowEvidence(context, row))
-      .filter(([column]) => visibleColumns.has(column)),
-  );
   const [digest, coverage] = await metadata;
   return {
     rows: page.map((ranked) => publicRow(ranked.row)),

@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { queryResultGraphRanks } from "../src/query/graph-results";
+import {
+  queryGraphEntityKey,
+  queryResultGraphRanks,
+} from "../src/query/graph-results";
+
+test("maps structural result refs to their stable graph keys", () => {
+  assert.equal(queryGraphEntityKey("subject:7"), (1 << 24) | 7);
+  assert.equal(queryGraphEntityKey("person:8"), (2 << 24) | 8);
+  assert.equal(queryGraphEntityKey("character:9"), (3 << 24) | 9);
+  assert.equal(queryGraphEntityKey("person:99999999"), null);
+});
 
 test("maps visible entity refs to unique graph ranks", async () => {
   const subjectKey = (1 << 24) | 7;
