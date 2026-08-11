@@ -31,9 +31,13 @@ const NEARBY_NODE_NAME_SIZE = 13;
 
 /** 普通节点只在聚焦层级继续深入后显示名字，避免概览阶段文字成墙。 */
 export const NEARBY_LABEL_ZOOM = FOCUS_ZOOM + 1.3;
-/** 每个稳定视图最多补载并绘制这些普通节点名称。 */
-export const NEARBY_LABEL_LIMIT = 24;
+/** 候选数随屏幕面积增长，但保留硬上限约束名字块请求和布局开销。 */
+const NEARBY_LABEL_BASE_LIMIT = 24;
+export const NEARBY_LABEL_MAX_CANDIDATES = 64;
+const NEARBY_LABEL_CANDIDATE_AREA = 25_000;
 const NEARBY_LABEL_VIEW_RADIUS = 0.55;
+const NEARBY_LABEL_GAP = 4;
+const NEARBY_LABEL_COLLISION_PADDING = 2;
 
 export interface WorkingMember {
   rank: number;
@@ -51,6 +55,27 @@ interface RankedDistance {
   distance2: number;
 }
 
+export interface NearbyLabelOptions {
+  limit?: number;
+  /** 屏幕投影不可见的节点不占候选预算，也不触发名字读取。 */
+  visible?: (position: [number, number, number]) => boolean;
+}
+
+export function nearbyLabelCandidateLimit(
+  viewportWidth: number,
+  viewportHeight: number,
+): number {
+  const area = viewportWidth * viewportHeight;
+  if (!Number.isFinite(area) || area <= 0) return 0;
+  return Math.min(
+    NEARBY_LABEL_MAX_CANDIDATES,
+    Math.max(
+      NEARBY_LABEL_BASE_LIMIT,
+      Math.ceil(area / NEARBY_LABEL_CANDIDATE_AREA),
+    ),
+  );
+}
+
 /** 在枢轴平面可见范围内选最近节点。调用方只在相机稳定后执行，
  * 因而一次线性坐标扫描不会进入逐帧渲染路径。 */
 export function nearbyLabelRanks(
@@ -60,7 +85,7 @@ export function nearbyLabelRanks(
   zoom: number,
   viewportWidth: number,
   viewportHeight: number,
-  limit = NEARBY_LABEL_LIMIT,
+  options: NearbyLabelOptions = {},
 ): number[] {
   if (
     zoom < NEARBY_LABEL_ZOOM ||
@@ -72,10 +97,16 @@ export function nearbyLabelRanks(
     !target.every(Number.isFinite)
   ) return [];
 
-  const cap = Math.min(
-    NEARBY_LABEL_LIMIT,
-    Math.max(0, Math.floor(limit)),
+  const requested = options.limit ?? nearbyLabelCandidateLimit(
+    viewportWidth,
+    viewportHeight,
   );
+  const cap = Number.isFinite(requested)
+    ? Math.min(
+        NEARBY_LABEL_MAX_CANDIDATES,
+        Math.max(0, Math.floor(requested)),
+      )
+    : 0;
   if (!cap) return [];
   const radius =
     (Math.hypot(viewportWidth, viewportHeight) * NEARBY_LABEL_VIEW_RADIUS) /
@@ -91,14 +122,18 @@ export function nearbyLabelRanks(
 
   for (let rank = 0; rank < count; rank++) {
     const offset = rank * 3;
-    const dx = (positions[offset] ?? 0) - target[0];
-    const dy = (positions[offset + 1] ?? 0) - target[1];
-    const dz = (positions[offset + 2] ?? 0) - target[2];
+    const x = positions[offset] ?? 0;
+    const y = positions[offset + 1] ?? 0;
+    const z = positions[offset + 2] ?? 0;
+    const dx = x - target[0];
+    const dy = y - target[1];
+    const dz = z - target[2];
     const distance2 = dx * dx + dy * dy + dz * dz;
     if (!Number.isFinite(distance2) || distance2 > radius2) continue;
     const candidate = { rank, distance2 };
     if (nearest.length === cap && compare(candidate, nearest[cap - 1]!) >= 0)
       continue;
+    if (options.visible && !options.visible([x, y, z])) continue;
     const index = nearest.findIndex((current) => compare(candidate, current) < 0);
     nearest.splice(index < 0 ? nearest.length : index, 0, candidate);
     if (nearest.length > cap) nearest.pop();
@@ -116,6 +151,11 @@ export interface PerspectiveViewport {
   viewProjectionMatrix: readonly number[];
 }
 
+export interface LabelViewport extends PerspectiveViewport {
+  width: number;
+  height: number;
+}
+
 const clipW = (
   pos: readonly [number, number, number],
   viewport: PerspectiveViewport,
@@ -128,6 +168,26 @@ const clipW = (
     (m[15] ?? 0)
   );
 };
+
+/** 与最终图层共用的可见性判定，避免屏幕外候选占用名字预算。 */
+export function visibleLabelPoint(
+  pos: [number, number, number],
+  project: ScreenProjector,
+  viewport: LabelViewport,
+): [number, number] | null {
+  if (clipW(pos, viewport) <= 0) return null;
+  const point = project(pos);
+  if (!point) return null;
+  const [x, y] = point;
+  return Number.isFinite(x) &&
+      Number.isFinite(y) &&
+      x >= 0 &&
+      y >= 0 &&
+      x <= viewport.width &&
+      y <= viewport.height
+    ? point
+    : null;
+}
 
 /** TextLayer 的像素偏移最终会除以 clip.w；按同一投影矩阵反向补偿，
  * 使标签移到枢轴平面前后时仍保持目标 CSS 像素字号。 */
@@ -148,6 +208,7 @@ interface LabelItem {
   text: string;
   /** 数值越大越优先；工作集中为选中节点名 > 邻居名 > 关系名。 */
   priority: number;
+  pixelOffset?: [number, number];
 }
 
 export interface WorkingLabelData {
@@ -236,33 +297,81 @@ export function declutter(
   return kept;
 }
 
+/** 近场名字保持距离优先，并依次尝试节点四周的位置；所有位置都冲突时
+ * 才隐藏。偏移与碰撞框使用同一套像素几何，避免误判。 */
+function placeNearbyLabels(
+  items: LabelItem[],
+  project: ScreenProjector,
+  size: number,
+  viewport: LabelViewport,
+): LabelItem[] {
+  const occupied: Box[] = [];
+  const kept: LabelItem[] = [];
+  for (const item of [...items].sort((a, b) => b.priority - a.priority)) {
+    const point = project(item.position);
+    if (!point) continue;
+    const width = estWidth(item.text, size);
+    const height = size * 1.4;
+    const vertical = height / 2 + NEARBY_LABEL_GAP;
+    const horizontal = width / 2 + NEARBY_LABEL_GAP;
+    const offsets: [number, number][] = [
+      [0, -vertical],
+      [0, vertical],
+      [horizontal, 0],
+      [-horizontal, 0],
+    ];
+    for (const pixelOffset of offsets) {
+      const centerX = point[0] + pixelOffset[0];
+      const centerY = point[1] + pixelOffset[1];
+      const box = {
+        x: centerX - width / 2 - NEARBY_LABEL_COLLISION_PADDING,
+        y: centerY - height / 2 - NEARBY_LABEL_COLLISION_PADDING,
+        w: width + NEARBY_LABEL_COLLISION_PADDING * 2,
+        h: height + NEARBY_LABEL_COLLISION_PADDING * 2,
+      };
+      if (
+        box.x < 0 ||
+        box.y < 0 ||
+        box.x + box.w > viewport.width ||
+        box.y + box.h > viewport.height ||
+        occupied.some((current) => overlaps(current, box))
+      ) continue;
+      occupied.push(box);
+      kept.push({ ...item, pixelOffset });
+      break;
+    }
+  }
+  return kept;
+}
+
 /** 未选中状态的近景节点名。候选已由距离筛选，这里只负责名称缓存
  * 缺口、屏幕去重叠和轻于工作集的视觉层级。 */
 export function nearbyLabelLayers(
   members: WorkingMember[],
   nameOf: (rank: number) => string | null,
   project: ScreenProjector,
-  viewport: PerspectiveViewport,
+  viewport: LabelViewport,
 ): { layers: unknown[]; missing: number[] } {
   const items: LabelItem[] = [];
   const missing: number[] = [];
   members.forEach((member, index) => {
+    if (!visibleLabelPoint(member.pos, project, viewport)) return;
     const text = nameOf(member.rank);
     if (text) {
       items.push({
         position: member.pos,
         text,
-        priority: NEARBY_LABEL_LIMIT - index,
+        priority: members.length - index,
       });
     } else {
       missing.push(member.rank);
     }
   });
-  const nodes = declutter(
+  const nodes = placeNearbyLabels(
     items,
-    (position) => clipW(position, viewport) > 0 ? project(position) : null,
+    (position) => visibleLabelPoint(position, project, viewport),
     NEARBY_NODE_NAME_SIZE,
-    [],
+    viewport,
   );
   if (!nodes.length) return { layers: [], missing };
   const chars = new Set("0123456789…");
@@ -284,7 +393,7 @@ export function nearbyLabelLayers(
         getText: (d: LabelItem) => d.text,
         getSize: (d: LabelItem) =>
           perspectiveTextSize(d.position, NEARBY_NODE_NAME_SIZE, viewport),
-        getPixelOffset: [0, -13],
+        getPixelOffset: (d: LabelItem) => d.pixelOffset ?? [0, -13],
         getColor: [226, 236, 240, 235],
         outlineWidth: 2,
         outlineColor: [11, 14, 26, 225],

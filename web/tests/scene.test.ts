@@ -295,7 +295,7 @@ test("loads and draws nearby names only while no working set is selected", async
     };
     const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
       geo: {
-        positions: new Float32Array([0, 0, 0, 1, 0, 0, 20, 0, 0]),
+        positions: new Float32Array([0, 0, 0, 1, 0, 0, -3, 0, 0]),
         loaded: 3,
       },
       camera: {
@@ -319,6 +319,8 @@ test("loads and draws nearby names only while no working set is selected", async
     });
     const refresh = Reflect.get(scene, "refreshNearbyLabels") as () => void;
     refresh.call(scene);
+    // rank 2 在三维近邻半径内，但投影到视口左侧；它不应占用候选预算
+    // 或触发名字块请求。
     assert.deepEqual(Reflect.get(scene, "nearbyRanks"), [0, 1]);
 
     const buildLayers = Reflect.get(scene, "nearbyLabelLayers") as () => {
@@ -333,6 +335,90 @@ test("loads and draws nearby names only while no working set is selected", async
 
     state.selection = 0;
     assert.deepEqual(buildLayers.call(scene), []);
+  } finally {
+    state.selection = previousSelection;
+  }
+});
+
+test("loads the latest name batch after an in-flight request settles", async () => {
+  const loads: number[][] = [];
+  const completions: Array<() => void> = [];
+  let renders = 0;
+  const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
+    cb: {
+      loadNames: (ranks: number[]) => new Promise<void>((resolve) => {
+        loads.push([...ranks]);
+        completions.push(resolve);
+      }),
+    },
+    labelNamesPending: false,
+    queuedLabelRanks: null,
+    render: () => {
+      renders++;
+    },
+  });
+  const request = Reflect.get(scene, "requestLabelNames") as (
+    ranks: number[],
+  ) => void;
+
+  request.call(scene, [1]);
+  request.call(scene, [2]);
+  request.call(scene, [3]);
+  assert.deepEqual(loads, [[1]]);
+
+  completions.shift()?.();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(loads, [[1], [3]]);
+  assert.equal(renders, 0);
+
+  completions.shift()?.();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(renders, 1);
+  assert.equal(Reflect.get(scene, "labelNamesPending"), false);
+});
+
+test("rebuilds nearby label layout after a resize with the same ranks", () => {
+  const previousSelection = state.selection;
+  const renderedWidths: number[] = [];
+  try {
+    state.selection = null;
+    const viewport = {
+      width: 1_000,
+      height: 600,
+      focalDistance: 1,
+      viewProjectionMatrix: [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+      ],
+      project: () => [200, 200],
+    };
+    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
+      geo: {
+        positions: new Float32Array([0, 0, 0]),
+        loaded: 1,
+      },
+      camera: {
+        viewState: {
+          target: [0, 0, 0],
+          zoom: NEARBY_LABEL_ZOOM,
+          rotationX: 25,
+          rotationOrbit: 0,
+        },
+      },
+      deck: { getViewports: () => [viewport] },
+      nearbyRanks: [],
+      render: () => renderedWidths.push(viewport.width),
+    });
+    const refresh = Reflect.get(scene, "refreshNearbyLabels") as () => void;
+
+    refresh.call(scene);
+    viewport.width = 800;
+    refresh.call(scene);
+
+    assert.deepEqual(Reflect.get(scene, "nearbyRanks"), [0]);
+    assert.deepEqual(renderedWidths, [1_000, 800]);
   } finally {
     state.selection = previousSelection;
   }

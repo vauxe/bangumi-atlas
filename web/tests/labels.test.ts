@@ -6,7 +6,7 @@ import { OrbitViewport } from "@deck.gl/core";
 import {
   buildWorkingLabels,
   declutter,
-  NEARBY_LABEL_LIMIT,
+  NEARBY_LABEL_MAX_CANDIDATES,
   NEARBY_LABEL_ZOOM,
   nearbyLabelLayers,
   nearbyLabelRanks,
@@ -75,28 +75,64 @@ test("reveals only the nearest bounded node names in close view", () => {
       NEARBY_LABEL_ZOOM,
       1_000,
       600,
-      2,
+      { limit: 2 },
     ),
     [0, 2],
   );
-  const crowded = new Float32Array(30 * 3);
-  for (let rank = 0; rank < 30; rank++) crowded[rank * 3] = rank / 100;
-  assert.equal(
+  assert.deepEqual(
     nearbyLabelRanks(
-      crowded,
-      30,
+      positions,
+      4,
       [0, 0, 0],
       NEARBY_LABEL_ZOOM,
       1_000,
       600,
-      100,
+      { limit: 2, visible: ([x]) => x > 0 },
+    ),
+    [2, 1],
+  );
+  const crowded = new Float32Array(80 * 3);
+  for (let rank = 0; rank < 80; rank++) crowded[rank * 3] = rank / 100;
+  assert.equal(
+    nearbyLabelRanks(
+      crowded,
+      80,
+      [0, 0, 0],
+      NEARBY_LABEL_ZOOM,
+      1_000,
+      600,
+      { limit: 100 },
     ).length,
-    NEARBY_LABEL_LIMIT,
+    NEARBY_LABEL_MAX_CANDIDATES,
+  );
+  assert.equal(
+    nearbyLabelRanks(
+      crowded,
+      80,
+      [0, 0, 0],
+      NEARBY_LABEL_ZOOM,
+      1_000,
+      600,
+    ).length,
+    24,
+  );
+  assert.equal(
+    nearbyLabelRanks(
+      crowded,
+      80,
+      [0, 0, 0],
+      NEARBY_LABEL_ZOOM,
+      1_440,
+      900,
+    ).length,
+    52,
   );
 });
 
 test("builds a subdued nearby-name layer and reports uncached ranks", () => {
   const viewport = {
+    width: 400,
+    height: 300,
     focalDistance: 1,
     viewProjectionMatrix: [
       1, 0, 0, 0,
@@ -108,7 +144,7 @@ test("builds a subdued nearby-name layer and reports uncached ranks", () => {
   const { layers, missing } = nearbyLabelLayers(
     members,
     (rank) => rank === 0 ? "命运石之门" : null,
-    flat,
+    ([x, y]) => [x + 200, y + 150],
     viewport,
   );
 
@@ -126,6 +162,41 @@ test("builds a subdued nearby-name layer and reports uncached ranks", () => {
   assert.deepEqual(layer.props.data.map((item) => item.text), ["命运石之门"]);
   assert.ok((layer.props.getColor[3] ?? 255) < 245);
   assert.equal(layer.props.parameters.depthCompare, "always");
+});
+
+test("places nearby names around their nodes before hiding overlaps", () => {
+  const viewport = {
+    width: 400,
+    height: 300,
+    focalDistance: 1,
+    viewProjectionMatrix: [
+      1, 0, 0, 0,
+      0, 1, 0, 0,
+      0, 0, 1, 0,
+      0, 0, 0, 1,
+    ],
+  };
+  const { layers } = nearbyLabelLayers(
+    [
+      { rank: 0, pos: [100, 100, 0] },
+      { rank: 1, pos: [120, 100, 0] },
+    ],
+    () => "甲乙丙丁",
+    flat,
+    viewport,
+  );
+  const layer = layers[0] as {
+    props: {
+      data: { pixelOffset: [number, number] }[];
+      getPixelOffset: (item: { pixelOffset: [number, number] }) => [number, number];
+    };
+  };
+
+  assert.equal(layer.props.data.length, 2);
+  assert.notDeepEqual(
+    layer.props.getPixelOffset(layer.props.data[0]!),
+    layer.props.getPixelOffset(layer.props.data[1]!),
+  );
 });
 
 test("declutters by priority: the selected node's name always wins", () => {

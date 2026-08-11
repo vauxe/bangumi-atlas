@@ -29,6 +29,7 @@ import {
   NEARBY_LABEL_ZOOM,
   nearbyLabelLayers as makeNearbyLabelLayers,
   nearbyLabelRanks,
+  visibleLabelPoint,
   workingLabelLayers,
 } from "./labels";
 import { state } from "./store";
@@ -378,17 +379,29 @@ export class Scene {
   }
 
   private labelNamesPending = false;
+  /** 名字块只串行读取；相机移动期间只保留最后一次缺失集合。 */
+  private queuedLabelRanks: number[] | null = null;
 
   private requestLabelNames(ranks: number[]): void {
     const load = this.cb.loadNames;
-    if (!load || this.labelNamesPending) return;
+    if (!load || !ranks.length) return;
+    if (this.labelNamesPending) {
+      this.queuedLabelRanks = [...ranks];
+      return;
+    }
     this.labelNamesPending = true;
-    load(ranks)
-      .then(() => this.render())
-      .catch(() => undefined)
-      .finally(() => {
-        this.labelNamesPending = false;
-      });
+    load(ranks).then(
+      () => this.finishLabelNameRequest(true),
+      () => this.finishLabelNameRequest(false),
+    ).catch(() => undefined);
+  }
+
+  private finishLabelNameRequest(loaded: boolean): void {
+    this.labelNamesPending = false;
+    const queued = this.queuedLabelRanks;
+    this.queuedLabelRanks = null;
+    if (queued?.length) this.requestLabelNames(queued);
+    else if (loaded) this.render();
   }
 
   /** 相机连续运动时只重置一个定时器；稳定后才扫描坐标，避免把
@@ -412,6 +425,10 @@ export class Scene {
 
   private refreshNearbyLabels(): void {
     const viewport = this.deck.getViewports()[0];
+    const project = (position: [number, number, number]): [number, number] => {
+      const projected = viewport?.project(position) as number[] | undefined;
+      return [projected?.[0] ?? NaN, projected?.[1] ?? NaN];
+    };
     const next =
       state.selection === null && viewport
         ? nearbyLabelRanks(
@@ -421,12 +438,14 @@ export class Scene {
             this.camera.viewState.zoom,
             viewport.width,
             viewport.height,
+            {
+              visible: (position) =>
+                visibleLabelPoint(position, project, viewport) !== null,
+            },
           )
         : [];
-    if (
-      next.length === this.nearbyRanks.length &&
-      next.every((rank, index) => rank === this.nearbyRanks[index])
-    ) return;
+    // 排名相同不代表布局相同：像素偏移、可见性与碰撞选择都依赖
+    // 当前视口投影。稳定扫描也承担 resize 后的布局失效通知。
     this.nearbyRanks = next;
     this.render();
   }
@@ -444,19 +463,9 @@ export class Scene {
     const { layers, missing } = makeNearbyLabelLayers(
       members,
       nameOf,
-      (position) => {
+      (position): [number, number] => {
         const projected = viewport.project(position) as number[];
-        const x = projected[0] ?? NaN;
-        const y = projected[1] ?? NaN;
-        if (
-          !Number.isFinite(x) ||
-          !Number.isFinite(y) ||
-          x < 0 ||
-          y < 0 ||
-          x > viewport.width ||
-          y > viewport.height
-        ) return null;
-        return [x, y];
+        return [projected[0] ?? NaN, projected[1] ?? NaN];
       },
       viewport,
     );
