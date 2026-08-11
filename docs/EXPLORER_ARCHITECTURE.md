@@ -358,7 +358,7 @@ Pages 只接收 Actions 生成的构建产物；上游数据和中间产物不�
 |---|---|
 | Push | Python 测试、Ruff lint/格式、mypy、Web 单测、TypeScript、生产构建 |
 | Pull Request | Push 门禁，以及新增依赖的 high/critical 漏洞审查 |
-| 每周发布 | 上述构建门禁、源枚举漂移、数据库与 SiteRelease 独立对账、真实三维布局报告、本地 HTTP 端到端 smoke 和完整 staging 体积 |
+| 每周发布 | 上述构建门禁、源枚举漂移、数据库与 SiteRelease 独立对账、真实三维布局报告、本地 HTTP 端到端 smoke（精确 206）和完整 staging 体积 |
 
 只有真实三维拓扑布局能进入发布。构建路径唯一，步骤见 [BUILD.md](BUILD.md)。
 
@@ -366,9 +366,10 @@ Pages 只接收 Actions 生成的构建产物；上游数据和中间产物不�
 `dependency-review` 状态通过，禁止 force push；CodeQL 使用 GitHub 默认设置扫描
 Python 和 JavaScript/TypeScript。这两项属于 GitHub 仓库设置，不由工作流文件自行开启。
 
-这些门禁验证数据与构建正确性，但不包含真实浏览器性能和可访问性测试。相关目标只能
-通过独立测量验证，报告必须注明设备、数据版本和方法。不能仅凭单元测试通过，就认定
-这些目标已经达到。
+本地 smoke 证明实际加载链发出 Range 请求且 staging 响应满足协议，但不证明 Pages 的
+生产传输语义。这项门禁也不包含真实浏览器交互、性能和可访问性测试；相关目标只能通过
+独立测量验证，报告必须注明设备、数据版本和方法。不能仅凭单元测试或 Range smoke
+通过，就认定这些目标已经达到。
 
 站点超过 Pages 体积门禁时构建失败；实际流量接近托管配额前迁移到
 Cloudflare Pages/R2，需要服务端计算时再评估 Workers。

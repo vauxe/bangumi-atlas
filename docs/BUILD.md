@@ -19,10 +19,10 @@ npm --prefix web ci
 与每次 push 的 CI 门禁相同，通过后再进入数据管道。
 
 ```bash
-uv run python -m unittest discover -s tests
-uv run ruff check scripts tests
-uv run ruff format --check scripts tests
-uv run mypy scripts
+uv run --frozen python -m unittest discover -s tests
+uv run --frozen ruff check scripts tests
+uv run --frozen ruff format --check scripts tests
+uv run --frozen mypy scripts
 ```
 
 ## 3. 数据管道
@@ -31,12 +31,12 @@ uv run mypy scripts
 [DATA_ARCHITECTURE.md](DATA_ARCHITECTURE.md) §5。
 
 ```bash
-uv run python -m scripts.fetch_dump
-uv run python -m scripts.build_db
-uv run python -m scripts.verify_db
-uv run python -m scripts.layout
-uv run python -m scripts.bake_site
-uv run python -m scripts.verify_site
+uv run --frozen python -m scripts.fetch_dump
+uv run --frozen python -m scripts.build_db
+uv run --frozen python -m scripts.verify_db
+uv run --frozen python -m scripts.layout
+uv run --frozen python -m scripts.bake_site
+uv run --frozen python -m scripts.verify_site
 ```
 
 `layout.py` 默认启用本地缓存。Parquet generation 校验每个输入文件后，布局直接用清单中
@@ -72,7 +72,7 @@ SHA-256、字节数和行数与 `data/dump` 严格对齐；因此“新 zip + �
 `data/layout/cache.json`。需要主动重算时使用：
 
 ```bash
-uv run python -m scripts.layout --force
+uv run --frozen python -m scripts.layout --force
 ```
 
 缓存中的坐标不直接复制进 SiteRelease，但其输入摘要、实现身份和两份布局产物摘要属于
@@ -117,7 +117,8 @@ npm --prefix web run build
 ## 5. 发布前验证
 
 在完整的 staging `site/` 上做端到端冒烟，再核对体积门禁（阈值见 `weekly.yml`）。
-通过后整个 `site/` 目录作为 Pages artifact 发布。
+smoke 要求其实际发出的每个 Range 请求得到精确 `206` 与 `Content-Range`。通过后整个
+`site/` 目录作为 Pages artifact 发布。生产托管的传输语义不由本地 smoke 证明。
 
 ```bash
 npm --prefix web run serve:smoke &

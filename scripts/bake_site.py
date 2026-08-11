@@ -616,6 +616,7 @@ def emit_sorted_parquet_text(
 def emit_fact_summary(
     items: Iterable[tuple[int, Any]],
     *,
+    non_empty_count: int,
     empty_count: int,
     raw_bytes: int,
     on_member: (
@@ -627,6 +628,11 @@ def emit_fact_summary(
     width = sr.TEXT_BLOCK_IDS[family]
     level = sr.GZIP_LEVELS[family]
     ordered_items = sorted(dict(items).items())
+    if non_empty_count < len(ordered_items):
+        raise ValueError(
+            "fact-summary source non-empty count is smaller than stored "
+            "FactRefs"
+        )
     pack = RolloverPack(family)
     ranges = emit_ranged(
         pack,
@@ -649,7 +655,7 @@ def emit_fact_summary(
             "ranges": ranges,
         },
         {
-            "non_empty": len(ordered_items),
+            "non_empty": non_empty_count,
             "empty": empty_count,
             "raw_bytes": raw_bytes,
             "compressed_bytes": sum(sizes),
@@ -1836,6 +1842,7 @@ def bake_release(  # noqa: PLR0915
         n_incidence = 0
         n_facts = 0
         fs_items: list[tuple[int, Any]] = []
+        fs_non_empty = 0
         fs_empty = 0
         fs_raw = 0
         fact_anchors = array("I")
@@ -1859,6 +1866,7 @@ def bake_release(  # noqa: PLR0915
                     text = inc_attrs[1]
                     if text:
                         fs_items.append((ref, text))
+                        fs_non_empty += mult
                         fs_raw += len(str(text).encode("utf-8")) * mult
                     else:
                         fs_empty += mult
@@ -2382,6 +2390,7 @@ def bake_release(  # noqa: PLR0915
     fact_summary_dir, fact_summary_stats, fact_summary_sizes = (
         emit_fact_summary(
             fs_items,
+            non_empty_count=fs_non_empty,
             empty_count=fs_empty,
             raw_bytes=fs_raw,
             on_member=lambda loc, chunk: text_search.add(

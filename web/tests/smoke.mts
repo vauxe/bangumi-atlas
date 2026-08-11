@@ -21,12 +21,30 @@ import { SiteQuerySearchIndex } from "../src/query/site-search";
 const BASE = process.env["SMOKE_BASE"] ?? "http://127.0.0.1:8391";
 const realFetch = globalThis.fetch;
 let requests = 0;
+let rangeRequests = 0;
 globalThis.fetch = (async (
   input: string | URL | Request,
   init?: RequestInit,
 ) => {
   requests++;
-  return realFetch(new URL(String(input), `${BASE}/`), init);
+  const request = new Request(
+    typeof input === "string" ? new URL(input, `${BASE}/`) : input,
+    init,
+  );
+  const url = new URL(request.url);
+  const requestedRange = request.headers.get("Range");
+  const response = await realFetch(request);
+  if (requestedRange !== null) {
+    rangeRequests++;
+    assert.equal(
+      response.status,
+      206,
+      `${url}: Range ${requestedRange} returned HTTP ${response.status}`,
+    );
+    // rangeFetch validates the exact Content-Range, manifest total, and body
+    // length; the smoke wrapper additionally forbids its whole-file fallback.
+  }
+  return response;
 }) as typeof fetch;
 
 const manifest = await loadManifest();
@@ -92,11 +110,16 @@ console.log(`collision scan bounded: ${collisionRequests} requests`);
 const keyObject = manifest.files["key.bin"]?.[2];
 assert.ok(keyObject, "manifest contains the key.bin physical object");
 const keyResponse = await realFetch(`${BASE}/data/${keyObject}`);
-assert.equal(keyResponse.status, 200);
+assert.equal(
+  keyResponse.status,
+  200,
+  "subject setup must not manufacture HTTP Range evidence",
+);
 const keyBytes = await keyResponse.arrayBuffer();
 const keys = new Uint32Array(keyBytes);
 const subjectKey = [...keys.slice(0, 50)].find((k) => k >>> 24 === 1);
 assert.ok(subjectKey);
+const rangesBeforeDataLookup = rangeRequests;
 
 const rank = data.rankOf(subjectKey);
 assert.ok(rank !== null && rank < 50, "rankOf 与 key.bin 一致");
@@ -238,5 +261,10 @@ const mappings = await data.mappings();
 assert.ok(Object.keys(mappings.fact_labels["RELATES_TO"] ?? {}).length > 0);
 console.log("mappings ok");
 
+assert.ok(
+  rangeRequests > rangesBeforeDataLookup,
+  "Data lookups must naturally exercise HTTP Range",
+);
+console.log(`HTTP Range ok: ${rangeRequests} exact 206 responses`);
 console.log(`bounded caches ok (total ${requests} requests)`);
 console.log("SMOKE PASS");

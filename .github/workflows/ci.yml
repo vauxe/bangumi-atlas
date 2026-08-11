@@ -28,10 +28,10 @@ jobs:
       - run: uv sync --frozen
       - name: Test, lint, format-check, and type-check pipeline
         run: |
-          uv run python -m unittest discover -s tests
-          uv run ruff check scripts tests
-          uv run ruff format --check scripts tests
-          uv run mypy scripts
+          uv run --frozen python -m unittest discover -s tests
+          uv run --frozen ruff check scripts tests
+          uv run --frozen ruff format --check scripts tests
+          uv run --frozen mypy scripts
 
   web:
     runs-on: ubuntu-24.04
