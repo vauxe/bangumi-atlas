@@ -1,6 +1,10 @@
 import type { QueryResult } from "./engine";
 import { SiteRuntimeError } from "../site-error";
 import {
+  queryHighlightTransferables,
+  type QueryHighlights,
+} from "./highlights";
+import {
   QUERY_WIRE_SCHEMA,
   encodeQueryResult,
   type QueryExecutionRequest,
@@ -11,7 +15,12 @@ import {
 type Execute = (
   request: QueryExecutionRequest,
   signal: AbortSignal,
-) => Promise<QueryResult>;
+) => Promise<QueryResult | QueryWorkerExecution>;
+
+export interface QueryWorkerExecution {
+  result: QueryResult;
+  highlights?: QueryHighlights;
+}
 
 export interface QueryWorkerRuntime {
   receive(message: unknown): void;
@@ -32,7 +41,7 @@ function publicError(
 
 export function createQueryWorkerRuntime(
   execute: Execute,
-  post: (response: QueryWorkerResponse) => void,
+  post: (response: QueryWorkerResponse, transfer?: Transferable[]) => void,
 ): QueryWorkerRuntime {
   const active = new Map<string, AbortController>();
   return {
@@ -69,17 +78,25 @@ export function createQueryWorkerRuntime(
       active.set(request.requestId, controller);
       void (async () => {
         try {
-          const result = await execute(
+          const output = await execute(
             message as QueryExecutionRequest,
             controller.signal,
           );
           controller.signal.throwIfAborted();
+          const execution: QueryWorkerExecution = "result" in output
+            ? output
+            : { result: output };
           post({
             schema: QUERY_WIRE_SCHEMA,
             type: "result",
             requestId: request.requestId,
-            result: encodeQueryResult(result),
-          });
+            result: encodeQueryResult(execution.result),
+            ...(execution.highlights
+              ? { highlights: execution.highlights }
+              : {}),
+          }, execution.highlights
+            ? queryHighlightTransferables(execution.highlights)
+            : []);
         } catch (error) {
           const failure = publicError(error, controller.signal.aborted);
           post({

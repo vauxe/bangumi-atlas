@@ -129,6 +129,13 @@ export interface Names {
   row(rank: number): NameRow | null;
   /** 可选信号取消尚未完成的名称块读取。 */
   load(ranks: Iterable<number>, signal?: AbortSignal): Promise<void>;
+  /** 返回一次读取中的稳定行快照，供查询 Worker 避免结构实体解码。 */
+  read?(
+    ranks: Iterable<number>,
+    signal?: AbortSignal,
+  ): Promise<Map<number, NameRow>>;
+  /** Exhaustive identity lookups may switch from scattered blocks to one pack read. */
+  prefetch?(signal?: AbortSignal): Promise<void>;
 }
 
 export type SearchAlias = [normalized: string, matched: string];
@@ -142,6 +149,8 @@ export type SearchAliasRow = [
 export interface SearchAliases {
   row(rank: number): SearchAliasRow | null;
   load(ranks: Iterable<number>, signal?: AbortSignal): Promise<void>;
+  /** Exhaustive query scans may switch from scattered blocks to one pack read. */
+  prefetch?(signal?: AbortSignal): Promise<void>;
   /** 返回一次读取中的稳定行快照，避免分块在校验前被 LRU 淘汰。 */
   read(
     ranks: Iterable<number>,

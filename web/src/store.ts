@@ -8,8 +8,8 @@ export interface State {
   /** 与 neighbors 对齐的解码关系显示文本(工作集边 tooltip 用);
    * 反向文案与颜色是 Scene Model 显示规则,不是数据事实。 */
   neighborLabels: string[];
-  /** 当前答案中已呈现、且能映射到 3D Canvas 的实体 ranks。 */
-  queryResultRanks: number[];
+  /** 当前完整答案中能映射到 3D Canvas 的去重实体 ranks。 */
+  queryResultRanks: Uint32Array;
   /** 页面唯一的权威查询。Canvas 相机和实体选择只是视图状态。 */
   queryBundle: QueryBundle | null;
 }
@@ -19,7 +19,7 @@ export const state: State = {
   selectionKey: null,
   neighbors: [],
   neighborLabels: [],
-  queryResultRanks: [],
+  queryResultRanks: new Uint32Array(),
   queryBundle: null,
 };
 

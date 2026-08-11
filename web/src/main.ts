@@ -21,7 +21,7 @@ import {
 import { relationNeighbors } from "./neighbors";
 import { parseEntityRef, QUERY_CONTRACT, type Owner } from "./query/contract";
 import { compileExplorerQuery } from "./query/explorer";
-import { queryResultGraphRanks } from "./query/graph-results";
+import { mergeQueryHighlights } from "./query/highlights";
 import {
   rankEntitySuggestions,
   type EntitySuggestion,
@@ -541,22 +541,10 @@ async function boot(): Promise<void> {
     await select(rank, "fly", true, key);
   };
 
-  let queryHighlightEpoch = 0;
-  const highlightQueryResultEntities = async (
-    refs: readonly string[],
-  ): Promise<number> => {
-    const epoch = ++queryHighlightEpoch;
-    if (!refs.length) {
-      state.queryResultRanks = [];
-      notify();
-      return 0;
-    }
-    await ensureRankIndex();
-    const ranks = await queryResultGraphRanks(refs, {
-      episodeSubjectKey: async (id) => (await data.episode(id))?.subject ?? null,
-      rankOfKey: rankOfKeyLocal,
-    });
-    if (epoch !== queryHighlightEpoch) return 0;
+  const highlightQueryResults = (
+    highlights: Parameters<typeof mergeQueryHighlights>[0],
+  ): number => {
+    const ranks = mergeQueryHighlights(highlights);
     state.queryResultRanks = ranks;
     notify();
     return ranks.length;
@@ -566,6 +554,12 @@ async function boot(): Promise<void> {
     host: $("#query-dock"),
     execute: (section, options) =>
       client().execute(section.query, section.parameterValues ?? {}, options),
+    executeWithHighlights: (section, options) =>
+      client().executeWithHighlights(
+        section.query,
+        section.parameterValues ?? {},
+        options,
+      ),
     selectedEntity: async () => {
       const key = state.selectionKey;
       const rank = state.selection;
@@ -683,7 +677,7 @@ async function boot(): Promise<void> {
     releaseId: () => manifest.version,
     mappings: () => data.mappings(),
     onEntity: navigateEntity,
-    onResultEntities: highlightQueryResultEntities,
+    onResultHighlights: highlightQueryResults,
     updateUrl: replaceUrl,
     pushUrl,
   });

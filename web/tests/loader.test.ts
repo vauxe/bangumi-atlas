@@ -13,6 +13,7 @@ import {
   openGeometry,
   pointByRank,
   prefetchPack,
+  prefetchPackRange,
   rankOfKey,
   subjectForEpisode,
   ensureRankIndex,
@@ -1364,7 +1365,7 @@ test("decodes the u24 rank-by-key reverse index", async () => {
   assert.equal(rankOfKey((2 << 24) | 1), null);
 });
 
-test("resolves an Episode id to its owning Subject with one fixed-width lookup", async () => {
+test("resolves and caches an Episode owning Subject from fixed-width lookups", async () => {
   const bytes = u32le([0xffffffff, 42, 7]);
   const manifest = {
     ...testManifest({
@@ -1376,14 +1377,26 @@ test("resolves an Episode id to its owning Subject with one fixed-width lookup",
       count: 3,
     },
   };
-  await installFetch(manifest, async () =>
-    new Response(bytes.buffer as ArrayBuffer),
-  );
+  let requests = 0;
+  await installFetch(manifest, async (_path, init) => {
+    requests++;
+    const range = new Headers(init?.headers).get("Range");
+    const match = /^bytes=(\d+)-(\d+)$/.exec(range ?? "");
+    assert.ok(match);
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    return new Response(body(bytes.slice(start, end + 1)), {
+      status: 206,
+      headers: { "Content-Range": `bytes ${start}-${end}/${bytes.byteLength}` },
+    });
+  });
 
   assert.equal(await subjectForEpisode(0), null);
   assert.equal(await subjectForEpisode(1), 42);
   assert.equal(await subjectForEpisode(2), 7);
+  assert.equal(await subjectForEpisode(1), 42);
   assert.equal(await subjectForEpisode(3), null);
+  assert.equal(requests, 3);
 });
 
 test("shares one whole-pack fallback across concurrent members", async () => {
@@ -1460,6 +1473,61 @@ test("prefetches a range-capable pack once for a local full scan", async () => {
   );
 
   assert.deepEqual(ranges, [null]);
+});
+
+test("prefetches and reuses one contiguous range for a partial scan", async () => {
+  const first: NameRow[] = [["a", "A", 1]];
+  const second: NameRow[] = [["b", "B", 2]];
+  const third: NameRow[] = [["c", "C", 3]];
+  const firstGzip = gzipSync(JSON.stringify(first));
+  const secondGzip = gzipSync(JSON.stringify(second));
+  const thirdGzip = gzipSync(JSON.stringify(third));
+  const pack = new Uint8Array(Buffer.concat([
+    firstGzip,
+    secondGzip,
+    thirdGzip,
+  ]));
+  const manifest = testManifest({
+    "facts.pack": [pack.byteLength, hash(pack)],
+  });
+  const ranges: Array<string | null> = [];
+  await installFetch(manifest, async (_path, init) => {
+    const range = new Headers(init?.headers).get("Range");
+    ranges.push(range);
+    if (!range) return new Response(body(pack));
+    const match = /^bytes=(\d+)-(\d+)$/.exec(range);
+    assert.ok(match);
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    return new Response(body(pack.slice(start, end + 1)), {
+      status: 206,
+      headers: {
+        "Content-Range": `bytes ${start}-${end}/${pack.byteLength}`,
+      },
+    });
+  });
+
+  const rangeOffset = firstGzip.byteLength;
+  const rangeLength = secondGzip.byteLength + thirdGzip.byteLength;
+  await prefetchPackRange("facts.pack", rangeOffset, rangeLength);
+  assert.deepEqual(
+    await member("structure", "facts.pack", rangeOffset, secondGzip.byteLength),
+    second,
+  );
+  assert.deepEqual(
+    await member(
+      "structure",
+      "facts.pack",
+      rangeOffset + secondGzip.byteLength,
+      thirdGzip.byteLength,
+    ),
+    third,
+  );
+  await prefetchPackRange("facts.pack", rangeOffset, rangeLength);
+
+  assert.deepEqual(ranges, [
+    `bytes=${rangeOffset}-${pack.byteLength - 1}`,
+  ]);
 });
 
 test("bounds whole-pack fallbacks with a weighted LRU", async () => {

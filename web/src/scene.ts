@@ -105,7 +105,7 @@ export interface QueryHighlightItem {
 }
 
 export function queryHighlightItems(
-  ranks: readonly number[],
+  ranks: Iterable<number>,
   positionOf: (rank: number) => [number, number, number] | null,
 ): QueryHighlightItem[] {
   const seen = new Set<number>();
@@ -229,6 +229,19 @@ interface ContextData {
   attributes: Record<string, unknown>;
 }
 
+interface QueryResultDrawing {
+  source: Uint32Array;
+  loaded: number;
+  sparseSize: number;
+  ranks: number[];
+  data: {
+    length: number;
+    attributes: {
+      getPosition: { value: Float32Array; size: number };
+    };
+  };
+}
+
 export interface SceneCallbacks {
   onPick: (rank: number | null) => void;
   onHover: (rank: number | null, x: number, y: number) => void;
@@ -257,6 +270,7 @@ export class Scene {
 
   private contextData: ContextData | null = null;
   private contextLength = -1;
+  private queryResultDrawingCache: QueryResultDrawing | null = null;
 
   private wsAnimStart = 0;
   private wsRaf = 0;
@@ -895,12 +909,21 @@ export class Scene {
     return layers;
   }
 
-  private queryResultLayers(): unknown[] {
+  private queryResultDrawing(): QueryResultDrawing | null {
+    const source = state.queryResultRanks;
+    const geometry = this.geo as Geometry | undefined;
+    const loaded = geometry?.loaded ?? -1;
+    const sparseSize = geometry?.sparse.size ?? -1;
+    const cached = this.queryResultDrawingCache;
+    if (
+      cached?.source === source &&
+      cached.loaded === loaded &&
+      cached.sparseSize === sparseSize
+    ) return cached.data.length ? cached : null;
     const items = queryHighlightItems(
-      state.queryResultRanks,
+      source,
       (rank) => this.posOf(rank),
     );
-    if (!items.length) return [];
     const ranks = items.map((item) => item.rank);
     const positions = new Float32Array(items.length * 3);
     items.forEach((item, index) => positions.set(item.position, index * 3));
@@ -908,6 +931,14 @@ export class Scene {
       length: items.length,
       attributes: { getPosition: { value: positions, size: 3 } },
     };
+    this.queryResultDrawingCache = { source, loaded, sparseSize, ranks, data };
+    return items.length ? this.queryResultDrawingCache : null;
+  }
+
+  private queryResultLayers(): unknown[] {
+    const drawing = this.queryResultDrawing();
+    if (!drawing) return [];
+    const { data, ranks } = drawing;
     return [
       // 被其他节点遮挡时只保留低亮轮廓，维持 3D 深度感。
       new ScatterplotLayer({
@@ -1010,9 +1041,9 @@ export class Scene {
 
   private atlasUniforms(): AtlasUniforms {
     return {
-      spotlight: state.selection !== null || state.queryResultRanks.some(
-        (rank) => this.posOf(rank) !== null,
-      ) ? 1 : 0,
+      spotlight: state.selection !== null || this.queryResultDrawing() !== null
+        ? 1
+        : 0,
     };
   }
 

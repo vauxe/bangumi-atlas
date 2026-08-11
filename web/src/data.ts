@@ -22,6 +22,7 @@ import {
   loadPublishedJson,
   member,
   prefetchPack,
+  prefetchPackRange,
   rankOfKey,
   subjectForEpisode,
   type TextSearchMember,
@@ -139,7 +140,8 @@ interface EpisodeEntry {
 
 export type TextSearchRow =
   | { owner: "subject" | "person" | "character"; id: number; field: "summary" | "infobox"; text: string }
-  | { owner: "episode"; id: number; field: "name" | "nameCn" | "description"; text: string }
+  | { owner: "episode"; id: number; field: "name" | "nameCn"; text: string; entity?: EpisodeRecord }
+  | { owner: "episode"; id: number; field: "description"; text: string }
   | { owner: "fact"; id: number; field: "summary"; text: string };
 
 export type ProjectedEntityField =
@@ -294,6 +296,29 @@ function findRange<T extends number[]>(
   return null;
 }
 
+/** @internal Derives the single compressed span emitted for one entity kind. */
+export function contiguousPackSpan(
+  ranges: readonly Loc4[],
+): [offset: number, length: number] | null {
+  const first = ranges[0];
+  if (!first) return null;
+  const start = first[2];
+  let end = start;
+  for (const row of ranges) {
+    const offset = row[2];
+    const length = row[3];
+    if (
+      !Number.isInteger(offset) ||
+      offset < 0 ||
+      !Number.isInteger(length) ||
+      length <= 0
+    ) throw new TypeError("pack member range is invalid");
+    if (offset !== end) throw new TypeError("pack member ranges are not contiguous");
+    end += length;
+  }
+  return [start, end - start];
+}
+
 export class Data {
   private readonly vocabFamilies = new AsyncMemo<VocabFamily, string[]>();
   private readonly tagVocabularyIndexes = new Map<
@@ -433,7 +458,7 @@ export class Data {
     throw new TypeError(`unknown structural entity kind ${kind}`);
   }
 
-  private projectEntity(
+  private decodeProjectedEntity(
     kind: number,
     id: number,
     tuple: unknown[],
@@ -549,6 +574,52 @@ export class Data {
     return this.decodeEntity(kind, id, tup, vocab);
   }
 
+  /** Query-only point projection avoids decoding fields a search result will not use. */
+  async projectEntity(
+    key: number,
+    fieldNames: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<ProjectedEntity | null> {
+    signal?.throwIfAborted();
+    const kind = key >>> 24;
+    const id = key & 0xffffff;
+    const requested = new Set(fieldNames);
+    const needsVocab = [...requested].some((field) =>
+      field === "career" || field === "metaTags" || field === "tags"
+    );
+    const [idx, vocab] = await Promise.all([
+      loadGzJson<EntitiesIdx>("entities.idx"),
+      needsVocab ? this.vocab() : Promise.resolve(null),
+    ]);
+    const row = findRange(idx.k[String(kind)] ?? [], id);
+    if (!row) return null;
+    const block = await member<{ i: number[]; r: unknown[][] }>(
+      "structure",
+      "entities.pack",
+      row[2],
+      row[3],
+      signal,
+    );
+    const pos = block.i.indexOf(id);
+    if (pos < 0) return null;
+    const tuple = block.r[pos];
+    return tuple
+      ? this.decodeProjectedEntity(kind, id, tuple, requested, vocab)
+      : null;
+  }
+
+  /** Broad indexed lookups switch from scattered member reads to one owner span. */
+  async prefetchEntities(
+    owner: StructuralEntity["kind"],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
+    const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
+    const idx = await loadGzJson<EntitiesIdx>("entities.idx");
+    const span = contiguousPackSpan(idx.k[String(kind)] ?? []);
+    if (span) await prefetchPackRange("entities.pack", ...span, signal);
+  }
+
   /** 按实体目录成员顺序批量扫描；整包只在扫描时预取，点查仍走 Range。 */
   async *entities(
     owner: StructuralEntity["kind"],
@@ -560,8 +631,10 @@ export class Data {
       loadGzJson<EntitiesIdx>("entities.idx"),
       this.vocab(),
     ]);
-    if (access === "whole") await prefetchPack("entities.pack", signal);
-    for (const row of idx.k[String(kind)] ?? []) {
+    const ranges = idx.k[String(kind)] ?? [];
+    const span = access === "whole" ? contiguousPackSpan(ranges) : null;
+    if (span) await prefetchPackRange("entities.pack", ...span, signal);
+    for (const row of ranges) {
       signal?.throwIfAborted();
       const block = await member<{ i: number[]; r: unknown[][] }>(
         "structure",
@@ -599,8 +672,10 @@ export class Data {
       loadGzJson<EntitiesIdx>("entities.idx"),
       needsVocab ? this.vocab() : Promise.resolve(null),
     ]);
-    if (access === "whole") await prefetchPack("entities.pack", signal);
-    for (const row of idx.k[String(kind)] ?? []) {
+    const ranges = idx.k[String(kind)] ?? [];
+    const span = access === "whole" ? contiguousPackSpan(ranges) : null;
+    if (span) await prefetchPackRange("entities.pack", ...span, signal);
+    for (const row of ranges) {
       signal?.throwIfAborted();
       const block = await member<{ i: number[]; r: unknown[][] }>(
         "structure",
@@ -617,7 +692,7 @@ export class Data {
         const tuple = block.r[index];
         if (id === undefined || !tuple)
           throw new Error("entities member contains an incomplete row");
-        yield this.projectEntity(kind, id, tuple, requested, vocab);
+        yield this.decodeProjectedEntity(kind, id, tuple, requested, vocab);
       }
     }
   }
@@ -823,25 +898,29 @@ export class Data {
       );
       if (block.i.length !== block.g.length)
         throw new Error("episode identity member groups are misaligned");
-      const tuples: unknown[][] = [];
-      for (const entry of block.g) {
-        tuples.push(...entry.e);
+      const tuples: { row: unknown[]; subject: number }[] = [];
+      for (let index = 0; index < block.g.length; index++) {
+        const subjectId = block.i[index];
+        const entry = block.g[index];
+        if (subjectId === undefined || !entry)
+          throw new Error("episode identity member contains an incomplete group");
+        const subject = (1 << 24) | subjectId;
+        tuples.push(...entry.e.map((row) => ({ row, subject })));
         for (const loc of entry.op ?? [])
-          tuples.push(...await member<unknown[][]>(
+          tuples.push(...(await member<unknown[][]>(
             "structure",
             "pages.pack",
             loc[0],
             loc[1],
             signal,
-          ));
+          )).map((row) => ({ row, subject })));
       }
-      return tuples.flatMap((row) => {
-        const id = Number(row[0]);
-        const name = String(row[1] ?? "");
-        const nameCn = String(row[2] ?? "");
+      return tuples.flatMap(({ row, subject }) => {
+        const entity = decodeEpisode(row, subject);
+        const { id, name, nameCn } = entity;
         return [
-          ...(name ? [{ owner: "episode" as const, id, field: "name" as const, text: name }] : []),
-          ...(nameCn ? [{ owner: "episode" as const, id, field: "nameCn" as const, text: nameCn }] : []),
+          ...(name ? [{ owner: "episode" as const, id, field: "name" as const, text: name, entity }] : []),
+          ...(nameCn ? [{ owner: "episode" as const, id, field: "nameCn" as const, text: nameCn, entity }] : []),
         ];
       });
     }

@@ -31,6 +31,12 @@ export interface SiteQueryReader {
     signal?: AbortSignal,
     access?: ScanAccess,
   ): AsyncIterable<ProjectedEntity>;
+  projectEntity?(
+    key: number,
+    fields: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<ProjectedEntity | null>;
+  prefetchEntities?(owner: StructuralOwner, signal?: AbortSignal): Promise<void>;
   entity(key: number, signal?: AbortSignal): Promise<StructuralEntity | null>;
   episodes?(signal?: AbortSignal, access?: ScanAccess): AsyncIterable<EpisodeRecord>;
   episodesFor?(
@@ -58,8 +64,9 @@ export interface SiteQuerySearch {
     owner: Owner,
     fields: readonly LookupField[],
     signal?: AbortSignal,
+    entityFields?: readonly string[],
   ): AsyncIterable<{
-    entity: StructuralEntity | EpisodeRecord;
+    entity: StructuralEntity | ProjectedEntity | EpisodeRecord;
     field: LookupField;
     text: string;
     utf8Range: [number, number];
@@ -69,8 +76,9 @@ export interface SiteQuerySearch {
     owner: Owner,
     field: FullTextField,
     signal?: AbortSignal,
+    entityFields?: readonly string[],
   ): AsyncIterable<{
-    entity: StructuralEntity | EpisodeRecord;
+    entity: StructuralEntity | ProjectedEntity | EpisodeRecord;
     field: FullTextField;
     text: string;
     utf8Range: [number, number];
@@ -245,12 +253,28 @@ function projectedEntityValue(
         `SiteRelease projection omitted ${entity.kind}.${field}`,
       );
   }
+  for (const field of Object.keys(fields))
+    if (!requested.has(field)) delete fields[field];
   return {
     kind: "entity",
     owner: entity.kind,
     ref: refFromKey(entity.key),
     fields,
   };
+}
+
+function physicalProjectionFields(
+  owner: StructuralOwner,
+  fields: readonly string[],
+): readonly string[] {
+  if (owner !== "subject") return fields;
+  return [...new Set(fields.flatMap((field) => {
+    if (field === "platform") return ["type", "platformCode"];
+    if (field === "ratingCount") return ["scoreDetails"];
+    if (field === "totalCollections")
+      return ["wish", "done", "doing", "onHold", "dropped"];
+    return [field];
+  }))];
 }
 
 function episodeValue(episode: EpisodeRecord): EntityValue {
@@ -375,15 +399,7 @@ export class SiteQueryDataSource implements QueryDataSource {
     }
     if (this.reader.projectEntities) {
       const requested = new Set(fields);
-      const physicalFields = owner === "subject"
-        ? [...new Set(fields.flatMap((field) => {
-            if (field === "platform") return ["type", "platformCode"];
-            if (field === "ratingCount") return ["scoreDetails"];
-            if (field === "totalCollections")
-              return ["wish", "done", "doing", "onHold", "dropped"];
-            return [field];
-          }))]
-        : fields;
+      const physicalFields = physicalProjectionFields(owner, fields);
       const mappings = owner === "subject" && requested.has("platform")
         ? await this.mappings()
         : null;
@@ -449,17 +465,36 @@ export class SiteQueryDataSource implements QueryDataSource {
     owner: Owner,
     fields: readonly LookupField[],
     signal?: AbortSignal,
+    entityFields: readonly string[] = [],
   ): AsyncIterable<EntityValue> {
     if (!this.searchIndex)
       throw new TypeError("query lookup index is unavailable");
-    for await (const hit of this.searchIndex.lookup(text, owner, fields, signal)) {
+    const requested = new Set(entityFields);
+    const physicalFields = owner === "episode"
+      ? entityFields
+      : physicalProjectionFields(owner, entityFields);
+    for await (const hit of this.searchIndex.lookup(
+      text,
+      owner,
+      fields,
+      signal,
+      physicalFields,
+    )) {
       signal?.throwIfAborted();
-      const value = "key" in hit.entity
-        ? entityValue(
+      const value = "fields" in hit.entity
+        ? projectedEntityValue(
             hit.entity,
-            hit.entity.kind === "subject" ? await this.mappings() : null,
+            requested,
+            hit.entity.kind === "subject" && requested.has("platform")
+              ? await this.mappings()
+              : null,
           )
-        : episodeValue(hit.entity);
+        : "key" in hit.entity
+          ? entityValue(
+              hit.entity,
+              hit.entity.kind === "subject" ? await this.mappings() : null,
+            )
+          : episodeValue(hit.entity);
       if (value.owner !== owner)
         throw new TypeError("query lookup returned the wrong owner");
       value.searchMatch = {
@@ -476,17 +511,36 @@ export class SiteQueryDataSource implements QueryDataSource {
     owner: Owner,
     field: FullTextField,
     signal?: AbortSignal,
+    entityFields: readonly string[] = [],
   ): AsyncIterable<EntityValue> {
     if (!this.searchIndex)
       throw new TypeError("query full-text index is unavailable");
-    for await (const hit of this.searchIndex.fullText(text, owner, field, signal)) {
+    const requested = new Set(entityFields);
+    const physicalFields = owner === "episode"
+      ? entityFields
+      : physicalProjectionFields(owner, entityFields);
+    for await (const hit of this.searchIndex.fullText(
+      text,
+      owner,
+      field,
+      signal,
+      physicalFields,
+    )) {
       signal?.throwIfAborted();
-      const value = "key" in hit.entity
-        ? entityValue(
+      const value = "fields" in hit.entity
+        ? projectedEntityValue(
             hit.entity,
-            hit.entity.kind === "subject" ? await this.mappings() : null,
+            requested,
+            hit.entity.kind === "subject" && requested.has("platform")
+              ? await this.mappings()
+              : null,
           )
-        : episodeValue(hit.entity);
+        : "key" in hit.entity
+          ? entityValue(
+              hit.entity,
+              hit.entity.kind === "subject" ? await this.mappings() : null,
+            )
+          : episodeValue(hit.entity);
       if (value.owner !== owner)
         throw new TypeError("query full text returned the wrong owner");
       value.searchMatch = {

@@ -3,6 +3,7 @@ import type {
   QueryDocument,
 } from "./document";
 import type { QueryResult, QueryRow } from "./engine";
+import type { QueryHighlights } from "./highlights";
 import { MISSING, isMissing } from "./value";
 
 export const QUERY_WIRE_SCHEMA = "atlas-query-wire-v1" as const;
@@ -15,6 +16,7 @@ export interface QueryExecutionRequest {
   parameters: ParameterValues;
   pageSize: number;
   offset: number;
+  includeHighlights?: boolean;
 }
 
 export interface CancelQueryRequest {
@@ -45,6 +47,7 @@ export type QueryWorkerResponse =
       type: "result";
       requestId: string;
       result: WireQueryResult;
+      highlights?: QueryHighlights;
     }
   | {
       schema: typeof QUERY_WIRE_SCHEMA;

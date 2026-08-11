@@ -3,10 +3,14 @@ import { test } from "node:test";
 
 import type { QueryDocument } from "../src/query/document";
 import {
+  compareOrderedValue,
   executeQuery,
+  insertTop,
   type EntityValue,
   type FactValue,
   type QueryDataSource,
+  type QueryResultEntity,
+  type RankedRow,
 } from "../src/query/engine";
 import { QUERY_SECURITY_PROFILE } from "../src/query/security";
 import { MISSING } from "../src/query/value";
@@ -79,6 +83,232 @@ const voiceCredit: FactValue = {
 test("keeps transport batching separate from execution quotas", () => {
   assert.deepEqual(QUERY_SECURITY_PROFILE.execution, { maxPageSize: 500 });
   assert.equal("path" in QUERY_SECURITY_PROFILE, false);
+});
+
+test("projects every result entity independently from the 500-row page", async () => {
+  const largeSource: QueryDataSource = {
+    scan: async function* (owner) {
+      if (owner !== "subject") return;
+      for (let id = 1; id <= 700; id++) {
+        yield {
+          kind: "entity",
+          owner: "subject",
+          ref: `subject:${id}`,
+          fields: { name: `S${id}` },
+        };
+      }
+    },
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "project",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "subject", binding: "subject" },
+      project: {
+        kind: "project",
+        input: "scan",
+        columns: [{
+          name: "ref",
+          value: { kind: "field", binding: "subject", field: "ref" },
+        }],
+      },
+    },
+  };
+  const entities: QueryResultEntity[] = [];
+
+  const result = await executeQuery(query, {}, largeSource, {
+    pageSize: 500,
+    onResultEntities: (rowEntities) => entities.push(...rowEntities),
+  });
+
+  assert.equal(result.rows.length, 500);
+  assert.equal(result.totalMatches, 700);
+  assert.equal(result.hasMore, true);
+  assert.equal(entities.length, 700);
+  assert.deepEqual(entities[0], {
+    ref: "subject:1",
+    graphRef: "subject:1",
+  });
+  assert.deepEqual(entities.at(-1), {
+    ref: "subject:700",
+    graphRef: "subject:700",
+  });
+});
+
+test("does not scan or highlight a zero-limit result", async () => {
+  let scans = 0;
+  const zeroSource: QueryDataSource = {
+    releaseId: "release-zero",
+    scan: async function* (owner) {
+      scans++;
+      if (owner === "subject") yield subjects[0] as EntityValue;
+    },
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "project",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "subject", binding: "subject" },
+      project: {
+        kind: "project",
+        input: "scan",
+        columns: [{
+          name: "ref",
+          value: { kind: "field", binding: "subject", field: "ref" },
+        }],
+      },
+    },
+    limit: 0,
+  };
+  const entities: QueryResultEntity[] = [];
+
+  const result = await executeQuery(query, {}, zeroSource, {
+    pageSize: 20,
+    onResultEntities: (rowEntities) => entities.push(...rowEntities),
+  });
+
+  assert.equal(scans, 0);
+  assert.deepEqual(entities, []);
+  assert.deepEqual(result.rows, []);
+  assert.equal(result.totalMatches, 0);
+  assert.equal(result.visibleMatches, 0);
+  assert.equal(result.hasMore, false);
+  assert.equal(result.releaseId, "release-zero");
+});
+
+test("projects only entities retained by an ordered semantic limit", async () => {
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "project",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "subject", binding: "subject" },
+      project: {
+        kind: "project",
+        input: "scan",
+        columns: [
+          {
+            name: "ref",
+            value: { kind: "field", binding: "subject", field: "ref" },
+          },
+          {
+            name: "score",
+            value: { kind: "field", binding: "subject", field: "score" },
+          },
+        ],
+      },
+    },
+    orderBy: [{ column: "score", direction: "desc", nulls: "last" }],
+    limit: 2,
+  };
+  const entities: QueryResultEntity[] = [];
+
+  const result = await executeQuery(query, {}, source, {
+    pageSize: 1,
+    onResultEntities: (rowEntities) => entities.push(...rowEntities),
+  });
+
+  assert.deepEqual(result.rows, [{ ref: "subject:4", score: 9.8 }]);
+  assert.deepEqual(
+    entities.map((entity) => entity.ref).sort(),
+    ["subject:3", "subject:4"],
+  );
+});
+
+test("uses the result row tie-breaker for ordered semantic highlights", async () => {
+  const tiedSource: QueryDataSource = {
+    scan: async function* (owner) {
+      if (owner !== "subject") return;
+      for (const id of [2, 1]) {
+        yield {
+          kind: "entity",
+          owner: "subject",
+          ref: `subject:${id}`,
+          fields: { name: `S${id}`, score: 9 },
+        };
+      }
+    },
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "project",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "subject", binding: "subject" },
+      project: {
+        kind: "project",
+        input: "scan",
+        columns: [
+          {
+            name: "ref",
+            value: { kind: "field", binding: "subject", field: "ref" },
+          },
+          {
+            name: "score",
+            value: { kind: "field", binding: "subject", field: "score" },
+          },
+        ],
+      },
+    },
+    orderBy: [{ column: "score", direction: "desc", nulls: "last" }],
+    limit: 1,
+  };
+  const entities: QueryResultEntity[] = [];
+
+  const result = await executeQuery(query, {}, tiedSource, {
+    pageSize: 1,
+    onResultEntities: (rowEntities) => entities.push(...rowEntities),
+  });
+
+  assert.deepEqual(result.rows, [{ ref: "subject:1", score: 9 }]);
+  assert.deepEqual(entities, [{
+    ref: "subject:1",
+    graphRef: "subject:1",
+  }]);
+});
+
+test("maps projected Episode fields to their owning Subject without another lookup", async () => {
+  const episodeSource: QueryDataSource = {
+    scan: async function* (owner) {
+      if (owner !== "episode") return;
+      yield {
+        kind: "entity",
+        owner: "episode",
+        ref: "episode:17",
+        fields: { name: "Episode 17", subjectRef: "subject:3" },
+      };
+    },
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "project",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "episode", binding: "episode" },
+      project: {
+        kind: "project",
+        input: "scan",
+        columns: [{
+          name: "name",
+          value: { kind: "field", binding: "episode", field: "name" },
+        }],
+      },
+    },
+  };
+  const entities: QueryResultEntity[] = [];
+
+  const result = await executeQuery(query, {}, episodeSource, {
+    pageSize: 20,
+    onResultEntities: (rowEntities) => entities.push(...rowEntities),
+  });
+
+  assert.deepEqual(result.rows, [{ name: "Episode 17" }]);
+  assert.deepEqual(entities, [{
+    ref: "episode:17",
+    graphRef: "subject:3",
+  }]);
 });
 
 test("looks up one release-local fact by its typed FactRef", async () => {
@@ -584,7 +814,7 @@ test("filters tags by name without dropping their source counts", async () => {
   assert.deepEqual(result.rows, [{ tags: [{ name: "科幻", count: 42 }] }]);
 });
 
-test("keeps explicit null placement independent from sort direction", async () => {
+test("keeps all sort directions and null placements independent", async () => {
   const query: QueryDocument = {
     schema: "atlas-query-document-v1",
     root: "values",
@@ -592,12 +822,63 @@ test("keeps explicit null placement independent from sort direction", async () =
     operators: {
       values: { kind: "values", columns: ["n"], rows: [[1], [null], [2]] },
     },
-    orderBy: [{ column: "n", direction: "desc", nulls: "last" }],
   };
+  for (const [direction, nulls, expected] of [
+    ["asc", "first", [null, 1, 2]],
+    ["asc", "last", [1, 2, null]],
+    ["desc", "first", [null, 2, 1]],
+    ["desc", "last", [2, 1, null]],
+  ] as const) {
+    query.orderBy = [{ column: "n", direction, nulls }];
+    const result = await executeQuery(query, {}, source, { pageSize: 20 });
+    assert.deepEqual(
+      result.rows,
+      expected.map((n) => ({ n })),
+      `${direction} nulls ${nulls}`,
+    );
+  }
+});
 
-  const result = await executeQuery(query, {}, source, { pageSize: 20 });
+test("orders primitive values without canonical JSON serialization", () => {
+  const stringify = JSON.stringify;
+  let calls = 0;
+  JSON.stringify = ((value: unknown) => {
+    calls++;
+    return stringify(value);
+  }) as typeof JSON.stringify;
+  try {
+    assert.equal(compareOrderedValue(1, 2, "asc", "last"), -1);
+    assert.equal(compareOrderedValue("b", "a", "desc", "last"), -1);
+    assert.equal(calls, 0);
+  } finally {
+    JSON.stringify = stringify;
+  }
+});
 
-  assert.deepEqual(result.rows, [{ n: 2 }, { n: 1 }, { n: null }]);
+test("rejects a row outside a full Top-N boundary with one value comparison", () => {
+  const rows: RankedRow[] = Array.from({ length: 50 }, (_, index) => ({
+    row: { score: 100 - index },
+    key: null,
+    ordinal: index,
+  }));
+  let scoreReads = 0;
+  const row = new Proxy({ score: -1 }, {
+    get(target, property, receiver) {
+      if (property === "score") scoreReads++;
+      return Reflect.get(target, property, receiver);
+    },
+  });
+
+  insertTop(
+    rows,
+    { row, key: null, ordinal: rows.length },
+    50,
+    [{ column: "score", direction: "desc", nulls: "last" }],
+  );
+
+  assert.equal(scoreReads, 1);
+  assert.equal(rows.length, 50);
+  assert.equal(rows.at(-1)?.row.score, 51);
 });
 
 test("orders projected stable references as typed scalar identities", async () => {
@@ -729,17 +1010,21 @@ test("keeps a fact match when an archived role has no entity", async () => {
 });
 
 test("keeps lookup and full text as distinct verified sources", async () => {
+  let lookupEntityFields: readonly string[] | undefined;
+  let fullTextEntityFields: readonly string[] | undefined;
   const searched: QueryDataSource = {
     scan: async function* () {},
-    lookup: async function* (text, owner) {
+    lookup: async function* (text, owner, _lookupFields, _signal, entityFields) {
       assert.equal(text, "Atlas");
       assert.equal(owner, "subject");
+      lookupEntityFields = entityFields;
       yield subjects[2] as EntityValue;
     },
-    fullText: async function* (text, owner, field) {
+    fullText: async function* (text, owner, field, _signal, entityFields) {
       assert.equal(text, "Atlas");
       assert.equal(owner, "subject");
       assert.equal(field, "summary");
+      fullTextEntityFields = entityFields;
       yield {
         ...(subjects[0] as EntityValue),
         searchMatch: {
@@ -807,9 +1092,86 @@ test("keeps lookup and full text as distinct verified sources", async () => {
 
   assert.deepEqual(lookupResult.rows, [{ ref: "subject:3" }]);
   assert.deepEqual(fullTextResult.rows, [{ ref: "subject:1" }]);
+  assert.deepEqual(lookupEntityFields, ["ref"]);
+  assert.deepEqual(fullTextEntityFields, ["ref"]);
   assert.ok(fullTextResult.evidence[0]?.ref?.some((item) =>
     item.kind === "text-range" && item.utf8Range[0] === 3 && item.utf8Range[1] === 8
   ));
+});
+
+test("isolates projected fields for lookup branches that reuse a binding name", async () => {
+  const requested = new Map<"subject" | "character", readonly string[]>();
+  const searched: QueryDataSource = {
+    scan: async function* () {},
+    lookup: async function* (_text, owner, _lookupFields, _signal, entityFields) {
+      if (owner !== "subject" && owner !== "character") return;
+      requested.set(owner, entityFields ?? []);
+      const value: EntityValue = owner === "subject"
+        ? {
+            kind: "entity",
+            owner,
+            ref: "subject:1",
+            fields: { name: "Original", nameCn: "中文名" },
+          }
+        : {
+            kind: "entity",
+            owner,
+            ref: "character:2",
+            fields: { name: "Character" },
+          };
+      yield value;
+    },
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "union",
+    parameters: {},
+    operators: {
+      subjectLookup: {
+        kind: "lookup",
+        owner: "subject",
+        binding: "entity",
+        text: { kind: "literal", value: "Atlas" },
+        fields: ["name"],
+      },
+      subjectProject: {
+        kind: "project",
+        input: "subjectLookup",
+        columns: [{
+          name: "value",
+          value: { kind: "field", binding: "entity", field: "nameCn" },
+        }],
+      },
+      characterLookup: {
+        kind: "lookup",
+        owner: "character",
+        binding: "entity",
+        text: { kind: "literal", value: "Atlas" },
+        fields: ["name"],
+      },
+      characterProject: {
+        kind: "project",
+        input: "characterLookup",
+        columns: [{
+          name: "value",
+          value: { kind: "field", binding: "entity", field: "name" },
+        }],
+      },
+      union: {
+        kind: "union",
+        branches: ["subjectProject", "characterProject"].map((input) => ({
+          input,
+          columns: [{ input: "value", output: "value" }],
+        })),
+      },
+    },
+  };
+
+  const result = await executeQuery(query, {}, searched, { pageSize: 20 });
+
+  assert.deepEqual(result.rows, [{ value: "Character" }, { value: "中文名" }]);
+  assert.deepEqual(requested.get("subject"), ["nameCn"]);
+  assert.deepEqual(requested.get("character"), ["name"]);
 });
 
 test("follows a typed reference in both directions", async () => {

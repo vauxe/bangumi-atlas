@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  CanonicalValueMap,
+  CanonicalValueSet,
   canonicalJson,
   normalizeQuery,
   queryDigest,
@@ -46,6 +48,36 @@ const document = (
     },
   };
 };
+
+test("deduplicates scalar canonical values without colliding with structured values", () => {
+  const values = new CanonicalValueSet();
+  for (const value of [1, 1, "1", "1", true, true, { value: 1 }, { value: 1 }])
+    values.add(value);
+  values.add('{"value":1}');
+
+  assert.equal(values.size, 5);
+});
+
+test("maps scalar canonical keys without colliding with structured keys", () => {
+  const values = new CanonicalValueMap<number>();
+  assert.equal(values.getOrCreate('{"value":1}', () => 1), 1);
+  assert.equal(values.getOrCreate({ value: 1 }, () => 2), 2);
+  assert.equal(values.getOrCreate({ value: 1 }, () => 3), 2);
+  assert.deepEqual([...values.values()], [1, 2]);
+});
+
+test("rejects non-finite numbers on scalar canonical fast paths", () => {
+  const values = new CanonicalValueSet();
+  assert.throws(() => values.add(Number.NaN), /finite/);
+  assert.throws(() => values.add(Number.POSITIVE_INFINITY), /finite/);
+
+  const groups = new CanonicalValueMap<number>();
+  assert.throws(() => groups.getOrCreate(Number.NaN, () => 1), /finite/);
+  assert.throws(
+    () => groups.getOrCreate(Number.NEGATIVE_INFINITY, () => 1),
+    /finite/,
+  );
+});
 
 test("normalizes ids, parameters, unreachable nodes, and commutative predicates", async () => {
   const first = normalizeQuery(document("source", "filtered"), { min: 8 });

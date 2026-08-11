@@ -8,6 +8,7 @@ import {
   type QueryDraft,
 } from "./draft";
 import type { QueryResult } from "./engine";
+import type { QueryHighlights } from "./highlights";
 import { queryResultEntityRefs, renderAnswer } from "./answer-view";
 import {
   QueryBar,
@@ -32,6 +33,10 @@ export interface QueryWorkbenchDependencies {
     section: QuerySection,
     options: { offset: number; pageSize: number; signal: AbortSignal },
   ): Promise<QueryResult>;
+  executeWithHighlights?(
+    section: QuerySection,
+    options: { offset: number; pageSize: number; signal: AbortSignal },
+  ): Promise<{ result: QueryResult; highlights: QueryHighlights }>;
   selectedEntity?(): Promise<SelectedQueryEntity | null>;
   resolveEntityLabel?(ref: string): Promise<string>;
   suggestEntities?(
@@ -54,6 +59,7 @@ export interface QueryWorkbenchDependencies {
   releaseId(): string;
   onEntity(ref: string): void | Promise<void>;
   onResultEntities?(refs: readonly string[]): number | Promise<number>;
+  onResultHighlights?(highlights: readonly QueryHighlights[]): number | Promise<number>;
   mappings?(): Promise<Mappings>;
   onBundle?(bundle: QueryBundle): void;
   updateUrl(): void;
@@ -97,7 +103,7 @@ function enoughText(draft: QueryDraft): boolean {
   return !text || [...text].length >= 2;
 }
 
-/** Merge the entities present in each currently rendered answer section. */
+/** Merge the entities present in each buffered answer section. */
 export function mergeQueryResultRefs(
   sections: ReadonlyMap<string, readonly string[]>,
 ): string[] {
@@ -105,6 +111,17 @@ export function mergeQueryResultRefs(
   for (const section of sections.values())
     for (const ref of section) refs.add(ref);
   return [...refs];
+}
+
+/** Keep DOM pagination separate from the complete result buffer used by Canvas. */
+export function queryResultPresentation(
+  result: QueryResult,
+  shown: number,
+): { visible: QueryResult; highlightRefs: string[] } {
+  return {
+    visible: revealQueryResult(result, shown),
+    highlightRefs: queryResultEntityRefs(result),
+  };
 }
 
 export function queryWorkspaceVisibility(
@@ -140,6 +157,7 @@ export class QueryWorkbench {
   private lastBundle = "";
   private answerBundle = "";
   private resultRefsBySection = new Map<string, string[]>();
+  private resultHighlightsBySection = new Map<string, QueryHighlights>();
   private highlightSerial = 0;
   private highlightCount = 0;
   private resultsCurrent = false;
@@ -235,6 +253,7 @@ export class QueryWorkbench {
       this.highlightCount = 0;
       this.renderHighlightStatus();
       this.resultRefsBySection = new Map();
+      this.resultHighlightsBySection = new Map();
       this.publishResultEntities();
       this.answers.replaceChildren();
       this.setStatus("");
@@ -290,6 +309,7 @@ export class QueryWorkbench {
     this.highlightCount = 0;
     this.renderHighlightStatus();
     this.resultRefsBySection = new Map();
+    this.resultHighlightsBySection = new Map();
     this.publishResultEntities();
     state.queryBundle = null;
     notify();
@@ -373,6 +393,7 @@ export class QueryWorkbench {
       this.dependencies.updateUrl();
     }
     const pendingRefs = new Map<string, string[]>();
+    const pendingHighlights = new Map<string, QueryHighlights>();
     const cards = Object.entries(normalized.sections).map(([name, section]) => {
       const card = document.createElement("section");
       card.className = "query-answer-card loading";
@@ -392,9 +413,13 @@ export class QueryWorkbench {
             section,
             currentRelease,
             controller.signal,
-            (refs) => {
+            (refs, highlights) => {
               pendingRefs.set(name, refs);
-              if (this.resultRefsBySection === pendingRefs)
+              if (highlights) pendingHighlights.set(name, highlights);
+              if (
+                this.resultRefsBySection === pendingRefs ||
+                this.resultHighlightsBySection === pendingHighlights
+              )
                 this.publishResultEntities();
             },
           )
@@ -409,6 +434,7 @@ export class QueryWorkbench {
           this.renderHighlightStatus();
           this.syncWorkspaceVisibility();
           this.resultRefsBySection = pendingRefs;
+          this.resultHighlightsBySection = pendingHighlights;
           this.publishResultEntities();
         },
       );
@@ -428,26 +454,32 @@ export class QueryWorkbench {
     section: QuerySection,
     releaseId: string,
     signal: AbortSignal,
-    onVisibleRefs: (refs: string[]) => void,
+    onResult: (refs: string[], highlights?: QueryHighlights) => void,
   ): Promise<boolean> {
     try {
       const fetchSize = Math.min(
         section.query.limit ?? QUERY_SECURITY_PROFILE.execution.maxPageSize,
         QUERY_SECURITY_PROFILE.execution.maxPageSize,
       );
-      const [initial, mappings] = await Promise.all([
-        this.dependencies.execute(section, {
-          offset: 0,
-          pageSize: fetchSize,
-          signal,
-        }),
+      const options = { offset: 0, pageSize: fetchSize, signal };
+      const initialExecution: Promise<{
+        result: QueryResult;
+        highlights?: QueryHighlights;
+      }> = this.dependencies.executeWithHighlights
+        ? this.dependencies.executeWithHighlights(section, options)
+        : this.dependencies.execute(section, options)
+            .then((result) => ({ result }));
+      const [execution, mappings] = await Promise.all([
+        initialExecution,
         this.dependencies.mappings?.(),
       ]);
-      let result = initial;
+      let result = execution.result;
+      const sectionHighlights = execution.highlights;
       if (result.releaseId !== releaseId)
         throw new TypeError("查询结果来自不同的数据版本，请刷新页面后重试");
       let shown = Math.min(50, result.rows.length);
       let loadingMore = false;
+      let publishedRows = -1;
       const showMore = async (): Promise<void> => {
         if (loadingMore) return;
         if (shown < result.rows.length) {
@@ -475,8 +507,11 @@ export class QueryWorkbench {
         }
       };
       const render = (focusMore = false): void => {
-        const visible = revealQueryResult(result, shown);
-        onVisibleRefs(queryResultEntityRefs(visible));
+        const { visible, highlightRefs } = queryResultPresentation(result, shown);
+        if (publishedRows !== result.rows.length) {
+          publishedRows = result.rows.length;
+          onResult(highlightRefs, sectionHighlights);
+        }
         renderAnswer(card, section.answer, visible, {
           onEntity: (ref) => {
             void Promise.resolve(this.dependencies.onEntity(ref))
@@ -537,14 +572,18 @@ export class QueryWorkbench {
   private publishResultEntities(): void {
     const serial = ++this.highlightSerial;
     const refs = mergeQueryResultRefs(this.resultRefsBySection);
-    if (!this.dependencies.onResultEntities) {
+    const highlights = [...this.resultHighlightsBySection.values()];
+    const publish = this.dependencies.onResultHighlights
+      ? () => this.dependencies.onResultHighlights?.(highlights) ?? 0
+      : this.dependencies.onResultEntities
+        ? () => this.dependencies.onResultEntities?.(refs) ?? 0
+        : null;
+    if (!publish) {
       this.highlightCount = 0;
       this.renderHighlightStatus();
       return;
     }
-    void Promise.resolve().then(() =>
-      this.dependencies.onResultEntities?.(refs) ?? 0
-    ).then((count) => {
+    void Promise.resolve().then(publish).then((count) => {
       if (serial !== this.highlightSerial) return;
       this.highlightCount = count;
       this.renderHighlightStatus();
