@@ -553,10 +553,16 @@ test("loads authoritative text members with bounded concurrency", async () => {
   );
   let active = 0;
   let maximum = 0;
+  let releases = 0;
+  const prefetched: TextSearchMember[][] = [];
   const reader: SiteQueryReader = {
     entities: async function* () {},
     entity: async () => null,
     factsFor: async () => ({ items: [], total: 0, next: null }),
+    prefetchTextSearchRows: async (batch) => {
+      prefetched.push([...batch]);
+      return () => { releases++; };
+    },
     textSearchRows: async () => {
       active++;
       maximum = Math.max(maximum, active);
@@ -582,6 +588,49 @@ test("loads authoritative text members with bounded concurrency", async () => {
 
   assert.ok(maximum > 1);
   assert.ok(maximum <= 6);
+  assert.deepEqual(prefetched, [descriptors.slice(0, 6), descriptors.slice(6)]);
+  assert.equal(releases, 2);
+});
+
+test("releases a prefetched text batch when cancellation wins before reads", async () => {
+  const descriptor: TextSearchMember = ["entity-summary", 1, 0, 10, 20];
+  const controller = new AbortController();
+  let reads = 0;
+  let releases = 0;
+  const reader: SiteQueryReader = {
+    entities: async function* () {},
+    entity: async () => null,
+    factsFor: async () => ({ items: [], total: 0, next: null }),
+    prefetchTextSearchRows: async () => {
+      controller.abort();
+      return () => { releases++; };
+    },
+    textSearchRows: async () => {
+      reads++;
+      return [];
+    },
+  };
+  const search = new SiteQuerySearchIndex(reader, {} as Manifest, {
+    normalize: async () => "星空",
+    page: async () => ({ entries: [], next: null, scannedThroughRank: -1 }),
+    keys: async () => new Uint32Array(),
+    textPage: async () => ({
+      members: [descriptor],
+      next: null,
+      totalCandidates: 1,
+    }),
+  });
+
+  await assert.rejects(async () => {
+    for await (const _hit of search.fullText(
+      "星空",
+      "subject",
+      "summary",
+      controller.signal,
+    )) assert.fail("cancelled text lookup cannot yield a hit");
+  }, { name: "AbortError" });
+  assert.equal(reads, 0);
+  assert.equal(releases, 1);
 });
 
 test("resolves full-text entities with bounded concurrency and stable hit order", async () => {

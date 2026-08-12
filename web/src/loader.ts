@@ -412,6 +412,7 @@ export async function loadManifest(): Promise<Manifest> {
   packModes.clear();
   prefetchedPacks.clear();
   prefetchedPackKeys.clear();
+  ephemeralPackRangeRefs.clear();
   episodeSubjects.clear();
   episodeSubjectLoads.clear();
   rankBytes = null;
@@ -738,6 +739,7 @@ const packAccess = new SharedAbortableMemo<string, PackAccess>();
 const wholePackLoads = new SharedAbortableMemo<string, ArrayBuffer>();
 const packRangeLoads = new SharedAbortableMemo<string, PackAccess>();
 const packModes = new Map<string, PackMode>();
+const ephemeralPackRangeRefs = new Map<string, number>();
 
 function packPrefetchKey(path: string, off: number, len: number): string {
   return `${path}:${off}:${len}`;
@@ -755,6 +757,15 @@ function storePrefetchedPack(
   if (previous >= 0) keys.splice(previous, 1);
   keys.push(key);
   prefetchedPackKeys.set(path, keys);
+}
+
+function deletePrefetchedPack(path: string, key: string): void {
+  prefetchedPacks.delete(key);
+  const keys = prefetchedPackKeys.get(path);
+  if (!keys) return;
+  const index = keys.indexOf(key);
+  if (index >= 0) keys.splice(index, 1);
+  if (!keys.length) prefetchedPackKeys.delete(path);
 }
 
 function prefetchedPack(
@@ -853,6 +864,95 @@ export async function prefetchPackRange(
   if (!prefetchedPack(path, off, len)) {
     if (access.kind === "whole") storePrefetchedPack(path, 0, access.buffer);
     else storePrefetchedPack(path, access.off, access.buffer);
+  }
+}
+
+/** Coalesce adjacent decoded-cache misses into exact pack ranges. This keeps
+ * authoritative gzip members independently decoded and cached while avoiding
+ * one HTTP round trip per physically adjacent member. */
+export async function prefetchMemberRanges(
+  family: CacheFamily,
+  path: string,
+  ranges: readonly (readonly [offset: number, length: number])[],
+  signal?: AbortSignal,
+): Promise<() => void> {
+  signal?.throwIfAborted();
+  const memberCap = manifestRef?.limits.member_cap ?? 0;
+  const packCap = manifestRef?.limits.pack_cap ?? 0;
+  const missing = new Map<string, [offset: number, length: number]>();
+  for (const [offset, length] of ranges) {
+    if (
+      !Number.isInteger(offset) ||
+      offset < 0 ||
+      !Number.isInteger(length) ||
+      length <= 0 ||
+      length > memberCap
+    ) throw new SiteDataContractError(`${path}: invalid member boundary`);
+    const key = `${path}:${offset}:${length}`;
+    if (caches[family].get(key) === undefined)
+      missing.set(key, [offset, length]);
+  }
+  if (missing.size < 2) return () => {};
+  const ordered = [...missing.values()].sort(
+    (left, right) => left[0] - right[0] || left[1] - right[1],
+  );
+  const spans: [offset: number, length: number][] = [];
+  let start = ordered[0]![0];
+  let end = start + ordered[0]![1];
+  let count = 1;
+  const flush = (): void => {
+    if (count > 1) spans.push([start, end - start]);
+  };
+  for (const [offset, length] of ordered.slice(1)) {
+    if (offset < end)
+      throw new SiteDataContractError(`${path}: member ranges overlap`);
+    if (offset === end && offset + length - start <= packCap) {
+      end += length;
+      count++;
+      continue;
+    }
+    flush();
+    start = offset;
+    end = offset + length;
+    count = 1;
+  }
+  flush();
+  if (!spans.length) return () => {};
+  const leases: string[] = [];
+  for (const [offset, length] of spans) {
+    const key = packPrefetchKey(path, offset, length);
+    const references = ephemeralPackRangeRefs.get(key);
+    if (references !== undefined) {
+      ephemeralPackRangeRefs.set(key, references + 1);
+      leases.push(key);
+    } else if (prefetchedPacks.get(key) === undefined) {
+      ephemeralPackRangeRefs.set(key, 1);
+      leases.push(key);
+    }
+  }
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    for (const key of leases) {
+      const references = ephemeralPackRangeRefs.get(key);
+      if (references === undefined) continue;
+      if (references > 1) {
+        ephemeralPackRangeRefs.set(key, references - 1);
+        continue;
+      }
+      ephemeralPackRangeRefs.delete(key);
+      deletePrefetchedPack(path, key);
+    }
+  };
+  try {
+    await Promise.all(spans.map(([offset, length]) =>
+      prefetchPackRange(path, offset, length, signal)
+    ));
+    return release;
+  } catch (error) {
+    release();
+    throw error;
   }
 }
 

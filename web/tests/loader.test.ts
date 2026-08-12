@@ -12,6 +12,7 @@ import {
   openSearchAliases,
   openGeometry,
   pointByRank,
+  prefetchMemberRanges,
   prefetchPack,
   prefetchPackRange,
   rankOfKey,
@@ -1527,6 +1528,72 @@ test("prefetches and reuses one contiguous range for a partial scan", async () =
 
   assert.deepEqual(ranges, [
     `bytes=${rangeOffset}-${pack.byteLength - 1}`,
+  ]);
+});
+
+test("coalesces adjacent uncached member reads without downloading gaps", async () => {
+  const first: NameRow[] = [["a", "A", 1]];
+  const second: NameRow[] = [["b", "B", 2]];
+  const third: NameRow[] = [["c", "C", 3]];
+  const firstGzip = gzipSync(JSON.stringify(first));
+  const secondGzip = gzipSync(JSON.stringify(second));
+  const thirdGzip = gzipSync(JSON.stringify(third));
+  const gap = new Uint8Array([1, 2, 3]);
+  const pack = new Uint8Array(Buffer.concat([
+    firstGzip,
+    secondGzip,
+    gap,
+    thirdGzip,
+  ]));
+  const manifest = testManifest({
+    "facts.pack": [pack.byteLength, hash(pack)],
+  });
+  const ranges: string[] = [];
+  await installFetch(manifest, async (_path, init) => {
+    const range = new Headers(init?.headers).get("Range");
+    assert.ok(range);
+    ranges.push(range);
+    const match = /^bytes=(\d+)-(\d+)$/.exec(range);
+    assert.ok(match);
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    return new Response(body(pack.slice(start, end + 1)), {
+      status: 206,
+      headers: {
+        "Content-Range": `bytes ${start}-${end}/${pack.byteLength}`,
+      },
+    });
+  });
+
+  const release = await prefetchMemberRanges("text", "facts.pack", [
+    [0, firstGzip.byteLength],
+    [firstGzip.byteLength, secondGzip.byteLength],
+    [firstGzip.byteLength + secondGzip.byteLength + gap.byteLength, thirdGzip.byteLength],
+  ]);
+  assert.deepEqual(await Promise.all([
+    member("text", "facts.pack", 0, firstGzip.byteLength),
+    member("text", "facts.pack", firstGzip.byteLength, secondGzip.byteLength),
+    member(
+      "text",
+      "facts.pack",
+      firstGzip.byteLength + secondGzip.byteLength + gap.byteLength,
+      thirdGzip.byteLength,
+    ),
+  ]), [first, second, third]);
+  release();
+  await prefetchMemberRanges("text", "facts.pack", [
+    [0, firstGzip.byteLength],
+    [firstGzip.byteLength, secondGzip.byteLength],
+  ]);
+  assert.deepEqual(
+    await member("structure", "facts.pack", 0, firstGzip.byteLength),
+    first,
+  );
+
+  assert.deepEqual(ranges, [
+    `bytes=0-${firstGzip.byteLength + secondGzip.byteLength - 1}`,
+    `bytes=${firstGzip.byteLength + secondGzip.byteLength + gap.byteLength}-${pack.byteLength - 1}`,
+    `bytes=0-${firstGzip.byteLength - 1}`,
   ]);
 });
 

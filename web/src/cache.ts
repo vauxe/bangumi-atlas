@@ -31,6 +31,14 @@ export class WeightedLru<K, V> {
     this.evict();
   }
 
+  delete(key: K): boolean {
+    const entry = this.entries.get(key);
+    if (!entry) return false;
+    this.entries.delete(key);
+    this.used -= entry.weight;
+    return true;
+  }
+
   clear(): void {
     this.entries.clear();
     this.used = 0;
