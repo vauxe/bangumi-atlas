@@ -52,6 +52,10 @@ export interface SiteQueryReader {
     signal?: AbortSignal,
   ): Promise<Page<EpisodeRecord>>;
   episode?(id: number, signal?: AbortSignal): Promise<EpisodeRecord | null>;
+  episodeSubjectId?(
+    id: number,
+    signal?: AbortSignal,
+  ): Promise<number | null>;
   textSearchRows?(
     descriptor: TextSearchMember,
     signal?: AbortSignal,
@@ -395,12 +399,33 @@ function factValue(fact: Fact): FactValue {
 
 export class SiteQueryDataSource implements QueryDataSource {
   private mappingsPromise: Promise<Mappings | null> | null = null;
+  readonly resolveEpisodeGraphRef?: NonNullable<
+    QueryDataSource["resolveEpisodeGraphRef"]
+  >;
 
   constructor(
     private reader: SiteQueryReader,
     private searchIndex?: SiteQuerySearch,
     readonly releaseId?: string,
-  ) {}
+  ) {
+    if (reader.episodeSubjectId)
+      this.resolveEpisodeGraphRef = async (ref, signal) => {
+        const parsed = parseEntityRef(ref);
+        if (parsed.owner !== "episode")
+          throw new TypeError("Episode graph resolver received another owner");
+        const subjectId = await reader.episodeSubjectId!(
+          parsed.archiveId,
+          signal,
+        );
+        if (subjectId === null) return null;
+        if (
+          !Number.isSafeInteger(subjectId) ||
+          subjectId < 0 ||
+          subjectId > 0xffffff
+        ) throw new TypeError("Episode graph resolver returned an invalid Subject id");
+        return `subject:${subjectId}`;
+      };
+  }
 
   private mappings(): Promise<Mappings | null> {
     this.mappingsPromise ??= this.reader.mappings?.() ?? Promise.resolve(null);

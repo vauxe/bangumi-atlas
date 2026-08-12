@@ -998,6 +998,11 @@ export class Data {
     return null;
   }
 
+  /** Query highlight ownership without hydrating the Episode record. */
+  episodeSubjectId(id: number, signal?: AbortSignal): Promise<number | null> {
+    return subjectForEpisode(id, signal);
+  }
+
   async textSearchRows(
     descriptor: TextSearchMember,
     signal?: AbortSignal,
