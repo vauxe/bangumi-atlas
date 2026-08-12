@@ -384,6 +384,30 @@ class RoutingContractTests(unittest.TestCase):
         sizes["flags.bin"] += 1
         self.assertFalse(verify_site.geometry_sizes_are_valid(sizes, 2))
 
+    def test_position_encoding_requires_finite_affine_u16(self) -> None:
+        encoding = {
+            "encoding": "u16le-affine-3d-v1",
+            "components": 3,
+            "offset": [-10.0, 2.0, 4.0],
+            "scale": [0.1, 0.0, 0.2],
+        }
+        self.assertTrue(verify_site.position_encoding_is_valid(encoding))
+        self.assertFalse(
+            verify_site.position_encoding_is_valid(
+                {**encoding, "encoding": "float32"}
+            )
+        )
+        self.assertFalse(
+            verify_site.position_encoding_is_valid(
+                {**encoding, "scale": [0.1, -0.1, 0.2]}
+            )
+        )
+        self.assertFalse(
+            verify_site.position_encoding_is_valid(
+                {**encoding, "offset": [-10.0, float("inf"), 4.0]}
+            )
+        )
+
     def test_range_directory_routes_each_identity_to_its_member(self) -> None:
         ranges = [[1, 3, 0, 10], [7, 9, 10, 10]]
         identities = [[1, 3], [7, 8, 9]]

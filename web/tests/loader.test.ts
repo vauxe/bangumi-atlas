@@ -54,6 +54,14 @@ function u32le(values: Iterable<number>): Uint8Array {
   return bytes;
 }
 
+function u16le(values: Iterable<number>): Uint8Array {
+  const items = [...values];
+  const bytes = new Uint8Array(items.length * 2);
+  const view = new DataView(bytes.buffer);
+  items.forEach((value, index) => view.setUint16(index * 2, value, true));
+  return bytes;
+}
+
 function ngramArtifacts(
   byBucket: Map<number, number[]>,
   memberRanks = 60_000,
@@ -110,7 +118,7 @@ function testManifest(
   nNodes = 1,
 ): Manifest {
   const logicalFiles = {
-    "positions.bin": [nNodes * 12, "0".repeat(64)] as [number, string],
+    "positions.bin": [nNodes * 6, "0".repeat(64)] as [number, string],
     "year.bin": [nNodes * 2, "0".repeat(64)] as [number, string],
     "key.bin": [nNodes * 4, "0".repeat(64)] as [number, string],
     "size.bin": [nNodes, "0".repeat(64)] as [number, string],
@@ -215,6 +223,12 @@ function testManifest(
     n_nodes: nNodes,
     n_edges_skeleton: 0,
     name_block_size: 2,
+    position_encoding: {
+      encoding: "u16le-affine-3d-v1",
+      components: 3,
+      offset: [0, 0, 0],
+      scale: [1 / 65_535, 1 / 65_535, 1 / 65_535],
+    },
     bbox: [
       [0, 0, 0],
       [1, 1, 1],
@@ -860,11 +874,24 @@ test("rejects a malformed physical-file tuple at the manifest boundary", async (
 
 test("rejects obsolete geometry manifests before streaming", async () => {
   const obsoletePositions = testManifest({
-    "positions.bin": [8, "0".repeat(64)],
-  });
+    "positions.bin": [24, "0".repeat(64)],
+  }, 2);
   globalThis.fetch = (async () =>
     new Response(JSON.stringify(obsoletePositions))) as typeof fetch;
-  await assert.rejects(loadManifest(), /positions\.bin.*实际为 8.*重建站点数据/);
+  await assert.rejects(loadManifest(), /positions\.bin.*实际为 24.*重建站点数据/);
+
+  const invalidPositionEncoding = {
+    ...testManifest({}),
+    position_encoding: {
+      encoding: "float32",
+      components: 3,
+      offset: [0, 0, 0],
+      scale: [1, 1, Number.NaN],
+    },
+  } as unknown as Manifest;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(invalidPositionEncoding))) as typeof fetch;
+  await assert.rejects(loadManifest(), /position_encoding/);
 
   const obsoleteFlags = testManifest({
     "flags.bin": [2, "0".repeat(64)],
@@ -1203,16 +1230,16 @@ test("rejects a malformed search projection row", async () => {
 test("rejects a 206 response for the wrong byte range", async () => {
   const manifest = testManifest(
     {
-      "positions.bin": [24, "0".repeat(64)],
+      "positions.bin": [12, "0".repeat(64)],
       "key.bin": [8, "0".repeat(64)],
     },
     2,
   );
   await installFetch(manifest, async (path) => {
     if (path.endsWith("positions.bin"))
-      return new Response(new Uint8Array(8), {
+      return new Response(new Uint8Array(6), {
         status: 206,
-        headers: { "Content-Range": "bytes 0-7/24" },
+        headers: { "Content-Range": "bytes 0-5/12" },
       });
     return new Response(new Uint8Array(4), {
       status: 206,
@@ -1230,15 +1257,18 @@ test("rejects a 206 response for the wrong byte range", async () => {
 test("treats a changed Content-Range total as a replaced release", async () => {
   const manifest = testManifest(
     {
-      "positions.bin": [24, "0".repeat(64)],
+      "positions.bin": [12, "0".repeat(64)],
       "key.bin": [8, "0".repeat(64)],
     },
     2,
   );
-  await installFetch(manifest, async () => {
-    return new Response(new Uint8Array(12), {
+  await installFetch(manifest, async (path) => {
+    const position = path.endsWith("positions.bin");
+    return new Response(new Uint8Array(position ? 6 : 4), {
       status: 206,
-      headers: { "Content-Range": "bytes 12-23/999" },
+      headers: {
+        "Content-Range": position ? "bytes 6-11/999" : "bytes 4-7/999",
+      },
     });
   });
 
@@ -1275,33 +1305,45 @@ test("uses immutable object names and stops when an old object disappears", asyn
   assert.equal(releaseWasReplaced(), true);
 });
 
-test("reads an exact xyz float32 position by rank", async () => {
-  const positions = new Uint8Array(
-    new Float32Array([1.25, -2.5, 3.5, 4.75, 5.25, -6.5]).buffer,
-  );
+test("reads an affine u16 xyz position by rank", async () => {
+  const positions = u16le([0, 0, 0, 65_535, 65_535, 65_535]);
   const keys = new Uint8Array(new Uint32Array([11, 22]).buffer);
-  const manifest = testManifest(
+  const manifest = {
+    ...testManifest(
     {
       "positions.bin": [positions.byteLength, hash(positions)],
       "key.bin": [keys.byteLength, hash(keys)],
     },
     2,
-  );
+    ),
+    position_encoding: {
+      encoding: "u16le-affine-3d-v1" as const,
+      components: 3 as const,
+      offset: [1, -2, 3] as [number, number, number],
+      scale: [1.5 / 65_535, 1 / 65_535, 10 / 65_535] as [
+        number,
+        number,
+        number,
+      ],
+    },
+    bbox: [
+      [1, -2, 3],
+      [2.5, -1, 13],
+    ] as Manifest["bbox"],
+  } satisfies Manifest;
   await installFetch(manifest, async (path) =>
-    new Response(path.endsWith("positions.bin") ? positions : keys),
+    new Response(body(path.endsWith("positions.bin") ? positions : keys)),
   );
 
   assert.deepEqual(await pointByRank(manifest, 1), {
-    pos: [4.75, 5.25, -6.5],
+    pos: [2.5, -1, 13],
     key: 22,
   });
 });
 
-test("streams complete xyz geometry without planar expansion", async () => {
+test("streams and decodes complete affine u16 xyz geometry", async () => {
   const artifacts: Record<string, Uint8Array> = {
-    "positions.bin": new Uint8Array(
-      new Float32Array([1, 2, 3, 4, 5, 6]).buffer,
-    ),
+    "positions.bin": u16le([0, 0, 0, 65_535, 65_535, 65_535]),
     "year.bin": new Uint8Array(new Uint16Array([1999, 2000]).buffer),
     "key.bin": new Uint8Array(new Uint32Array([11, 22]).buffer),
     "size.bin": new Uint8Array([7, 8]),
@@ -1312,7 +1354,23 @@ test("streams complete xyz geometry without planar expansion", async () => {
   const metadata: Record<string, [number, string]> = {};
   for (const [path, bytes] of Object.entries(artifacts))
     metadata[path] = [bytes.byteLength, hash(bytes)];
-  const manifest = testManifest(metadata, 2);
+  const manifest = {
+    ...testManifest(metadata, 2),
+    position_encoding: {
+      encoding: "u16le-affine-3d-v1" as const,
+      components: 3 as const,
+      offset: [1, -2, 3] as [number, number, number],
+      scale: [1.5 / 65_535, 1 / 65_535, 10 / 65_535] as [
+        number,
+        number,
+        number,
+      ],
+    },
+    bbox: [
+      [1, -2, 3],
+      [2.5, -1, 13],
+    ] as Manifest["bbox"],
+  } satisfies Manifest;
   const fetched = new Set<string>();
   await installFetch(manifest, async (path) => {
     const physicalName = path.slice(path.lastIndexOf("/") + 1);
@@ -1329,7 +1387,7 @@ test("streams complete xyz geometry without planar expansion", async () => {
   await stream.start(() => undefined);
 
   assert.equal(stream.geo.loaded, 2);
-  assert.deepEqual(Array.from(stream.geo.positions), [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(Array.from(stream.geo.positions), [1, -2, 3, 2.5, -1, 13]);
   assert.deepEqual([...fetched].sort(), [
     "flags.bin",
     "key.bin",

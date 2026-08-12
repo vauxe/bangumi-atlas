@@ -31,11 +31,18 @@ interface LocalManifest {
   n_nodes: number;
   version: string;
   files: Record<string, PublishedFile>;
+  position_encoding: {
+    encoding: "u16le-affine-3d-v1";
+    components: 3;
+    offset: [number, number, number];
+    scale: [number, number, number];
+  };
 }
 
 const requestedScenario = process.argv[2];
 const scenarios = [
   "anchor",
+  "geometry-decode",
   "entity-subject",
   "entity-person",
   "entity-character",
@@ -58,16 +65,69 @@ const manifest = JSON.parse(
   readFileSync(resolve(siteDir, "data/manifest.json"), "utf8"),
 ) as LocalManifest;
 
-if (scenario === "anchor" || scenario === "nearby-labels") {
+if (
+  scenario === "anchor" ||
+  scenario === "geometry-decode" ||
+  scenario === "nearby-labels"
+) {
   const positionObject = manifest.files["positions.bin"]?.[2];
   if (!positionObject) throw new TypeError("manifest has no positions.bin object");
   const positionBytes = readFileSync(resolve(siteDir, "data", positionObject));
-  assert.equal(positionBytes.byteLength, manifest.n_nodes * 12);
-  const positions = new Float32Array(
+  assert.equal(positionBytes.byteLength, manifest.n_nodes * 6);
+  const encoded = new Uint16Array(
     positionBytes.buffer,
     positionBytes.byteOffset,
-    positionBytes.byteLength / 4,
+    positionBytes.byteLength / 2,
   );
+  const decode = (): Float32Array => {
+    const positions = new Float32Array(manifest.n_nodes * 3);
+    const { offset, scale } = manifest.position_encoding;
+    for (let rank = 0; rank < manifest.n_nodes; rank++) {
+      const index = rank * 3;
+      positions[index] = Math.fround(offset[0] + (encoded[index] ?? 0) * scale[0]);
+      positions[index + 1] = Math.fround(
+        offset[1] + (encoded[index + 1] ?? 0) * scale[1],
+      );
+      positions[index + 2] = Math.fround(
+        offset[2] + (encoded[index + 2] ?? 0) * scale[2],
+      );
+    }
+    return positions;
+  };
+  if (scenario === "geometry-decode") {
+    for (let index = 0; index < 2; index++) decode();
+    const expected = decode();
+    const signature = createHash("sha256")
+      .update(new Uint8Array(expected.buffer))
+      .digest("hex");
+    const samples: number[] = [];
+    for (let index = 0; index < runCount; index++) {
+      globalThis.gc?.();
+      const started = performance.now();
+      const positions = decode();
+      samples.push(Number((performance.now() - started).toFixed(2)));
+      assert.equal(
+        createHash("sha256")
+          .update(new Uint8Array(positions.buffer))
+          .digest("hex"),
+        signature,
+        "decoded positions changed between runs",
+      );
+    }
+    samples.sort((left, right) => left - right);
+    console.log(JSON.stringify({
+      scenario,
+      releaseId: manifest.version,
+      nodes: manifest.n_nodes,
+      inputBytes: positionBytes.byteLength,
+      outputBytes: expected.byteLength,
+      signature,
+      runs: samples,
+      median: samples[Math.floor(samples.length / 2)],
+    }, null, 2));
+    process.exit(0);
+  }
+  const positions = decode();
   if (scenario === "nearby-labels") {
     const targetOffset = Math.floor(manifest.n_nodes / 2) * 3;
     const target = [

@@ -1,10 +1,16 @@
 {
   "schema": "structural-site-v1",
   "profile": "explorer-v1",
-  "schema_digest": "f9adc895eceba2fba97806ffe89ab962f5d7681bab759199a6ce8398015a531d",
+  "schema_digest": "22445ecb6a8cd657cd2816e6621e11ec01f1ceb21c5171d0555bcc20bd60f445",
   "rank": {
     "encoding": "u24le",
     "sentinel": 16777215
+  },
+  "geometry": {
+    "positions": {
+      "encoding": "u16le-affine-3d-v1",
+      "components": 3
+    }
   },
   "limits": {
     "member_cap": 256000,
