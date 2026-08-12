@@ -22,6 +22,8 @@ import {
   foldWithCharmap,
   foldedUtf8Range,
   loadCharmap,
+  loadEntityKeys,
+  loadedEntityKeys,
   releaseWasReplaced,
   ReleaseChangedError,
   searchGramBuckets,
@@ -1364,6 +1366,30 @@ test("decodes the u24 rank-by-key reverse index", async () => {
   assert.equal(rankOfKey((1 << 24) | 0), null);
   assert.equal(rankOfKey((1 << 24) | 1), 5);
   assert.equal(rankOfKey((2 << 24) | 1), null);
+});
+
+test("does not reuse rank-ordered entity keys across SiteReleases", async () => {
+  const firstKeys = u32le([(1 << 24) | 1, (2 << 24) | 2]);
+  const first = testManifest({
+    "key.bin": [firstKeys.byteLength, hash(firstKeys)],
+  }, 2);
+  await installFetch(first, async (path) => {
+    assert.ok(path.endsWith("key.bin"));
+    return new Response(body(firstKeys));
+  });
+  assert.deepEqual(Array.from(await loadEntityKeys()), [
+    (1 << 24) | 1,
+    (2 << 24) | 2,
+  ]);
+  assert.ok(loadedEntityKeys());
+
+  const secondKeys = u32le([(3 << 24) | 3]);
+  const second = testManifest({
+    "key.bin": [secondKeys.byteLength, hash(secondKeys)],
+  });
+  await installFetch(second, async () => new Response(body(secondKeys)));
+
+  assert.equal(loadedEntityKeys(), null);
 });
 
 test("resolves and caches an Episode owning Subject from fixed-width lookups", async () => {
