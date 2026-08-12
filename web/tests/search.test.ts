@@ -487,6 +487,73 @@ test("builds compact name suggestions from the published index and current scope
   ]);
 });
 
+test("stops compact substring suggestions once later ranks cannot enter top K", async () => {
+  const readRanks: number[] = [];
+  const aliases: SearchAliases = {
+    row: () => null,
+    load: async () => undefined,
+    read: async (requested) => {
+      const ranks = [...requested];
+      readRanks.push(...ranks);
+      return new Map(ranks.map((rank) => [
+        rank,
+        [[[`x境界${rank}`, `x境界${rank}`]], `x境界${rank}`, 1] as SearchAliasRow,
+      ]));
+    },
+  };
+  const results = await searchNameSuggestions("境界", aliases, {
+    limit: 2,
+    entityKinds: [1],
+    dependencies: {
+      ...immediateDependencies,
+      loadSearchDir: async () => ({ 境界: { l: [0, 1] } }),
+      searchSubstringPage: async (_query, cursor, limit) => {
+        const ranks = Array.from({ length: limit }, (_, index) => cursor + index);
+        return { ranks, next: cursor + limit < 64 ? cursor + limit : null };
+      },
+    },
+  });
+
+  assert.deepEqual(results.map(({ rank }) => rank), [0, 1]);
+  assert.equal(readRanks.length, 8);
+});
+
+test("keeps scanning when an incomplete prefix projection can still improve", async () => {
+  const readRanks: number[] = [];
+  const aliases: SearchAliases = {
+    row: () => null,
+    load: async () => undefined,
+    read: async (requested) => {
+      const ranks = [...requested];
+      readRanks.push(...ranks);
+      return new Map(ranks.map((rank) => [
+        rank,
+        rank === 8
+          ? [[["ab later", "ab later"]], "ab later", 1]
+          : [[["unrelated", "unrelated"]], "unrelated", 1],
+      ] as [number, SearchAliasRow]));
+    },
+  };
+  const results = await searchNameSuggestions("ab", aliases, {
+    limit: 1,
+    entityKinds: [1],
+    dependencies: {
+      ...immediateDependencies,
+      loadSearchDir: async () => ({ ab: { t: [0, 1] } }),
+      searchMember: async () => [
+        ["ab projected", "ab projected", 100, "ab projected", 1],
+      ],
+      searchSubstringPage: async (_query, cursor, limit) => ({
+        ranks: Array.from({ length: limit }, (_, index) => cursor + index),
+        next: cursor + limit < 64 ? cursor + limit : null,
+      }),
+    },
+  });
+
+  assert.deepEqual(results.map(({ rank }) => rank), [8]);
+  assert.equal(readRanks.length, 16);
+});
+
 test("keeps one-character suggestions on the compact prefix projection", async () => {
   let substringReads = 0;
   const results = await searchNameSuggestions("a", emptyNames, {
