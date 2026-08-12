@@ -379,6 +379,86 @@ test("keeps an evidence-backed entity clickable after choosing display columns",
   }
 });
 
+test("appends newly revealed rows without rebuilding the existing table", () => {
+  const originalDocument = globalThis.document;
+  let created = 0;
+  globalThis.document = {
+    createElement: (tag: string) => {
+      created++;
+      return new FakeElement(tag.toUpperCase());
+    },
+  } as unknown as Document;
+  try {
+    const container = new FakeElement();
+    const first = { ref: "subject:1", name: "第一部" };
+    const second = { ref: "subject:2", name: "第二部" };
+    const third = { ref: "subject:3", name: "第三部" };
+    const fourth = { ref: "subject:4", name: "第四部" };
+    const firstEvidence = {};
+    const secondEvidence = {};
+    const result = {
+      rows: [first, second],
+      evidence: [firstEvidence, secondEvidence],
+      columns: {
+        ref: { type: "entity-ref" as const, semantic: "subject.ref" },
+        name: { type: "string" as const, semantic: "subject.name" },
+      },
+      totalMatches: 4,
+      visibleMatches: 4,
+      hasMore: true,
+      stability: "exact" as const,
+      queryDigest: "a".repeat(64),
+      releaseId: "b".repeat(64),
+      coverage: {
+        schema: "atlas-coverage-v1" as const,
+        atoms: ["owner:subject"],
+        digest: "c".repeat(64),
+      },
+      terminalEvidence: [{
+        kind: "completed-domain" as const,
+        coverage: "c".repeat(64),
+      }],
+    };
+    const view = renderAnswer(
+      container as unknown as HTMLElement,
+      { shape: "table", title: "查询结果" },
+      result,
+      { onMore: () => {} },
+    );
+    const table = container.children[2]?.children[0];
+    const body = table?.children[1];
+    const firstRow = body?.children[0];
+    const more = container.children[3]?.children[0];
+    const createdInitially = created;
+
+    view.update({
+      ...result,
+      rows: [first, second, third],
+      evidence: [firstEvidence, secondEvidence, {}],
+      hasMore: true,
+    });
+
+    assert.equal(container.children[2]?.children[0], table);
+    assert.equal(table?.children[1], body);
+    assert.equal(body?.children[0], firstRow);
+    assert.equal(body?.children.length, 3);
+    assert.equal(container.children[3]?.children[0], more);
+    assert.ok(created - createdInitially < createdInitially);
+
+    view.update({
+      ...result,
+      rows: [{ ref: "subject:1", name: "已更新" }, second, third, fourth],
+      evidence: [firstEvidence, secondEvidence, {}, {}],
+      hasMore: false,
+    });
+
+    assert.notEqual(container.children[2]?.children[0], table);
+    assert.match(visibleText(container), /已更新/);
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
 test("lets users open an Episode result like every other entity", () => {
   const originalDocument = globalThis.document;
   globalThis.document = {

@@ -117,6 +117,24 @@ test("highlights every buffered query result while rendering only the first 50",
   assert.equal(presentation.highlightRefs.at(-1), "subject:120");
 });
 
+test("rescans buffered result refs only after a Worker page adds rows", () => {
+  const loadSection = workbenchSource.match(
+    /private async loadSection\([\s\S]*?\n  }(?=\n\n  private showError)/,
+  )?.[0];
+  assert.ok(loadSection);
+  const render = loadSection.match(
+    /const render = \(focusMore = false\): void => \{[\s\S]*?\n      };/,
+  )?.[0];
+  assert.ok(render);
+  assert.match(render, /const visible = revealQueryResult\(result, shown\)/);
+  const publishGuard = render.match(
+    /if \(publishedRows !== result\.rows\.length\) \{[\s\S]*?\n        }/,
+  )?.[0];
+  assert.ok(publishGuard);
+  assert.match(publishGuard, /queryResultEntityRefs\(result\)/);
+  assert.doesNotMatch(render.replace(publishGuard, ""), /queryResultEntityRefs/);
+});
+
 test("requests complete highlights only for the initial section execution", () => {
   const loadSection = workbenchSource.match(
     /private async loadSection\([\s\S]*?\n  }(?=\n\n  private showError)/,
