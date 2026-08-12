@@ -3,7 +3,11 @@ import { test } from "node:test";
 
 import { normalizeQuery, queryDigest } from "../src/query/canonical";
 import type { QueryDocument } from "../src/query/document";
-import { executeQuery, type QueryDataSource } from "../src/query/engine";
+import {
+  executeQuery,
+  type EntityValue,
+  type QueryDataSource,
+} from "../src/query/engine";
 
 const empty: QueryDataSource = { scan: async function* () {} };
 
@@ -122,4 +126,74 @@ test("does not impose a row quota on correlated existence", async () => {
   };
   const result = await executeQuery(query, {}, empty, { pageSize: 20 });
   assert.deepEqual(result.rows, [{ entity: 1 }]);
+});
+
+test("uses an ordered candidate scan for direct entity existence", async () => {
+  const entity = (id: number): EntityValue => ({
+    kind: "entity",
+    owner: "subject",
+    ref: `subject:${id}`,
+    fields: { name: `Subject ${id}` },
+  });
+  const entities = new Map([3, 1, 2].map((id) => [`subject:${id}`, entity(id)]));
+  const candidateCalls: string[][] = [];
+  const source: QueryDataSource = {
+    scan: async function* () {
+      throw new Error("full scan must not run for a direct exists candidate set");
+    },
+    scanCandidates: async function* (owner, refs, _signal, fields) {
+      assert.equal(owner, "subject");
+      assert.deepEqual(fields, ["name", "ref"]);
+      candidateCalls.push([...refs]);
+      // This is the source's canonical scan order, deliberately different
+      // from both the match input and numeric archive-id order.
+      for (const id of [3, 1, 2]) {
+        const value = entities.get(`subject:${id}`);
+        if (value && refs.includes(value.ref)) yield value;
+      }
+    },
+    entity: async (ref) => entities.get(ref) ?? null,
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "project",
+    parameters: {},
+    operators: {
+      outer: { kind: "scan", owner: "subject", binding: "subject" },
+      inner: {
+        kind: "values",
+        columns: ["matched"],
+        types: { matched: "entity:subject" },
+        rows: [["subject:2"], ["subject:3"], ["subject:2"]],
+      },
+      exists: {
+        kind: "exists",
+        input: "outer",
+        match: "inner",
+        columns: [{ outer: "subject", inner: "matched" }],
+      },
+      project: {
+        kind: "project",
+        input: "exists",
+        columns: [
+          {
+            name: "ref",
+            value: { kind: "field", binding: "subject", field: "ref" },
+          },
+          {
+            name: "name",
+            value: { kind: "field", binding: "subject", field: "name" },
+          },
+        ],
+      },
+    },
+  };
+
+  const result = await executeQuery(query, {}, source, { pageSize: 20 });
+
+  assert.deepEqual(result.rows, [
+    { ref: "subject:3", name: "Subject 3" },
+    { ref: "subject:2", name: "Subject 2" },
+  ]);
+  assert.deepEqual(candidateCalls, [["subject:2", "subject:3"]]);
 });

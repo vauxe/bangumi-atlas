@@ -4,10 +4,16 @@ import { afterEach, test } from "node:test";
 import {
   Data,
   buildVocabularyIndex,
+  candidateRangesNeedWholeScan,
   contiguousPackSpan,
   requireLongTextValue,
   suggestVocabularyValues,
 } from "../src/data";
+import {
+  canProjectSubjectQueryColumns,
+  projectSubjectQueryEntity,
+} from "../src/subject-query-projection";
+import type { Manifest } from "../src/types";
 
 const originalFetch = globalThis.fetch;
 
@@ -28,6 +34,110 @@ test("derives one exact byte span from contiguous member locators", () => {
       [11, 20, 126, 40],
     ]),
     /not contiguous/,
+  );
+});
+
+test("switches dense candidate ranges to a whole scan by compressed cost", () => {
+  const ranges: [number, number, number, number][] = [
+    [1, 10, 100, 20],
+    [11, 20, 120, 30],
+    [21, 30, 150, 50],
+  ];
+
+  assert.equal(candidateRangesNeedWholeScan(ranges, [ranges[0]!]), false);
+  assert.equal(candidateRangesNeedWholeScan(ranges, [ranges[2]!]), true);
+  assert.equal(
+    candidateRangesNeedWholeScan(ranges, [ranges[0]!, ranges[1]!]),
+    true,
+  );
+  assert.equal(candidateRangesNeedWholeScan(ranges, []), false);
+});
+
+test("projects exact Subject query values from verified rank columns", () => {
+  const requested = new Set([
+    "name",
+    "nameCn",
+    "type",
+    "year",
+    "score",
+    "nsfw",
+  ]);
+  const columns = {
+    nodeCount: 2,
+    year: Uint16Array.of(2024, 0),
+    score: Uint8Array.of(85, 0),
+    flags: Uint8Array.of((2 << 2) | 1, 6 << 2),
+  };
+
+  assert.deepEqual(
+    projectSubjectQueryEntity(
+      7,
+      0,
+      requested,
+      columns,
+      ["Original", "中文名", 1],
+    ),
+    {
+      kind: "subject",
+      key: (1 << 24) | 7,
+      fields: {
+        name: "Original",
+        nameCn: "中文名",
+        type: 2,
+        year: 2024,
+        score: 8.5,
+        nsfw: true,
+      },
+    },
+  );
+  assert.deepEqual(
+    projectSubjectQueryEntity(
+      9,
+      1,
+      requested,
+      columns,
+      ["No metrics", null, 1],
+    ).fields,
+    {
+      name: "No metrics",
+      nameCn: "",
+      type: 6,
+      year: null,
+      score: null,
+      nsfw: false,
+    },
+  );
+});
+
+test("gates Subject query columns on release capability and whole scans", () => {
+  const manifest = {
+    query: {
+      schema: "atlas-release-query-v1",
+      capabilities: ["subject-query-columns-v1"],
+      contractDigest: "0".repeat(64),
+    },
+  } as Manifest;
+
+  assert.equal(
+    canProjectSubjectQueryColumns(manifest, "subject", "whole", ["score"]),
+    true,
+  );
+  assert.equal(
+    canProjectSubjectQueryColumns(manifest, "subject", "stream", ["score"]),
+    false,
+  );
+  assert.equal(
+    canProjectSubjectQueryColumns(manifest, "subject", "whole", ["rank"]),
+    false,
+  );
+  assert.equal(
+    canProjectSubjectQueryColumns(
+      { ...manifest, query: undefined },
+      "subject",
+      "whole",
+      ["score"],
+    ),
+    false,
   );
 });
 

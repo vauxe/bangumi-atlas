@@ -105,6 +105,14 @@ export interface QueryDataSource {
     fields?: readonly string[],
     access?: ScanAccess,
   ): AsyncIterable<EntityValue>;
+  /** Reads an entity subset in the same relative order as scan(owner).
+   * Duplicate refs are ignored and refs absent from the source are omitted. */
+  scanCandidates?(
+    owner: Owner,
+    refs: readonly `${Owner}:${number}`[],
+    signal?: AbortSignal,
+    fields?: readonly string[],
+  ): AsyncIterable<EntityValue>;
   lookup?(
     text: string,
     owner: Owner,
@@ -1307,12 +1315,70 @@ async function* rowsFor(
     case "exists":
     case "notExists": {
       const matches = new Map<string, RowEvidence>();
+      const outer = operators[operator.input];
+      const candidateColumn = operator.kind === "exists" &&
+          source.scanCandidates &&
+          outer?.kind === "scan" &&
+          operator.columns.length === 1 &&
+          operator.columns[0]?.outer === outer.binding
+        ? operator.columns[0]
+        : null;
+      const candidateRefs: `${Owner}:${number}`[] = [];
+      let candidateScanIsSafe = candidateColumn !== null;
       for await (const row of rowsFor(operator.match, operators, source, context, signal)) {
         signal?.throwIfAborted();
         const key = canonicalJson(operator.columns.map((column) =>
           jsonValue(own(row, column.inner)),
         ));
-        if (!matches.has(key)) matches.set(key, rowEvidence(context, row));
+        if (!matches.has(key)) {
+          matches.set(key, rowEvidence(context, row));
+          if (candidateColumn) {
+            const candidate = own(row, candidateColumn.inner);
+            if (
+              isEntityValue(candidate) &&
+              outer?.kind === "scan" &&
+              candidate.owner === outer.owner
+            ) candidateRefs.push(candidate.ref);
+            else candidateScanIsSafe = false;
+          }
+        }
+      }
+      if (
+        candidateScanIsSafe &&
+        candidateColumn &&
+        outer?.kind === "scan" &&
+        source.scanCandidates
+      ) {
+        const requested = new Set(candidateRefs);
+        const returned = new Set<string>();
+        for await (const entity of source.scanCandidates(
+          outer.owner,
+          candidateRefs,
+          signal,
+          context.scanFields.get(operator.input) ?? [],
+        )) {
+          signal?.throwIfAborted();
+          if (entity.owner !== outer.owner || !requested.has(entity.ref))
+            throw new TypeError("candidate scan returned an unrequested entity");
+          if (returned.has(entity.ref))
+            throw new TypeError("candidate scan returned a duplicate entity");
+          returned.add(entity.ref);
+          const row = rememberGraphEntities(context, {
+            [outer.binding]: entity,
+          });
+          const key = canonicalJson(operator.columns.map((column) =>
+            jsonValue(own(row, column.outer)),
+          ));
+          const matched = matches.get(key);
+          if (!matched)
+            throw new TypeError("candidate scan returned an unmatched entity");
+          context.evidence.set(
+            row,
+            mergeRowEvidence(rowEvidence(context, row), matched),
+          );
+          yield row;
+        }
+        return;
       }
       for await (const row of rowsFor(operator.input, operators, source, context, signal)) {
         signal?.throwIfAborted();
