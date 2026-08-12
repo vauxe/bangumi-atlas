@@ -18,7 +18,10 @@ import {
   watchReleaseChange,
   SiteDataContractError,
 } from "./loader";
-import { relationNeighbors } from "./neighbors";
+import {
+  relationNeighbors,
+  resolveLoadedNeighborRanks,
+} from "./neighbors";
 import { parseEntityRef, QUERY_CONTRACT, type Owner } from "./query/contract";
 import { compileExplorerQuery } from "./query/explorer";
 import { mergeQueryHighlights } from "./query/highlights";
@@ -237,11 +240,14 @@ async function boot(): Promise<void> {
   );
 
   const sparseRankByKey = new Map<number, number>();
-  const rankOfKeyLocal = (key: number): number | null => {
+  const knownRankOfKey = (key: number): number | null => {
     const sparse = sparseRankByKey.get(key);
     if (sparse !== undefined) return sparse;
-    const indexed = rankOfKey(key);
-    if (indexed !== null) return indexed;
+    return rankOfKey(key);
+  };
+  const rankOfKeyLocal = (key: number): number | null => {
+    const known = knownRankOfKey(key);
+    if (known !== null) return known;
     for (let i = 0; i < geo.loaded; i++)
       if (geo.key[i] === key) return i;
     return null;
@@ -310,11 +316,18 @@ async function boot(): Promise<void> {
       data.mappings(),
     ]);
     if (epoch !== navigationEpoch || state.selection !== rank) return;
+    const neighborRanks = resolveLoadedNeighborRanks(
+      factsPage.items,
+      key,
+      geo.key,
+      geo.loaded,
+      knownRankOfKey,
+    );
     const nb = relationNeighbors(
       factsPage.items,
       key,
       mappings,
-      (k) => rankOfKeyLocal(k),
+      (k) => neighborRanks.get(k) ?? null,
       50,
     );
     state.neighbors = nb.ranks;
