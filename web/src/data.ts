@@ -34,6 +34,7 @@ import {
 } from "./subject-query-projection";
 
 type Loc4 = [number, number, number, number];
+const ENTITY_CANDIDATE_READ_CONCURRENCY = 6;
 
 interface EntitiesIdx {
   width: number;
@@ -322,6 +323,20 @@ export function contiguousPackSpan(
     end += length;
   }
   return [start, end - start];
+}
+
+/** @internal Scattered members stop winning once they cover at least half of
+ * an owner's contiguous pack span; a whole scan then avoids a Range-request
+ * fan-out and may use a narrower verified column projection. */
+export function candidateRangesNeedWholeScan(
+  ranges: readonly Loc4[],
+  selected: readonly Loc4[],
+): boolean {
+  if (!selected.length) return false;
+  const span = contiguousPackSpan(ranges);
+  if (!span) return false;
+  const selectedBytes = selected.reduce((sum, range) => sum + range[3], 0);
+  return selectedBytes * 2 >= span[1];
 }
 
 export class Data {
@@ -716,6 +731,85 @@ export class Data {
         if (id === undefined || !tuple)
           throw new Error("entities member contains an incomplete row");
         yield this.decodeProjectedEntity(kind, id, tuple, requested, vocab);
+      }
+    }
+  }
+
+  /** Reads only requested structural entities while retaining full-scan order. */
+  async *projectEntityCandidates(
+    owner: ProjectedEntity["kind"],
+    keys: readonly number[],
+    fieldNames: readonly string[],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProjectedEntity> {
+    signal?.throwIfAborted();
+    if (!keys.length) return;
+    const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
+    const requested = new Set(fieldNames);
+    const needsVocab = [...requested].some((field) =>
+      field === "career" || field === "metaTags" || field === "tags"
+    );
+    const idx = await loadGzJson<EntitiesIdx>("entities.idx");
+    const ranges = idx.k[String(kind)] ?? [];
+    const rangeCandidates = new Map<Loc4, Set<number>>();
+    const requestedKeys = new Set<number>();
+    for (const key of new Set(keys)) {
+      if (!Number.isSafeInteger(key) || key >>> 24 !== kind)
+        throw new TypeError("candidate EntityKey does not match its owner");
+      requestedKeys.add(key);
+      const id = key & 0xffffff;
+      const range = findRange(ranges, id);
+      if (!range) continue;
+      const ids = rangeCandidates.get(range) ?? new Set<number>();
+      ids.add(id);
+      rangeCandidates.set(range, ids);
+    }
+    const selectedRanges = ranges.filter((range) => rangeCandidates.has(range));
+    if (!selectedRanges.length) return;
+    if (candidateRangesNeedWholeScan(ranges, selectedRanges)) {
+      for await (const entity of this.projectEntities(
+        owner,
+        fieldNames,
+        signal,
+        "whole",
+      )) if (requestedKeys.has(entity.key)) yield entity;
+      return;
+    }
+    const vocab = needsVocab ? await this.vocab() : null;
+    for (
+      let start = 0;
+      start < selectedRanges.length;
+      start += ENTITY_CANDIDATE_READ_CONCURRENCY
+    ) {
+      signal?.throwIfAborted();
+      const loaded = await Promise.all(
+        selectedRanges
+          .slice(start, start + ENTITY_CANDIDATE_READ_CONCURRENCY)
+          .map(async (range) => ({
+            range,
+            block: await member<{ i: number[]; r: unknown[][] }>(
+              "structure",
+              "entities.pack",
+              range[2],
+              range[3],
+              signal,
+            ),
+          })),
+      );
+      signal?.throwIfAborted();
+      for (const { range, block } of loaded) {
+        const ids = rangeCandidates.get(range);
+        if (!ids) throw new Error("candidate range lost its requested ids");
+        if (block.i.length !== block.r.length)
+          throw new Error("entities member ids and rows have different lengths");
+        for (let index = 0; index < block.i.length; index++) {
+          const id = block.i[index];
+          const tuple = block.r[index];
+          if (id === undefined || !tuple)
+            throw new Error("entities member contains an incomplete row");
+          if (!ids.has(id)) continue;
+          yield this.decodeProjectedEntity(kind, id, tuple, requested, vocab);
+        }
       }
     }
   }
