@@ -200,7 +200,8 @@ Token 位于名称输入之前，添加、修改或删除 Token 不改写文字�
 通用完整性规则：
 
 - `manifest.json` 是每次发布的数据入口；版本由上游版本和完整产物契约计算。
-- 加载器在读取大文件前验证 3D 布局标记和 `positions.bin = n_nodes × 12`；
+- 加载器在读取大文件前验证 3D 布局标记、逐轴仿射解码参数和
+  `positions.bin = n_nodes × 6`；
   不兼容产物立即要求重建。
 - 完整文件必须匹配 manifest 中的字节数和 SHA-256；物理名必须由完整摘要和逻辑名组成。
 - `206 Partial Content` 必须返回精确的范围、长度和总文件大小。
@@ -223,11 +224,11 @@ Manifest 是 `structural-site-v1` 契约：schema、字段策略、来源、计�
 ### 几何与名称
 
 “收藏度”指收藏该实体的用户数：作品取五种收藏状态之和，人物和角色取
-`collects`。几何记录按该指标降序排列，总计 25 字节/节点。
+`collects`。几何记录按该指标降序排列，总计 19 字节/节点。
 
 | 文件 | 类型 | 含义 |
 |---|---|---|
-| `positions.bin` | 3 × f32 | 布局生成的完整 x/y/z 坐标 |
+| `positions.bin` | 3 × u16 | 按 manifest 逐轴仿射解码的 x/y/z 坐标 |
 | `year.bin` | u16 | 作品年份；未知或非作品为 0 |
 | `key.bin` | u32 | `类型 << 24 | id` |
 | `size.bin` | u8 | 收藏度的对数编码 |
@@ -238,8 +239,10 @@ Manifest 是 `structural-site-v1` 契约：schema、字段策略、来源、计�
 Episode 稳定引用通过 `episode-subject.bin` 以一个 u32 点查到所属 Subject，再读取对应的
 分集成员；全量分集查询一次预取 `episodes.pack` 与共享溢出页，避免逐成员网络往返。
 
-浏览器将坐标字节直接映射为 `Float32Array`。定长记录支持按 rank 点查，但节点身份
-始终由 key 验证。Canvas 绘制无需名称数据，因此首屏不必加载名称。
+浏览器按流到达的完整 rank 将坐标解码到 `Float32Array`；manifest 记录每轴 offset 与
+scale，生产器和核验器同时门禁最大三维位移与解码后最小节点间距。定长记录支持按 rank
+点查，但节点身份始终由原有 u32 key 验证。Canvas 绘制无需名称数据，因此首屏不必加载
+名称。
 
 名称与几何记录的顺序一致，行内同时保存实体种类，再按 manifest 声明的块大小独立
 gzip 并写入 `names.pack`；

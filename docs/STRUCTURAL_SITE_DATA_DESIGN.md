@@ -233,8 +233,8 @@ JSON 使用无额外空白的 UTF-8 编码；gzip 固定 `mtime=0`。相同 sche
 | `mappings.json` | 原始枚举码到显示文本的版本化映射 |
 | `charmap.json` | 版本锁定、查询完备的 Unicode casefold 差异表 |
 | `search.alias.idx` / `search.alias.pack` | 按 rank 保存构建期派生的完整搜索别名，供子串候选最终确认 |
-| `search.idx.json` / `search.pack` | 自适应前缀目录、完整叶和内部节点的有界建议投影 |
-| `search.ngram.idx` / `search.ngram.pack` | 二元字符散列桶到严格递增 VisualRank posting 的有界成员 |
+| `search.idx-{0..15}.json.gz` / `search.pack` | 按首字符稳定分片的自适应前缀目录、完整叶和内部节点的有界建议投影 |
+| `search.ngram.idx-{0..15}.json.gz` / `search.ngram.pack` | 按桶号稳定分片的二元字符散列目录，到严格递增 VisualRank posting 的有界成员 |
 | `text.search.members` / `text.search.ngram.*` | 正文二元字符候选到权威文本成员；命中仍须读取原文复核 |
 | `edges.bin` | 仅用于全局语境的抽样骨架，不是事实权威 |
 
@@ -248,6 +248,8 @@ JSON 使用无额外空白的 UTF-8 编码；gzip 固定 `mtime=0`。相同 sche
 | 事实 incidence | 8,192 个稳定键桶；每实体内联 200 条，溢出每页 500 条 | 6 |
 | Entity `summary` | 每种实体 128 个连续源 ID | 9 |
 | Entity `infobox` | 每种实体 256 个连续源 ID | 9 |
+| 名称前缀目录 | 首字符 Unicode code point 对 16 取模 | 6 |
+| 名称子串目录 | 65,536 个散列桶按桶号对 16 取模 | 6 |
 | Episode `description` | 128 个连续 Subject ID | 6 |
 | 事实 `summary` | 256 个连续 FactRef | 9 |
 | 搜索别名 | 1,024 个连续 VisualRank | 6 |

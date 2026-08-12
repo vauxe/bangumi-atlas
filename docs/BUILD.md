@@ -112,7 +112,9 @@ npm --prefix web run check
 npm --prefix web run build
 ```
 
-产出压缩后的 `site/app.js`、`site/query-worker.js` 和 `site/query.css`。
+产出压缩后的 `site/app.js`、`site/chunks/*.js`、`site/query-worker.js` 和
+`site/query.css`。Canvas 启动入口与查询运行时分块构建；构建脚本分别门禁首屏入口和
+全部主线程 chunk 的原始/gzip 体积，防止延迟加载掩盖总包体回归。
 
 ## 5. 发布前验证
 
