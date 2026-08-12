@@ -14,6 +14,7 @@ web/.test-dist/
 site/app.js
 site/query-worker.js
 site/query.css
+site/chunks/
 data/raw/
 data/fact-snapshots/
 data/site-releases/
