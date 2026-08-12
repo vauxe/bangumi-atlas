@@ -103,6 +103,82 @@ export interface WorkingSet {
   labels: string[];
 }
 
+const NEIGHBOR_LOOKUP_BITMAP_CAP = 2_000_000;
+
+/** 反向索引尚未就绪时，把一个工作集的未解析键合并为一次流式前缀扫描。
+ * knownRankOf 只负责已缓存的稀疏点或已完成的反向索引。 */
+export function resolveLoadedNeighborRanks(
+  facts: readonly Fact[],
+  selfKey: number,
+  loadedKeys: Uint32Array,
+  loaded: number,
+  knownRankOf: (key: number) => number | null,
+): ReadonlyMap<number, number> {
+  const requested = new Set<number>();
+  for (const fact of facts)
+    for (const other of factOthers(fact, selfKey))
+      if (other !== selfKey) requested.add(other);
+
+  const resolved = new Map<number, number>();
+  const unresolved = new Set<number>();
+  for (const key of requested) {
+    const rank = knownRankOf(key);
+    if (rank === null) unresolved.add(key);
+    else resolved.set(key, rank);
+  }
+  if (!unresolved.size) return resolved;
+
+  const count = Math.min(
+    Math.max(0, Math.floor(loaded)),
+    loadedKeys.length,
+  );
+  const maxIds = [-1, -1, -1, -1];
+  let bitmapBytes = 0;
+  let canUseBitmaps = true;
+  for (const key of unresolved) {
+    const kind = key >>> 24;
+    if (kind < 1 || kind > 3) {
+      canUseBitmaps = false;
+      break;
+    }
+    const id = key & 0xffffff;
+    if (id <= maxIds[kind]!) continue;
+    bitmapBytes += id - maxIds[kind]!;
+    maxIds[kind] = id;
+    if (bitmapBytes > NEIGHBOR_LOOKUP_BITMAP_CAP) {
+      canUseBitmaps = false;
+      break;
+    }
+  }
+  if (canUseBitmaps) {
+    const wanted = maxIds.map((maxId) =>
+      maxId < 0 ? null : new Uint8Array(maxId + 1)
+    );
+    for (const key of unresolved)
+      wanted[key >>> 24]![key & 0xffffff] = 1;
+    let remaining = unresolved.size;
+    for (let rank = 0; rank < count; rank++) {
+      const key = loadedKeys[rank] ?? 0;
+      const bitmap = wanted[key >>> 24];
+      const id = key & 0xffffff;
+      if (!bitmap?.[id]) continue;
+      bitmap[id] = 0;
+      resolved.set(key, rank);
+      if (--remaining === 0) break;
+    }
+    return resolved;
+  }
+
+  // 极端稀疏 archive id 不值得按最大 id 分配位图；保留有界内存回退。
+  for (let rank = 0; rank < count; rank++) {
+    const key = loadedKeys[rank] ?? 0;
+    if (!unresolved.delete(key)) continue;
+    resolved.set(key, rank);
+    if (!unresolved.size) break;
+  }
+  return resolved;
+}
+
 /** 工作集邻居:同一邻居的多种关系分别保留边和标签,按全局收藏度
  * (VisualRank 升序)取前 cap 条;未解析引用(无 rank)不进入画布。 */
 export function relationNeighbors(

@@ -6,6 +6,7 @@ import {
   factLabel,
   factPrimaryOther,
   relationNeighbors,
+  resolveLoadedNeighborRanks,
   uniqueNeighbors,
 } from "../src/neighbors";
 import type { Fact, Mappings } from "../src/types";
@@ -106,4 +107,46 @@ test("unresolved references never reach the canvas working set", () => {
   const ws = relationNeighbors(facts, self, mappings, () => null, 4);
   assert.deepEqual(ws.ranks, []);
   assert.deepEqual(ws.labels, []);
+});
+
+test("resolves every cold neighbor with one loaded-key pass", () => {
+  const self = S(1);
+  const known = S(2);
+  const coldA = P(3);
+  const coldB = C(4);
+  const facts: Fact[] = [
+    relates(self, known),
+    relates(self, coldA),
+    relates(self, coldB),
+    relates(coldA, self),
+  ];
+  const keys = Uint32Array.of(self, C(99), coldB, coldA, S(88), S(77));
+  let knownLookups = 0;
+
+  const ranks = resolveLoadedNeighborRanks(
+    facts,
+    self,
+    keys,
+    5,
+    (key) => {
+      knownLookups++;
+      return key === known ? 42 : null;
+    },
+  );
+
+  assert.deepEqual([...ranks], [[known, 42], [coldB, 2], [coldA, 3]]);
+  assert.equal(knownLookups, 3, "each distinct neighbor is probed once");
+});
+
+test("bounds temporary neighbor lookup memory for sparse archive ids", () => {
+  const self = S(1);
+  const far = S(0xffffff);
+  const ranks = resolveLoadedNeighborRanks(
+    [relates(self, far)],
+    self,
+    Uint32Array.of(far),
+    1,
+    () => null,
+  );
+  assert.equal(ranks.get(far), 0);
 });
