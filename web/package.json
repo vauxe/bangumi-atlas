@@ -8,7 +8,8 @@
     "serve:smoke": "http-server ../site -a 127.0.0.1 -p 8391 -c-1 --silent",
     "check": "tsc --noEmit",
     "test": "node -e \"require('node:fs').rmSync('.test-dist',{recursive:true,force:true})\" && esbuild tests/*.test.ts --bundle --platform=node --format=esm --outdir=.test-dist && node --test .test-dist/*.test.js",
-    "smoke": "esbuild tests/smoke.mts --bundle --platform=node --format=esm --outfile=.test-dist/smoke.mjs && node .test-dist/smoke.mjs"
+    "smoke": "esbuild tests/smoke.mts --bundle --platform=node --format=esm --outfile=.test-dist/smoke.mjs && node .test-dist/smoke.mjs",
+    "bench:query": "esbuild bench/query-performance.mts --bundle --platform=node --format=esm --outfile=.test-dist/query-performance.mjs && node --expose-gc .test-dist/query-performance.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",

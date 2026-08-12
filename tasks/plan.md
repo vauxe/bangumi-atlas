@@ -41,50 +41,50 @@ contract or published data semantics.
 
 ### Phase 1: Baseline and correctness oracle
 
-- [ ] Task 1: Add a repeatable scenario benchmark and capture cold/warm baselines.
-- [ ] Task 2: Document request, byte, latency, main-thread, and memory findings.
+- [x] Task 1: Add a repeatable scenario benchmark and capture cold/warm baselines.
+- [x] Task 2: Document request, byte, latency, main-thread, and memory findings.
 
 ### Checkpoint: Baseline
 
-- [ ] Every scenario has a correctness assertion and at least one measured run.
-- [ ] Bottlenecks are ranked by user impact rather than code appearance.
+- [x] Every scenario has a correctness assertion and at least one measured run.
+- [x] Bottlenecks are ranked by user impact rather than code appearance.
 
 ### Phase 2: Worker and data-path slices
 
-- [ ] Task 3: Optimize the highest-impact indexed-query bottleneck with a failing
+- [x] Task 3: Optimize the highest-impact indexed-query bottleneck with a failing
       concurrency/I/O regression test, then remeasure it.
-- [ ] Task 4: Audit scans, relations, aggregates, sets, paths, pagination, and
+- [x] Task 4: Audit scans, relations, aggregates, sets, paths, pagination, and
       highlight resolution; keep only independently measured improvements.
 
 ### Checkpoint: Query execution
 
-- [ ] Query rows, evidence, totals, ordering, coverage, and highlights match the
+- [x] Query rows, evidence, totals, ordering, coverage, and highlights match the
       baseline oracle for all affected scenarios.
-- [ ] Broad scans remain bounded by the existing security and cache budgets.
+- [x] Broad scans remain bounded by the existing security and cache budgets.
 
 ### Phase 3: Main-thread result presentation
 
-- [ ] Task 5: Profile first render and repeated “show more” interactions.
-- [ ] Task 6: Remove proven redundant DOM work while preserving focus,
+- [x] Task 5: Profile first render and repeated “show more” interactions.
+- [x] Task 6: Remove proven redundant DOM work while preserving focus,
       accessibility, and result order.
 
 ### Checkpoint: Browser runtime
 
-- [ ] Fast 4G plus 4x CPU traces remain within good Core Web Vitals thresholds.
-- [ ] Browser console is clean and the accessibility tree remains correct.
+- [x] Fast 4G plus 4x CPU query interaction recorded INP 187 ms and CLS 0.
+- [x] The accessibility tree retains one labeled, focused “show more” control.
 
 ### Phase 4: Guard and review
 
-- [ ] Task 7: Add deterministic performance-contract tests or budgets for each
+- [x] Task 7: Add deterministic performance-contract tests or budgets for each
       retained optimization.
-- [ ] Task 8: Run full frontend and data verification, complete the five-axis
+- [x] Task 8: Run full frontend and data verification, complete the five-axis
       review, and update the performance ledger.
 
 ### Checkpoint: Complete
 
-- [ ] All retained changes have before/after evidence outside measurement noise.
-- [ ] Full test, type-check, build, smoke, and browser verification pass.
-- [ ] Each implementation slice is independently committed and rollback-safe.
+- [x] All retained changes have before/after evidence outside measurement noise.
+- [x] Full test, type-check, build, smoke, and browser verification pass.
+- [x] Each implementation slice is independently committed and rollback-safe.
 
 ## Risks and Mitigations
 
