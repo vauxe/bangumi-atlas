@@ -44,6 +44,24 @@ test("only scans the streamed prefix of the geometry", () => {
   assert.equal(nearestAlongRay(positions, 1, ORIGIN, FORWARD, 0.6), 0);
 });
 
+test("avoids candidate sorting in the million-node anchor path", () => {
+  const positions = Float32Array.from(
+    { length: 9_000 },
+    (_, index) => index % 3 === 2 ? 10 + index / 3 : (index % 3) * 0.001,
+  );
+  const originalSort = Array.prototype.sort;
+  Reflect.set(Array.prototype, "sort", () => {
+    throw new Error("candidate sorting entered the anchor hot path");
+  });
+  try {
+    assert.doesNotThrow(() =>
+      nearestAlongRay(positions, 3_000, ORIGIN, FORWARD, 0.6)
+    );
+  } finally {
+    Reflect.set(Array.prototype, "sort", originalSort);
+  }
+});
+
 const VIEW = {
   width: 1280,
   height: 900,
