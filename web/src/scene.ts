@@ -108,6 +108,15 @@ export function updateQueryResultMask(
     if (rank < mask.length) mask[rank] = 255;
 }
 
+/** 查询高亮 rank 由 Worker 合并为严格升序；首项即可判定是否进入
+ * 当前已完成样式同步的前缀，避免每帧重扫大结果集。 */
+export function hasVisibleSortedRank(
+  ranks: Uint32Array,
+  upperBound: number,
+): boolean {
+  return ranks.length > 0 && (ranks[0] ?? upperBound) < upperBound;
+}
+
 export class NodeStyleExtension extends LayerExtension {
   static override extensionName = "NodeStyleExtension";
 
@@ -932,9 +941,7 @@ export class Scene {
   }
 
   private hasVisibleQueryResult(): boolean {
-    for (const rank of state.queryResultRanks)
-      if (rank < this.styled) return true;
-    return false;
+    return hasVisibleSortedRank(state.queryResultRanks, this.styled);
   }
 
   /** 语境层数据:属性引用恒定(GPU Buffer 或 CPU 数组),

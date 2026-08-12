@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { OrbitViewport } from "@deck.gl/core";
@@ -126,6 +127,48 @@ test("reveals only the nearest bounded node names in close view", () => {
       900,
     ).length,
     52,
+  );
+});
+
+test("keeps nearby candidate maintenance logarithmic in its fixed cap", () => {
+  const source = readFileSync("src/labels.ts", "utf8");
+  assert.doesNotMatch(source, /nearest\.findIndex|nearest\.splice/);
+});
+
+test("heap selection exactly matches a full distance sort", () => {
+  const values: number[] = [];
+  let seed = 0x12345678;
+  for (let rank = 0; rank < 1_000; rank++) {
+    seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0;
+    const x = (seed / 0xffffffff - 0.5) * 2;
+    seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0;
+    const y = (seed / 0xffffffff - 0.5) * 2;
+    values.push(x, y, rank % 7 === 0 ? 0.25 : 0);
+  }
+  const positions = Float32Array.from(values);
+  const expected = Array.from({ length: 1_000 }, (_, rank) => {
+    const offset = rank * 3;
+    const x = positions[offset] ?? 0;
+    const y = positions[offset + 1] ?? 0;
+    const z = positions[offset + 2] ?? 0;
+    return { rank, distance2: x * x + y * y + z * z };
+  })
+    .filter(({ rank }) => (positions[rank * 3] ?? 0) >= 0)
+    .sort((a, b) => a.distance2 - b.distance2 || a.rank - b.rank)
+    .slice(0, 37)
+    .map(({ rank }) => rank);
+
+  assert.deepEqual(
+    nearbyLabelRanks(
+      positions,
+      1_000,
+      [0, 0, 0],
+      NEARBY_LABEL_ZOOM,
+      1_440,
+      900,
+      { limit: 37, visible: ([x]) => x >= 0 },
+    ),
+    expected,
   );
 });
 
