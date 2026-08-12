@@ -23,6 +23,7 @@ import {
   foldedUtf8Range,
   loadCharmap,
   loadEntityKeys,
+  loadSearchDir,
   loadedEntityKeys,
   releaseWasReplaced,
   ReleaseChangedError,
@@ -35,6 +36,7 @@ import type { Manifest, NameRow } from "../src/types";
 import { SiteRuntimeError } from "../src/site-error";
 
 const originalFetch = globalThis.fetch;
+const EMPTY_SEARCH_DIRECTORY = gzipSync("{}");
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -134,10 +136,18 @@ function testManifest(
       number,
       string,
     ],
-    "search.idx.json": [2, hash(new TextEncoder().encode("{}"))] as [
-      number,
-      string,
-    ],
+    ...Object.fromEntries(
+      Array.from(
+        { length: siteContract.limits.search_prefix_shards },
+        (_, shard) => [
+          `search.idx-${shard}.json.gz`,
+          [
+            EMPTY_SEARCH_DIRECTORY.byteLength,
+            hash(EMPTY_SEARCH_DIRECTORY),
+          ] as [number, string],
+        ],
+      ),
+    ),
     "search.pack": [0, hash(new Uint8Array())] as [number, string],
     "search.ngram.idx": [
       (65536 * 2 + 2) * 4,
@@ -189,6 +199,7 @@ function testManifest(
       episode_block_subjects: 128,
       search_leaf_cap: 64_000,
       search_top: 12,
+      search_prefix_shards: siteContract.limits.search_prefix_shards,
       search_fold: "unicode-casefold-15.0.0-aliases-v1",
       search_ngram_width: 2,
       search_ngram_buckets: 65536,
@@ -407,7 +418,7 @@ test("rejects a runtime-defined search folding contract", async () => {
 test("rejects a manifest missing a mandatory search artifact", async () => {
   for (const path of [
     "charmap.json",
-    "search.idx.json",
+    "search.idx-0.json.gz",
     "search.pack",
     "search.ngram.idx",
     "search.ngram.pack",
@@ -425,6 +436,25 @@ test("rejects a manifest missing a mandatory search artifact", async () => {
 
     await assert.rejects(loadManifest(), /structural-site-v1|charmap/);
   }
+});
+
+test("loads only the prefix directory shard selected by the first codepoint", async () => {
+  const shard = ("境".codePointAt(0) ?? 0) % 16;
+  const directory = { "境": { l: [4, 5] } };
+  const compressed = gzipSync(JSON.stringify(directory));
+  const path = `search.idx-${shard}.json.gz`;
+  const manifest = testManifest({
+    [path]: [compressed.byteLength, hash(compressed)],
+  });
+  const requests: string[] = [];
+  await installFetch(manifest, async (requested) => {
+    requests.push(requested);
+    assert.ok(requested.endsWith(path));
+    return new Response(body(compressed));
+  });
+
+  assert.deepEqual(await loadSearchDir("境界"), directory);
+  assert.equal(requests.length, 1);
 });
 
 test("rejects an incomplete full-text-v1 query release", async () => {

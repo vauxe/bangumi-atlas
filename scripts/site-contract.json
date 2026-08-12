@@ -18,6 +18,7 @@
     "pack_cap": 80000000,
     "search_leaf_cap": 64000,
     "search_top": 12,
+    "search_prefix_shards": 16,
     "search_fold": "unicode-casefold-15.0.0-aliases-v1",
     "search_fold_max_expansion": 3,
     "search_ngram_width": 2,

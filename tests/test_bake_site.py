@@ -14,6 +14,15 @@ import pyarrow.parquet as pq
 from scripts import bake_site
 
 
+def load_search_directory(site: Path) -> dict[str, object]:
+    directory: dict[str, object] = {}
+    for shard in range(bake_site.sr.SEARCH_PREFIX_SHARDS):
+        path = site / f"search.idx-{shard}.json.gz"
+        rows = bake_site.orjson.loads(gzip.decompress(path.read_bytes()))
+        directory.update(rows)
+    return directory
+
+
 class InputGenerationTests(unittest.TestCase):
     def test_main_holds_generation_lock_for_validation_and_bake(self) -> None:
         events: list[str] = []
@@ -525,11 +534,31 @@ class SearchIndexTests(unittest.TestCase):
                     [1, 1],
                 )
 
-            search_dir = bake_site.orjson.loads(
-                (site / "search.idx.json").read_bytes()
-            )
+            search_dir = load_search_directory(site)
 
         self.assertIn(shared, search_dir)
+
+    def test_search_directory_is_sharded_by_first_codepoint(self) -> None:
+        names = ["alpha", "境界線上のホライゾン", "月姫"]
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory)
+            with patch.object(bake_site, "SITE", site):
+                bake_site.build_search_index(names, ["", "", ""], [1, 1, 1])
+
+            self.assertFalse((site / "search.idx.json").exists())
+            merged = load_search_directory(site)
+            for prefix, node in merged.items():
+                shard = ord(prefix[0]) % bake_site.sr.SEARCH_PREFIX_SHARDS
+                rows = bake_site.orjson.loads(
+                    gzip.decompress(
+                        (site / f"search.idx-{shard}.json.gz").read_bytes()
+                    )
+                )
+                self.assertEqual(rows[prefix], node)
+
+        self.assertIn("a", merged)
+        self.assertIn("境", merged)
+        self.assertIn("月", merged)
 
     def test_bigram_postings_preserve_global_rank_order(self) -> None:
         names = ["The Garden", "境界線上のホライゾン", "月姫"]
@@ -594,9 +623,7 @@ class SearchIndexTests(unittest.TestCase):
             ):
                 bake_site.build_search_index(names, cn_names, kinds)
 
-            search_dir = bake_site.orjson.loads(
-                (site / "search.idx.json").read_bytes()
-            )
+            search_dir = load_search_directory(site)
             offset, length = search_dir["a"]["t"]
             rows = bake_site.orjson.loads(
                 gzip.decompress(
@@ -622,9 +649,7 @@ class SearchIndexTests(unittest.TestCase):
             ):
                 bake_site.build_search_index(names, cn_names, kinds)
 
-            search_dir = bake_site.orjson.loads(
-                (site / "search.idx.json").read_bytes()
-            )
+            search_dir = load_search_directory(site)
             offset, length = search_dir["a"]["t"]
             rows = bake_site.orjson.loads(
                 gzip.decompress(
@@ -651,9 +676,7 @@ class SearchIndexTests(unittest.TestCase):
             ):
                 bake_site.build_search_index(names, cn_names, kinds)
 
-            search_dir = bake_site.orjson.loads(
-                (site / "search.idx.json").read_bytes()
-            )
+            search_dir = load_search_directory(site)
             offset, length = search_dir["a"]["t"]
             rows = bake_site.orjson.loads(
                 gzip.decompress(

@@ -2454,9 +2454,25 @@ def verify_release(  # noqa: PLR0915
         alias_index_ok,
     )
 
-    search_dir = orjson.loads(site_file("search.idx.json").read_bytes())
+    search_dir: dict[str, Any] = {}
+    for shard in range(sr.SEARCH_PREFIX_SHARDS):
+        shard_dir = orjson.loads(
+            gzip.decompress(
+                site_file(f"search.idx-{shard}.json.gz").read_bytes()
+            )
+        )
+        if not isinstance(shard_dir, dict):
+            raise ValueError("search prefix shard must be an object")
+        if any(
+            not prefix or ord(prefix[0]) % sr.SEARCH_PREFIX_SHARDS != shard
+            for prefix in shard_dir
+        ):
+            raise ValueError("search prefix is stored in the wrong shard")
+        if set(search_dir).intersection(shard_dir):
+            raise ValueError("search prefix is duplicated across shards")
+        search_dir.update(shard_dir)
     if not isinstance(search_dir, dict):
-        raise ValueError("search.idx.json must be an object")
+        raise ValueError("search prefix directory must be an object")
 
     leaf_expected: dict[str, OrderedRows] = {}
     exact_expected: dict[str, OrderedRows] = {}
