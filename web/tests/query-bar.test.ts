@@ -133,6 +133,7 @@ const removableToken: QueryToken = {
 const queryStyles = readFileSync("src/query/workbench.css", "utf8");
 const queryBarSource = readFileSync("src/query/query-bar.ts", "utf8");
 const mainSource = readFileSync("src/main.ts", "utf8");
+const queryRuntimeSource = readFileSync("src/query/runtime.ts", "utf8");
 
 const relationMappings: Mappings = {
   fact_labels: {
@@ -798,7 +799,7 @@ test("continues entity-reference suggestions until the release is exhausted", ()
   const picker = queryBarSource.match(
     /private openEntityPicker\([\s\S]*?\n  }(?=\n\n  private cancelSuggestions)/,
   )?.[0];
-  const provider = mainSource.match(
+  const provider = queryRuntimeSource.match(
     /const suggestQueryEntities = async function\*[\s\S]*?\n  };(?=\n\n  const navigateEntity)/,
   )?.[0];
 
@@ -810,7 +811,7 @@ test("continues entity-reference suggestions until the release is exhausted", ()
   assert.match(provider, /while \(cursors\.length\)/);
   assert.match(provider, /complete: cursors\.length === 0/);
   assert.doesNotMatch(provider, /limit:\s*\d+|slice\(0,/);
-  assert.match(mainSource, /limit: offset \+ pageSize \+ 1/);
+  assert.match(queryRuntimeSource, /limit: offset \+ pageSize \+ 1/);
 });
 
 test("gives the complete relationship vocabulary a full-width searchable list", () => {
