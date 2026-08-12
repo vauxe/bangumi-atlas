@@ -110,30 +110,30 @@ desktop explorer without weakening the existing query correctness boundary.
 
 ### Phase 5: Initial load and interaction baseline
 
-- [ ] Task 9: Measure the production bundle by module family and record initial
+- [x] Task 9: Measure the production bundle by module family and record initial
       script, CSS, geometry, parse, and startup costs.
-- [ ] Task 10: Benchmark camera anchoring, nearby labels, selection rendering,
+- [x] Task 10: Benchmark camera anchoring, nearby labels, selection rendering,
       drawer opening, and name/tag suggestions against the 996,459-node release.
 
 ### Phase 6: Main-thread and data-path slices
 
-- [ ] Task 11: Remove proven allocation or sorting work from camera/label hot
+- [x] Task 11: Remove proven allocation or sorting work from camera/label hot
       paths while preserving exact rank selection and visual behavior.
-- [ ] Task 12: Avoid entity-type-inapplicable vocabulary reads and other proven
+- [x] Task 12: Avoid entity-type-inapplicable vocabulary reads and other proven
       drawer/search data over-fetch while preserving decoded entity values.
 
 ### Phase 7: Delivery and bundle slices
 
-- [ ] Task 13: Evaluate query-UI code splitting against the current 953 KiB
+- [x] Task 13: Evaluate query-UI code splitting against the current 953 KiB
       production app bundle; retain it only if initial bytes/parse improve
       without delaying the documented query interaction contract.
-- [ ] Task 14: Add stable bundle/work-count guards and record both retained and
+- [x] Task 14: Add stable bundle/work-count guards and record both retained and
       rejected experiments in a whole-frontend performance ledger.
 
 ### Checkpoint: Whole frontend complete
 
-- [ ] Every retained change has same-condition before/after measurements.
-- [ ] Camera picks, labels, drawer values, search order, query output, focus, and
+- [x] Every retained change has same-condition before/after measurements.
+- [x] Camera picks, labels, drawer values, search order, query output, focus, and
       accessibility remain correct.
-- [ ] Full tests, type-check, production build, real-release smoke, browser
+- [x] Full tests, type-check, production build, real-release smoke, browser
       console/network/accessibility, and representative traces pass.
