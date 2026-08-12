@@ -63,6 +63,7 @@ SEARCH_TRIM_CHARS: Final = (
 )
 SEARCH_NGRAM_WIDTH = int(SITE_LIMITS["search_ngram_width"])
 SEARCH_NGRAM_BUCKETS = int(SITE_LIMITS["search_ngram_buckets"])
+SEARCH_NGRAM_SHARDS = int(SITE_LIMITS["search_ngram_shards"])
 SEARCH_NGRAM_MEMBER_RANKS = int(SITE_LIMITS["search_ngram_member_ranks"])
 SEARCH_PREFIX_SHARDS = int(SITE_LIMITS["search_prefix_shards"])
 # 发布可确定性缩小该值，客户端将它视为编译期上限。
@@ -126,6 +127,7 @@ def release_limits(
         "search_fold": SEARCH_FOLD,
         "search_ngram_width": SEARCH_NGRAM_WIDTH,
         "search_ngram_buckets": SEARCH_NGRAM_BUCKETS,
+        "search_ngram_shards": SEARCH_NGRAM_SHARDS,
         "search_ngram_member_ranks": SEARCH_NGRAM_MEMBER_RANKS,
         "search_alias_block_ranks": search_alias_block_ranks,
         "cache_budget": {
@@ -262,9 +264,10 @@ TUPLE_SCHEMAS: dict[str, Any] = {
         "hash": "fnv1a32-codepoint",
         "width": SEARCH_NGRAM_WIDTH,
         "buckets": SEARCH_NGRAM_BUCKETS,
+        "shards": SEARCH_NGRAM_SHARDS,
         "index": (
-            "u32le bucket member starts, member byte offsets, "
-            "member first/last ranks, then bucket posting counts"
+            "gzip JSON shards: local bucket slot -> "
+            "null|[count,members[[offset,length,first_rank,last_rank]]]"
         ),
         "postings": (
             "gzip members of at most "

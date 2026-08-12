@@ -35,6 +35,7 @@ const {
   search_fold_max_expansion: SEARCH_FOLD_MAX_EXPANSION,
   search_ngram_width: SEARCH_NGRAM_WIDTH,
   search_ngram_buckets: SEARCH_NGRAM_BUCKETS,
+  search_ngram_shards: SEARCH_NGRAM_SHARDS,
   search_ngram_member_ranks: SEARCH_NGRAM_MEMBER_RANKS,
   search_alias_block_ranks_max: SEARCH_ALIAS_BLOCK_RANKS_MAX,
 } = siteContract.limits;
@@ -50,13 +51,16 @@ const SITE_BYTE_CAP = 1_000_000_000;
 const REQUIRED_SEARCH_FILES = [
   "charmap.json",
   "search.pack",
-  "search.ngram.idx",
   "search.ngram.pack",
   "search.alias.idx",
   "search.alias.pack",
   ...Array.from(
     { length: SEARCH_PREFIX_SHARDS },
     (_, shard) => `search.idx-${shard}.json.gz`,
+  ),
+  ...Array.from(
+    { length: SEARCH_NGRAM_SHARDS },
+    (_, shard) => `search.ngram.idx-${shard}.json.gz`,
   ),
 ];
 const REQUIRED_TEXT_QUERY_FILES = [
@@ -268,6 +272,7 @@ export async function loadManifest(): Promise<Manifest> {
     m.limits.search_fold !== SEARCH_FOLD ||
     m.limits.search_ngram_width !== SEARCH_NGRAM_WIDTH ||
     m.limits.search_ngram_buckets !== SEARCH_NGRAM_BUCKETS ||
+    m.limits.search_ngram_shards !== SEARCH_NGRAM_SHARDS ||
     m.limits.search_ngram_member_ranks !== SEARCH_NGRAM_MEMBER_RANKS ||
     m.limits.search_prefix_shards !== SEARCH_PREFIX_SHARDS ||
     !Number.isInteger(m.limits.search_alias_block_ranks) ||
@@ -1712,13 +1717,14 @@ interface SearchNgramIndex {
   counts: Uint32Array;
 }
 
+/** Fixed u32 index retained by authoritative full-text search. */
 function searchNgramIndex(index: Uint32Array): SearchNgramIndex {
   const bucketMembers = index.subarray(0, SEARCH_NGRAM_BUCKETS + 1);
   const memberCount = bucketMembers[SEARCH_NGRAM_BUCKETS] ?? 0;
   const expectedLength = SEARCH_NGRAM_BUCKETS * 2 + memberCount * 3 + 2;
   if (index.length !== expectedLength)
     throw new SiteDataContractError(
-      `search.ngram.idx 应有 ${expectedLength} 项,实际为 ${index.length}`,
+      `text search index 应有 ${expectedLength} 项,实际为 ${index.length}`,
     );
   const offsetsStart = SEARCH_NGRAM_BUCKETS + 1;
   const firstStart = offsetsStart + memberCount + 1;
@@ -1733,50 +1739,82 @@ function searchNgramIndex(index: Uint32Array): SearchNgramIndex {
   };
 }
 
-function validateSearchNgramIndex(index: Uint32Array): void {
-  const {
-    bucketMembers,
-    memberOffsets,
-    memberFirst,
-    memberLast,
-    counts,
-  } = searchNgramIndex(index);
-  const memberCount = memberFirst.length;
+type SearchNgramMember = [
+  offset: number,
+  length: number,
+  firstRank: number,
+  lastRank: number,
+];
+type SearchNgramBucket = [
+  count: number,
+  members: SearchNgramMember[],
+] | null;
+type SearchNgramShard = SearchNgramBucket[];
+
+function validateSearchNgramShard(
+  value: unknown,
+  shard: number,
+): SearchNgramShard {
+  const expectedLength = SEARCH_NGRAM_BUCKETS / SEARCH_NGRAM_SHARDS;
+  if (
+    !Array.isArray(value) ||
+    !Number.isInteger(expectedLength) ||
+    value.length !== expectedLength
+  )
+    throw new SiteDataContractError(
+      `search.ngram shard ${shard} 目录长度无效`,
+    );
   const [packBytes] = publishedMeta("search.ngram.pack");
   const memberCap = manifestRef?.limits.member_cap ?? 0;
   const nNodes = manifestRef?.n_nodes ?? 0;
-  if (bucketMembers[0] !== 0 || memberOffsets[0] !== 0)
-    throw new SiteDataContractError("search.ngram.idx 必须从零开始");
-  for (let member = 0; member < memberCount; member++) {
-    const start = memberOffsets[member] ?? 0;
-    const end = memberOffsets[member + 1] ?? start;
+  for (const entry of value) {
+    if (entry === null) continue;
     if (
-      end <= start ||
-      end - start > memberCap ||
-      (memberFirst[member] ?? nNodes) > (memberLast[member] ?? -1) ||
-      (memberLast[member] ?? nNodes) >= nNodes
+      !Array.isArray(entry) ||
+      entry.length !== 2 ||
+      !Number.isSafeInteger(entry[0]) ||
+      entry[0] <= 0 ||
+      entry[0] > nNodes ||
+      !Array.isArray(entry[1]) ||
+      entry[1].length !== Math.ceil(entry[0] / SEARCH_NGRAM_MEMBER_RANKS)
     )
       throw new SiteDataContractError("search.ngram.idx 成员边界无效");
-  }
-  for (let bucket = 0; bucket < SEARCH_NGRAM_BUCKETS; bucket++) {
-    const start = bucketMembers[bucket] ?? 0;
-    const end = bucketMembers[bucket + 1] ?? start;
-    const count = counts[bucket] ?? 0;
-    if (
-      end < start ||
-      end > memberCount ||
-      end - start !== Math.ceil(count / SEARCH_NGRAM_MEMBER_RANKS)
-    )
-      throw new SiteDataContractError("search.ngram.idx 成员边界无效");
-    for (let member = start + 1; member < end; member++)
-      if ((memberLast[member - 1] ?? nNodes) >= (memberFirst[member] ?? -1))
+    let priorEnd = -1;
+    let priorLast = -1;
+    for (const member of entry[1]) {
+      if (
+        !Array.isArray(member) ||
+        member.length !== 4 ||
+        member.some((item) => !Number.isSafeInteger(item))
+      )
+        throw new SiteDataContractError("search.ngram.idx 成员边界无效");
+      const [offset, length, firstRank, lastRank] = member;
+      if (
+        offset < 0 ||
+        length <= 0 ||
+        length > memberCap ||
+        !Number.isSafeInteger(offset + length) ||
+        offset + length > packBytes ||
+        firstRank < 0 ||
+        firstRank > lastRank ||
+        lastRank >= nNodes ||
+        (priorEnd >= 0 && offset !== priorEnd)
+      )
+        throw new SiteDataContractError("search.ngram.idx 成员边界无效");
+      if (firstRank <= priorLast)
         throw new SiteDataContractError("search.ngram.idx 桶内 rank 边界无效");
+      priorEnd = offset + length;
+      priorLast = lastRank;
+    }
   }
-  const endpoint = memberOffsets[memberCount] ?? 0;
-  if (endpoint !== packBytes)
-    throw new SiteDataContractError(
-      `search.ngram.idx 终点 ${endpoint} != postings ${packBytes}`,
-    );
+  return value as SearchNgramShard;
+}
+
+async function loadSearchNgramShard(
+  shard: number,
+): Promise<SearchNgramShard> {
+  const path = `search.ngram.idx-${shard}.json.gz`;
+  return validateSearchNgramShard(await loadGzJson<unknown>(path), shard);
 }
 
 /** 与烘焙器一致地按 Unicode 码点散列连续二元字符。碰撞只会增加
@@ -2061,27 +2099,36 @@ export async function searchSubstringPage(
   const buckets = searchGramBuckets(normalized);
   if (!buckets.length) return { ranks: [], next: null };
 
-  const index = await waitForSignal(
-    loadIdx("search.ngram.idx", validateSearchNgramIndex),
+  const shardIds = [...new Set(
+    buckets.map((bucket) => bucket % SEARCH_NGRAM_SHARDS),
+  )];
+  const directories = new Map(await waitForSignal(
+    Promise.all(shardIds.map(async (shard) =>
+      [shard, await loadSearchNgramShard(shard)] as const
+    )),
     signal,
-  );
-  const {
-    bucketMembers,
-    memberOffsets,
-    memberFirst,
-    memberLast,
-    counts,
-  } = searchNgramIndex(index);
+  ));
+  const entryFor = (bucket: number): SearchNgramBucket =>
+    directories.get(bucket % SEARCH_NGRAM_SHARDS)?.[
+      Math.floor(bucket / SEARCH_NGRAM_SHARDS)
+    ] ?? null;
 
   let bucket = buckets[0] ?? 0;
+  let bucketEntry = entryFor(bucket);
   for (const candidate of buckets.slice(1)) {
-    if ((counts[candidate] ?? 0) < (counts[bucket] ?? 0))
+    const candidateEntry = entryFor(candidate);
+    if ((candidateEntry?.[0] ?? 0) < (bucketEntry?.[0] ?? 0)) {
       bucket = candidate;
+      bucketEntry = candidateEntry;
+    }
   }
-  const total = counts[bucket] ?? 0;
+  const total = bucketEntry?.[0] ?? 0;
   if (cursor >= total) return { ranks: [], next: null };
   const page = Math.floor(cursor / SEARCH_NGRAM_MEMBER_RANKS);
-  const member = (bucketMembers[bucket] ?? 0) + page;
+  const location = bucketEntry?.[1][page];
+  if (!location)
+    throw new SiteDataContractError("search.ngram.idx 缺少候选成员");
+  const [start, length, expectedFirstRank, expectedLastRank] = location;
   const memberCursor = page * SEARCH_NGRAM_MEMBER_RANKS;
   const localCursor = cursor - memberCursor;
   const memberCount = Math.min(
@@ -2089,13 +2136,11 @@ export async function searchSubstringPage(
     total - memberCursor,
   );
   const count = Math.min(limit, memberCount - localCursor);
-  const start = memberOffsets[member] ?? 0;
-  const end = memberOffsets[member + 1] ?? start;
   const bytes = await binaryMember(
     "search",
     "search.ngram.pack",
     start,
-    end - start,
+    length,
     (postingBytes) => {
       if (postingBytes.byteLength !== memberCount * 3)
         throw new SiteDataContractError(
@@ -2118,8 +2163,8 @@ export async function searchSubstringPage(
         ((postingBytes[1] ?? 0) << 8) |
         ((postingBytes[2] ?? 0) << 16);
       if (
-        firstRank !== memberFirst[member] ||
-        priorRank !== memberLast[member]
+        firstRank !== expectedFirstRank ||
+        priorRank !== expectedLastRank
       )
         throw new SiteDataContractError(
           "search.ngram.pack 成员与索引 rank 边界不一致",

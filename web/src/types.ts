@@ -68,6 +68,7 @@ export interface Manifest {
     search_fold: string;
     search_ngram_width: number;
     search_ngram_buckets: number;
+    search_ngram_shards: number;
     search_ngram_member_ranks: number;
     search_alias_block_ranks: number;
     cache_budget: {

@@ -23,6 +23,19 @@ def load_search_directory(site: Path) -> dict[str, object]:
     return directory
 
 
+def load_search_ngram_bucket(
+    site: Path,
+    bucket: int,
+) -> list[object] | None:
+    shard = bucket % bake_site.sr.SEARCH_NGRAM_SHARDS
+    directory = bake_site.orjson.loads(
+        gzip.decompress(
+            (site / f"search.ngram.idx-{shard}.json.gz").read_bytes()
+        )
+    )
+    return directory[bucket // bake_site.sr.SEARCH_NGRAM_SHARDS]
+
+
 class InputGenerationTests(unittest.TestCase):
     def test_main_holds_generation_lock_for_validation_and_bake(self) -> None:
         events: list[str] = []
@@ -573,36 +586,35 @@ class SearchIndexTests(unittest.TestCase):
             ):
                 bake_site.build_search_index(names, cn_names, kinds)
 
-            index = bake_site.np.frombuffer(
-                (site / "search.ngram.idx").read_bytes(), dtype="<u4"
-            )
             postings = (site / "search.ngram.pack").read_bytes()
-
-        bucket_count = bake_site.sr.SEARCH_NGRAM_BUCKETS
-        bucket_members = index[: bucket_count + 1]
-        member_count = int(bucket_members[-1])
-        offsets_start = bucket_count + 1
-        first_start = offsets_start + member_count + 1
-        last_start = first_start + member_count
-        counts_start = last_start + member_count
-        offsets = index[offsets_start:first_start]
-        counts = index[counts_start:]
-        self.assertEqual(len(index), bucket_count * 2 + member_count * 3 + 2)
+            entries = {
+                gram: load_search_ngram_bucket(
+                    site, bake_site.sr.search_gram_bucket(gram)
+                )
+                for gram in ("之境", "境界")
+            }
 
         def ranks_for(gram: str) -> list[int]:
-            bucket = bake_site.sr.search_gram_bucket(gram)
+            entry = entries[gram]
+            self.assertIsNotNone(entry)
+            count, members = entry
             raw = b""
-            for member in range(
-                int(bucket_members[bucket]),
-                int(bucket_members[bucket + 1]),
-            ):
-                start, end = int(offsets[member]), int(offsets[member + 1])
-                raw += gzip.decompress(postings[start:end])
+            for offset, length, first, last in members:
+                member_ranks = gzip.decompress(
+                    postings[offset : offset + length]
+                )
+                self.assertEqual(
+                    int.from_bytes(member_ranks[:3], "little"), first
+                )
+                self.assertEqual(
+                    int.from_bytes(member_ranks[-3:], "little"), last
+                )
+                raw += member_ranks
             ranks = [
                 raw[i] | (raw[i + 1] << 8) | (raw[i + 2] << 16)
                 for i in range(0, len(raw), 3)
             ]
-            self.assertEqual(len(ranks), int(counts[bucket]))
+            self.assertEqual(len(ranks), count)
             return ranks
 
         self.assertEqual(ranks_for("之境"), [0])

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { afterEach, test } from "node:test";
-import { gzipSync } from "node:zlib";
+import { gzipSync, gunzipSync } from "node:zlib";
 
 import siteContract from "../../scripts/site-contract.json";
 import {
@@ -37,6 +37,10 @@ import { SiteRuntimeError } from "../src/site-error";
 
 const originalFetch = globalThis.fetch;
 const EMPTY_SEARCH_DIRECTORY = gzipSync("{}");
+const NGRAM_SHARDS = siteContract.limits.search_ngram_shards;
+const EMPTY_NGRAM_SHARD = gzipSync(
+  JSON.stringify(new Array(65_536 / NGRAM_SHARDS).fill(null)),
+);
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -68,22 +72,25 @@ function ngramArtifacts(
   byBucket: Map<number, number[]>,
   memberRanks = 60_000,
 ): {
-  index: Uint8Array;
+  shards: Record<string, Uint8Array>;
   pack: Uint8Array;
   bucketMembers: number[];
   memberOffsets: number[];
 } {
   const bucketMembers = new Array<number>(65537).fill(0);
   const memberOffsets = [0];
-  const memberFirst: number[] = [];
-  const memberLast: number[] = [];
-  const counts = new Array<number>(65536).fill(0);
+  const directories: Array<Array<
+    [number, Array<[number, number, number, number]>] | null
+  >> = Array.from(
+    { length: NGRAM_SHARDS },
+    () => new Array(65_536 / NGRAM_SHARDS).fill(null),
+  );
   const members: Uint8Array[] = [];
   let size = 0;
   for (let bucket = 0; bucket < 65536; bucket++) {
     bucketMembers[bucket] = members.length;
     const ranks = byBucket.get(bucket) ?? [];
-    counts[bucket] = ranks.length;
+    const locations: Array<[number, number, number, number]> = [];
     for (let start = 0; start < ranks.length; start += memberRanks) {
       const page = ranks.slice(start, start + memberRanks);
       const raw = new Uint8Array(page.length * 3);
@@ -94,25 +101,59 @@ function ngramArtifacts(
       });
       const member = new Uint8Array(gzipSync(raw));
       members.push(member);
+      locations.push([
+        size,
+        member.byteLength,
+        page[0] ?? 0,
+        page.at(-1) ?? 0,
+      ]);
       size += member.byteLength;
       memberOffsets.push(size);
-      memberFirst.push(page[0] ?? 0);
-      memberLast.push(page.at(-1) ?? 0);
+    }
+    if (ranks.length) {
+      const directory = directories[bucket % NGRAM_SHARDS];
+      assert.ok(directory);
+      directory[Math.floor(bucket / NGRAM_SHARDS)] = [
+        ranks.length,
+        locations,
+      ];
     }
   }
   bucketMembers[65536] = members.length;
   return {
-    index: u32le([
-      ...bucketMembers,
-      ...memberOffsets,
-      ...memberFirst,
-      ...memberLast,
-      ...counts,
-    ]),
+    shards: Object.fromEntries(
+      directories.map((directory, shard) => [
+        `search.ngram.idx-${shard}.json.gz`,
+        new Uint8Array(gzipSync(JSON.stringify(directory))),
+      ]),
+    ),
     pack: new Uint8Array(Buffer.concat(members)),
     bucketMembers,
     memberOffsets,
   };
+}
+
+function ngramFiles(
+  artifacts: ReturnType<typeof ngramArtifacts>,
+): Record<string, [number, string]> {
+  return {
+    ...Object.fromEntries(
+      Object.entries(artifacts.shards).map(([path, bytes]) => [
+        path,
+        [bytes.byteLength, hash(bytes)],
+      ]),
+    ),
+    "search.ngram.pack": [artifacts.pack.byteLength, hash(artifacts.pack)],
+  };
+}
+
+function ngramShardResponse(
+  path: string,
+  artifacts: ReturnType<typeof ngramArtifacts>,
+): Response | null {
+  for (const [logicalName, bytes] of Object.entries(artifacts.shards))
+    if (path.endsWith(logicalName)) return new Response(body(bytes));
+  return null;
 }
 
 function testManifest(
@@ -149,10 +190,15 @@ function testManifest(
       ),
     ),
     "search.pack": [0, hash(new Uint8Array())] as [number, string],
-    "search.ngram.idx": [
-      (65536 * 2 + 2) * 4,
-      "0".repeat(64),
-    ] as [number, string],
+    ...Object.fromEntries(
+      Array.from({ length: NGRAM_SHARDS }, (_, shard) => [
+        `search.ngram.idx-${shard}.json.gz`,
+        [EMPTY_NGRAM_SHARD.byteLength, hash(EMPTY_NGRAM_SHARD)] as [
+          number,
+          string,
+        ],
+      ]),
+    ),
     "search.ngram.pack": [0, hash(new Uint8Array())] as [number, string],
     "search.alias.idx": [8, "0".repeat(64)] as [number, string],
     "search.alias.pack": [0, hash(new Uint8Array())] as [number, string],
@@ -203,6 +249,7 @@ function testManifest(
       search_fold: "unicode-casefold-15.0.0-aliases-v1",
       search_ngram_width: 2,
       search_ngram_buckets: 65536,
+      search_ngram_shards: NGRAM_SHARDS,
       search_ngram_member_ranks: 60_000,
       search_alias_block_ranks: 1_024,
       cache_budget: {
@@ -420,7 +467,7 @@ test("rejects a manifest missing a mandatory search artifact", async () => {
     "charmap.json",
     "search.idx-0.json.gz",
     "search.pack",
-    "search.ngram.idx",
+    "search.ngram.idx-0.json.gz",
     "search.ngram.pack",
     "search.alias.idx",
     "search.alias.pack",
@@ -579,19 +626,20 @@ test("reads the rarest bigram posting page in global rank order", async () => {
     [firstBucket, [1, 2, 3, 4]],
     [rarestBucket, [1, 3]],
   ]);
-  const { index, pack, bucketMembers, memberOffsets } = ngramArtifacts(
-    byBucket,
-  );
+  const artifacts = ngramArtifacts(byBucket);
+  const { pack, bucketMembers, memberOffsets } = artifacts;
   const manifest = testManifest(
-    {
-      "search.ngram.idx": [index.byteLength, hash(index)],
-      "search.ngram.pack": [pack.byteLength, hash(pack)],
-    },
+    ngramFiles(artifacts),
     5,
   );
   const ranges: string[] = [];
+  const shardRequests: string[] = [];
   await installFetch(manifest, async (path, init) => {
-    if (path.endsWith("search.ngram.idx")) return new Response(body(index));
+    const shard = ngramShardResponse(path, artifacts);
+    if (shard) {
+      shardRequests.push(path);
+      return shard;
+    }
     assert.match(path, /search\.ngram\.pack$/);
     const range = new Headers(init?.headers).get("Range");
     assert.ok(range);
@@ -617,21 +665,27 @@ test("reads the rarest bigram posting page in global rank order", async () => {
     (memberOffsets[member + 1] ?? 0) - 1
   }`;
   assert.deepEqual(ranges, [expectedRange]);
+  assert.equal(shardRequests.length, 2);
+  assert.ok(shardRequests.some((path) =>
+    path.endsWith(`search.ngram.idx-${firstBucket % NGRAM_SHARDS}.json.gz`)
+  ));
+  assert.ok(shardRequests.some((path) =>
+    path.endsWith(`search.ngram.idx-${rarestBucket % NGRAM_SHARDS}.json.gz`)
+  ));
 });
 
 test("reuses one validated posting member across result pages", async () => {
   const bucket = searchGramBuckets("之境")[0] ?? 0;
-  const { index, pack } = ngramArtifacts(new Map([[bucket, [1, 2, 3]]]));
+  const artifacts = ngramArtifacts(new Map([[bucket, [1, 2, 3]]]));
+  const { pack } = artifacts;
   const manifest = testManifest(
-    {
-      "search.ngram.idx": [index.byteLength, hash(index)],
-      "search.ngram.pack": [pack.byteLength, hash(pack)],
-    },
+    ngramFiles(artifacts),
     4,
   );
   let memberRequests = 0;
   await installFetch(manifest, async (path, init) => {
-    if (path.endsWith("search.ngram.idx")) return new Response(body(index));
+    const shard = ngramShardResponse(path, artifacts);
+    if (shard) return shard;
     memberRequests++;
     const range = new Headers(init?.headers).get("Range");
     assert.equal(range, `bytes=0-${pack.byteLength - 1}`);
@@ -658,19 +712,16 @@ test("reuses one validated posting member across result pages", async () => {
 test("continues a posting bucket at a validated member boundary", async () => {
   const bucket = searchGramBuckets("之境")[0] ?? 0;
   const postingRanks = Array.from({ length: 60_001 }, (_, rank) => rank);
-  const { index, pack, memberOffsets } = ngramArtifacts(
-    new Map([[bucket, postingRanks]]),
-  );
+  const artifacts = ngramArtifacts(new Map([[bucket, postingRanks]]));
+  const { pack, memberOffsets } = artifacts;
   const manifest = testManifest(
-    {
-      "search.ngram.idx": [index.byteLength, hash(index)],
-      "search.ngram.pack": [pack.byteLength, hash(pack)],
-    },
+    ngramFiles(artifacts),
     60_002,
   );
   const ranges: string[] = [];
   await installFetch(manifest, async (path, init) => {
-    if (path.endsWith("search.ngram.idx")) return new Response(body(index));
+    const shard = ngramShardResponse(path, artifacts);
+    if (shard) return shard;
     const range = new Headers(init?.headers).get("Range");
     assert.ok(range);
     ranges.push(range);
@@ -709,15 +760,12 @@ test("rejects overlapping rank boundaries between posting members", async () => 
   );
   const artifacts = ngramArtifacts(new Map([[bucket, postingRanks]]));
   const manifest = testManifest(
-    {
-      "search.ngram.idx": [artifacts.index.byteLength, hash(artifacts.index)],
-      "search.ngram.pack": [artifacts.pack.byteLength, hash(artifacts.pack)],
-    },
+    ngramFiles(artifacts),
     60_002,
   );
   await installFetch(manifest, async (path) => {
-    if (path.endsWith("search.ngram.idx"))
-      return new Response(body(artifacts.index));
+    const shard = ngramShardResponse(path, artifacts);
+    if (shard) return shard;
     return new Response(body(artifacts.pack));
   });
 
@@ -732,14 +780,14 @@ test("rejects a corrupt posting member before exposing candidates", async () => 
   corrupt[middle] = (corrupt[middle] ?? 0) ^ 0xff;
   const manifest = testManifest(
     {
-      "search.ngram.idx": [artifacts.index.byteLength, hash(artifacts.index)],
+      ...ngramFiles(artifacts),
       "search.ngram.pack": [corrupt.byteLength, hash(corrupt)],
     },
     2,
   );
   await installFetch(manifest, async (path, init) => {
-    if (path.endsWith("search.ngram.idx"))
-      return new Response(body(artifacts.index));
+    const shard = ngramShardResponse(path, artifacts);
+    if (shard) return shard;
     const range = new Headers(init?.headers).get("Range");
     assert.equal(range, `bytes=0-${corrupt.byteLength - 1}`);
     return new Response(body(corrupt), {
@@ -756,40 +804,48 @@ test("rejects a corrupt posting member before exposing candidates", async () => 
   );
 });
 
-test("rejects a posting index that does not start from zero", async () => {
+test("rejects a posting shard with a zero-length member", async () => {
   const bucket = searchGramBuckets("之境")[0] ?? 0;
   const artifacts = ngramArtifacts(new Map([[bucket, [1]]]));
-  const malformed = artifacts.index.slice();
-  new DataView(malformed.buffer).setUint32(0, 1, true);
+  const shardPath = `search.ngram.idx-${bucket % NGRAM_SHARDS}.json.gz`;
+  const shard = artifacts.shards[shardPath];
+  assert.ok(shard);
+  const directory = JSON.parse(
+    new TextDecoder().decode(gunzipSync(shard)),
+  ) as Array<[number, Array<[number, number, number, number]>] | null>;
+  const entry = directory[Math.floor(bucket / NGRAM_SHARDS)];
+  assert.ok(entry);
+  const member = entry[1][0];
+  assert.ok(member);
+  member[1] = 0;
+  const malformed = new Uint8Array(gzipSync(JSON.stringify(directory)));
+  artifacts.shards[shardPath] = malformed;
   const manifest = testManifest(
-    {
-      "search.ngram.idx": [malformed.byteLength, hash(malformed)],
-      "search.ngram.pack": [artifacts.pack.byteLength, hash(artifacts.pack)],
-    },
+    ngramFiles(artifacts),
     2,
   );
   await installFetch(manifest, async (path) => {
-    if (path.endsWith("search.ngram.idx")) return new Response(body(malformed));
+    const response = ngramShardResponse(path, artifacts);
+    if (response) return response;
     return new Response(body(artifacts.pack));
   });
 
-  await assert.rejects(searchSubstringPage("之境", 0, 1), /从零开始/);
+  await assert.rejects(searchSubstringPage("之境", 0, 1), /成员边界/);
 });
 
 test("aborts substring network work when its caller cancels", async () => {
   const bucket = searchGramBuckets("之境")[0] ?? 0;
-  const { index, pack } = ngramArtifacts(new Map([[bucket, [1]]]));
+  const artifacts = ngramArtifacts(new Map([[bucket, [1]]]));
+  const { pack } = artifacts;
   const manifest = testManifest(
-    {
-      "search.ngram.idx": [index.byteLength, hash(index)],
-      "search.ngram.pack": [pack.byteLength, hash(pack)],
-    },
+    ngramFiles(artifacts),
     2,
   );
   let requestStarted = false;
   let requestSignal: AbortSignal | null = null;
   await installFetch(manifest, async (path, init) => {
-    if (path.endsWith("search.ngram.idx")) return new Response(body(index));
+    const shard = ngramShardResponse(path, artifacts);
+    if (shard) return shard;
     const range = new Headers(init?.headers).get("Range");
     if (range === "bytes=0-0")
       return new Response(pack.slice(0, 1).buffer as ArrayBuffer, {

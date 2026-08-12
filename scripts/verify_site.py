@@ -2606,57 +2606,110 @@ def verify_release(  # noqa: PLR0915
         f"max {leaf_max:,}",
     )
 
-    # 每个散列桶由一个或多个有界 gzip 成员组成。索引声明桶的成员
-    # 范围、成员字节边界与首尾 rank，以及解压后的 posting 数。
-    ngram_index_raw = site_file("search.ngram.idx").read_bytes()
-    ngram_index = np.frombuffer(ngram_index_raw, dtype="<u4")
+    # 每个散列桶由一个或多个有界 gzip 成员组成。经过完整 SHA 校验的
+    # 分片目录声明 posting 成员边界、首尾 rank 与总候选数。
     ngram_path = site_file("search.ngram.pack")
     ngram_size = ngram_path.stat().st_size
-    minimum_index_length = sr.SEARCH_NGRAM_BUCKETS + 1
-    index_shape_ok = len(ngram_index) >= minimum_index_length
+    index_shape_ok = (
+        sr.SEARCH_NGRAM_SHARDS > 0
+        and sr.SEARCH_NGRAM_BUCKETS % sr.SEARCH_NGRAM_SHARDS == 0
+    )
+    buckets_per_shard = (
+        sr.SEARCH_NGRAM_BUCKETS // sr.SEARCH_NGRAM_SHARDS
+        if index_shape_ok
+        else 0
+    )
+    ngram_entries: list[Any | None] = [None] * sr.SEARCH_NGRAM_BUCKETS
+    all_locations: list[list[int]] = []
     if index_shape_ok:
-        bucket_members = ngram_index[:minimum_index_length]
-        n_members = int(bucket_members[-1])
-        expected_index_length = sr.SEARCH_NGRAM_BUCKETS * 2 + n_members * 3 + 2
-        index_shape_ok = len(ngram_index) == expected_index_length
-    if index_shape_ok:
-        offsets_start = minimum_index_length
-        first_start = offsets_start + n_members + 1
-        last_start = first_start + n_members
-        counts_start = last_start + n_members
-        member_offsets = ngram_index[offsets_start:first_start]
-        member_first = ngram_index[first_start:last_start]
-        member_last = ngram_index[last_start:counts_start]
-        counts = ngram_index[counts_start:]
-        spans = np.diff(member_offsets.astype(np.int64))
-        index_shape_ok = bool(
-            bucket_members[0] == 0
-            and np.all(bucket_members[1:] >= bucket_members[:-1])
-            and bucket_members[-1] == n_members
-            and member_offsets[0] == 0
-            and member_offsets[-1] == ngram_size
-            and np.all(spans > 0)
-            and np.all(spans <= sr.MEMBER_CAP)
-            and np.all(member_first <= member_last)
-            and (not n_members or member_last.max() < n)
-        )
-        if index_shape_ok:
-            for bucket in range(sr.SEARCH_NGRAM_BUCKETS):
-                start = int(bucket_members[bucket])
-                end = int(bucket_members[bucket + 1])
-                count = int(counts[bucket])
-                expected_member_pages = (
-                    count + sr.SEARCH_NGRAM_MEMBER_RANKS - 1
-                ) // sr.SEARCH_NGRAM_MEMBER_RANKS
-                if end - start != expected_member_pages or (
-                    end - start > 1
-                    and np.any(
-                        member_last[start : end - 1]
-                        >= member_first[start + 1 : end]
-                    )
+        for shard in range(sr.SEARCH_NGRAM_SHARDS):
+            logical_name = f"search.ngram.idx-{shard}.json.gz"
+            encoded = site_file(logical_name).read_bytes()
+            try:
+                sr.require_member_size(
+                    encoded,
+                    logical_name,
+                )
+                directory = orjson.loads(gzip.decompress(encoded))
+            except (OSError, ValueError, orjson.JSONDecodeError):
+                index_shape_ok = False
+                continue
+            if (
+                not isinstance(directory, list)
+                or len(directory) != buckets_per_shard
+            ):
+                index_shape_ok = False
+                continue
+            for local_bucket, entry in enumerate(directory):
+                bucket = local_bucket * sr.SEARCH_NGRAM_SHARDS + shard
+                if entry is None:
+                    continue
+                if (
+                    not isinstance(entry, list)
+                    or len(entry) != 2
+                    or not _natural(entry[0])
+                    or entry[0] == 0
+                    or entry[0] > n
+                    or not isinstance(entry[1], list)
+                    or len(entry[1])
+                    != (entry[0] + sr.SEARCH_NGRAM_MEMBER_RANKS - 1)
+                    // sr.SEARCH_NGRAM_MEMBER_RANKS
                 ):
                     index_shape_ok = False
-                    break
+                    continue
+                prior_member_end = -1
+                prior_member_last = -1
+                valid_members: list[list[int]] = []
+                for location in entry[1]:
+                    if (
+                        not isinstance(location, list)
+                        or len(location) != 4
+                        or not all(_natural(value) for value in location)
+                    ):
+                        index_shape_ok = False
+                        continue
+                    (
+                        member_offset,
+                        member_length,
+                        member_first_rank,
+                        member_last_rank,
+                    ) = map(int, location)
+                    if (
+                        member_length == 0
+                        or member_length > sr.MEMBER_CAP
+                        or member_offset + member_length > ngram_size
+                        or member_first_rank > member_last_rank
+                        or member_last_rank >= n
+                        or (
+                            prior_member_end >= 0
+                            and member_offset != prior_member_end
+                        )
+                        or member_first_rank <= prior_member_last
+                    ):
+                        index_shape_ok = False
+                        continue
+                    valid: list[int] = [
+                        member_offset,
+                        member_length,
+                        member_first_rank,
+                        member_last_rank,
+                    ]
+                    valid_members.append(valid)
+                    all_locations.append(valid)
+                    prior_member_end = member_offset + member_length
+                    prior_member_last = member_last_rank
+                if len(valid_members) != len(entry[1]):
+                    index_shape_ok = False
+                    continue
+                ngram_entries[bucket] = [int(entry[0]), valid_members]
+    ngram_cursor = 0
+    for member_offset, member_length, _first, _last in sorted(all_locations):
+        if member_offset != ngram_cursor:
+            index_shape_ok = False
+            break
+        ngram_cursor += member_length
+    if ngram_cursor != ngram_size:
+        index_shape_ok = False
     check("子串索引偏移和计数覆盖全部 gzip 成员", index_shape_ok)
     check(
         "search.ngram.pack <= 80MB pack 上限",
@@ -2690,9 +2743,9 @@ def verify_release(  # noqa: PLR0915
         ngram_ok = True
         actual_count = 0
         for bucket in range(sr.SEARCH_NGRAM_BUCKETS):
-            member_start = int(bucket_members[bucket])
-            member_end = int(bucket_members[bucket + 1])
-            count = int(counts[bucket])
+            entry = ngram_entries[bucket]
+            count = int(entry[0]) if entry is not None else 0
+            members = entry[1] if entry is not None else []
             expected_count = int(expected_counts[bucket])
             actual_count += count
             digest = expected_rank_hashes[bucket]
@@ -2707,11 +2760,11 @@ def verify_release(  # noqa: PLR0915
                 continue
             actual_digest = hashlib.sha256()
             decoded_count = 0
-            for member in range(member_start, member_end):
+            for offset, length, first_rank, last_rank in members:
                 posting_bytes = load_binary_member(
                     "search.ngram.pack",
-                    int(member_offsets[member]),
-                    int(spans[member]),
+                    offset,
+                    length,
                 )
                 actual_digest.update(posting_bytes)
                 raw_ranks = np.frombuffer(posting_bytes, dtype=np.uint8)
@@ -2728,8 +2781,8 @@ def verify_release(  # noqa: PLR0915
                     )
                     decoded_ok = bool(
                         len(actual_ranks)
-                        and actual_ranks[0] == member_first[member]
-                        and actual_ranks[-1] == member_last[member]
+                        and actual_ranks[0] == first_rank
+                        and actual_ranks[-1] == last_rank
                         and actual_ranks[-1] < n
                         and np.all(actual_ranks[1:] > actual_ranks[:-1])
                     )
