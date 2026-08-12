@@ -127,6 +127,37 @@ class ReleaseBoundaryTests(unittest.TestCase):
                 )
 
 
+class SubjectQueryColumnTests(unittest.TestCase):
+    def test_derives_year_with_the_runtime_query_semantics(self) -> None:
+        self.assertEqual(bake_site.subject_query_year("2024-01-02"), 2024)
+        self.assertEqual(bake_site.subject_query_year("2024"), 2024)
+        for value in ("", None, "2024/01/02", "20240"):
+            with self.subTest(value=value):
+                self.assertEqual(bake_site.subject_query_year(value), 0)
+        with self.assertRaisesRegex(ValueError, "year"):
+            bake_site.subject_query_year("0000")
+
+    def test_only_encodes_lossless_subject_query_scores(self) -> None:
+        self.assertEqual(bake_site.subject_query_score(None), 0)
+        self.assertEqual(bake_site.subject_query_score(0), 0)
+        self.assertEqual(bake_site.subject_query_score(8.5), 85)
+        for value in (
+            1e-11,
+            8.50000000001,
+            8.55,
+            -1,
+            25.50000000001,
+            25.6,
+            float("inf"),
+            float("nan"),
+        ):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "score"),
+            ):
+                bake_site.subject_query_score(value)
+
+
 class ManifestPublicationTests(unittest.TestCase):
     def test_reconciliation_failure_does_not_publish_a_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

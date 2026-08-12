@@ -78,7 +78,7 @@ async function boot(): Promise<void> {
   const geo = gstream.geo;
   const names = openNames(manifest);
   const searchAliases = openSearchAliases(manifest);
-  const data = new Data();
+  const data = new Data(manifest);
 
   const drawer = new Drawer(
     $("#drawer"),

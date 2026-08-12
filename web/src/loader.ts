@@ -1041,6 +1041,57 @@ export function loadGzJson<T>(path: string): Promise<T> {
 
 const idxCache = new AsyncMemo<string, Uint32Array>();
 
+export interface SubjectQueryColumns {
+  nodeCount: number;
+  year?: Uint16Array;
+  score?: Uint8Array;
+  flags?: Uint8Array;
+}
+
+/** Exact, rank-aligned Subject columns used only by a release that declares
+ * subject-query-columns-v1. */
+export async function loadSubjectQueryColumns(
+  fields: readonly string[] = ["year", "score", "type", "nsfw"],
+  signal?: AbortSignal,
+): Promise<SubjectQueryColumns> {
+  const count = manifestRef?.n_nodes ?? 0;
+  const loadYear = (): Promise<Uint16Array> =>
+    pinned.get("subject-query-year", async () => {
+      const yearBytes = await loadPublishedBytes("year.bin");
+      if (yearBytes.byteLength !== count * 2)
+        throw new SiteDataContractError("Subject year 查询列宽度与 n_nodes 不一致");
+      const year = new Uint16Array(count);
+      const view = new DataView(
+        yearBytes.buffer,
+        yearBytes.byteOffset,
+        yearBytes.byteLength,
+      );
+      for (let rank = 0; rank < count; rank++)
+        year[rank] = view.getUint16(rank * 2, true);
+      return year;
+    }) as Promise<Uint16Array>;
+  const loadBytes = (path: "score.bin" | "flags.bin"): Promise<Uint8Array> =>
+    pinned.get(`subject-query-${path}`, async () => {
+      const bytes = await loadPublishedBytes(path);
+      if (bytes.byteLength !== count)
+        throw new SiteDataContractError(`${path} 查询列宽度与 n_nodes 不一致`);
+      return Uint8Array.from(bytes);
+    }) as Promise<Uint8Array>;
+  const needsYear = fields.includes("year");
+  const needsScore = fields.includes("score");
+  const needsFlags = fields.includes("type") || fields.includes("nsfw");
+  const [year, score, flags] = await Promise.all([
+    needsYear ? waitForSignal(loadYear(), signal) : Promise.resolve(undefined),
+    needsScore
+      ? waitForSignal(loadBytes("score.bin"), signal)
+      : Promise.resolve(undefined),
+    needsFlags
+      ? waitForSignal(loadBytes("flags.bin"), signal)
+      : Promise.resolve(undefined),
+  ]);
+  return { nodeCount: count, year, score, flags };
+}
+
 /** u32 累计偏移索引；校验与读取一起进入发布级 Promise 缓存。 */
 function loadIdx(
   path: string,
@@ -1171,6 +1222,43 @@ export function rankOfKey(key: number): number | null {
     ((rankBytes[at + 1] ?? 0) << 8) |
     ((rankBytes[at + 2] ?? 0) << 16);
   return rank === m.rank_index.sentinel ? null : rank;
+}
+
+/** Dense source-id -> VisualRank segment. Missing archive IDs keep the u24
+ * sentinel so callers can reproduce the canonical archive-id scan order. */
+export function loadEntityRanksById(
+  kind: 1 | 2 | 3,
+  signal?: AbortSignal,
+): Promise<Uint32Array> {
+  const pending = idxCache.get(`rank-by-key:${kind}`, async () => {
+    await ensureRankIndex();
+    const manifest = manifestRef;
+    const bytes = rankBytes;
+    const segment = manifest?.rank_index.segments[String(kind)];
+    if (!manifest || !bytes || !segment)
+      throw new SiteDataContractError("rank-by-key segment is unavailable");
+    const ranks = new Uint32Array(segment.count);
+    const seen = new Uint8Array(manifest.n_nodes);
+    let present = 0;
+    for (let id = 0; id < segment.count; id++) {
+      const at = segment.offset + id * 3;
+      const rank =
+        (bytes[at] ?? 0) |
+        ((bytes[at + 1] ?? 0) << 8) |
+        ((bytes[at + 2] ?? 0) << 16);
+      ranks[id] = rank;
+      if (rank === RANK_SENTINEL) continue;
+      if (rank >= manifest.n_nodes || seen[rank])
+        throw new SiteDataContractError("rank-by-key segment is not injective");
+      seen[rank] = 1;
+      present++;
+    }
+    const owner = kind === 1 ? "subject" : kind === 2 ? "person" : "character";
+    if (present !== manifest.counts.entities[owner])
+      throw new SiteDataContractError("rank-by-key entity count mismatch");
+    return ranks;
+  });
+  return waitForSignal(pending, signal);
 }
 
 /** Range 点查:深链或行走落点未被流式覆盖时,读取定长坐标记录。 */

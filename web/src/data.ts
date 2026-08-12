@@ -9,6 +9,7 @@ import type {
   FactKind,
   LongTextRef,
   LongTextResult,
+  Manifest,
   Mappings,
   Page,
   StructuralEntity,
@@ -27,6 +28,10 @@ import {
   subjectForEpisode,
   type TextSearchMember,
 } from "./loader";
+import {
+  canProjectSubjectQueryColumns,
+  projectSubjectQueryEntities,
+} from "./subject-query-projection";
 
 type Loc4 = [number, number, number, number];
 
@@ -327,6 +332,8 @@ export class Data {
   >();
   private mappingsPromise: Promise<Mappings> | null = null;
 
+  constructor(private readonly manifest?: Manifest) {}
+
   /** rank-by-key 反向索引;未载入或不在当前发布时为 null。 */
   rankOf(key: number): number | null {
     return rankOfKey(key);
@@ -482,10 +489,14 @@ export class Data {
             break;
           }
           case "score":
-            fields.score = tuple[5] === null ? null : Number(tuple[5]);
+            fields.score = tuple[5] === null || tuple[5] === 0
+              ? null
+              : Number(tuple[5]);
             break;
           case "rank":
-            fields.rank = tuple[6] === null ? null : Number(tuple[6]);
+            fields.rank = tuple[6] === null || tuple[6] === 0
+              ? null
+              : Number(tuple[6]);
             break;
           case "nsfw": fields.nsfw = Boolean(tuple[7]); break;
           case "wish": fields.wish = Number(tuple[8]); break;
@@ -665,6 +676,18 @@ export class Data {
   ): AsyncIterable<ProjectedEntity> {
     const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
     const requested = new Set(fieldNames);
+    if (
+      this.manifest &&
+      canProjectSubjectQueryColumns(
+        this.manifest,
+        owner,
+        access,
+        fieldNames,
+      )
+    ) {
+      yield* projectSubjectQueryEntities(this.manifest, fieldNames, signal);
+      return;
+    }
     const needsVocab = [...requested].some((field) =>
       field === "career" || field === "metaTags" || field === "tags"
     );
