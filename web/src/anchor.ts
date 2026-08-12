@@ -45,6 +45,40 @@ export function nearestAlongRay(
   const [ox, oy, oz] = origin;
   const [ux, uy, uz] = dir;
   const cut2 = tanCutoff * tanCutoff;
+
+  // 滚轮换锚不带 accept。先求最终最近深度，再在该深度组内直接取
+  // 最小夹角，避免为宽视锥内数十万候选分配元组并 O(k log k) 排序。
+  // 第二次线性扫描读取同一紧凑 TypedArray，峰值额外内存保持 O(1)。
+  if (!accept) {
+    let tMin = Infinity;
+    for (let i = 0; i < count; i++) {
+      const vx = (positions[i * 3] ?? 0) - ox;
+      const vy = (positions[i * 3 + 1] ?? 0) - oy;
+      const vz = (positions[i * 3 + 2] ?? 0) - oz;
+      const t = vx * ux + vy * uy + vz * uz;
+      if (t <= 1e-9) continue;
+      const score = (vx * vx + vy * vy + vz * vz - t * t) / (t * t);
+      if (score < cut2 && t < tMin) tMin = t;
+    }
+    const tCap = tMin * 2;
+    let bestScore = Infinity;
+    let bestRank = -1;
+    for (let i = 0; i < count; i++) {
+      const vx = (positions[i * 3] ?? 0) - ox;
+      const vy = (positions[i * 3 + 1] ?? 0) - oy;
+      const vz = (positions[i * 3 + 2] ?? 0) - oz;
+      const t = vx * ux + vy * uy + vz * uz;
+      if (t <= 1e-9 || t > tCap) continue;
+      const score = (vx * vx + vy * vy + vz * vz - t * t) / (t * t);
+      // 严格小于同时保留原稳定排序在等分候选上的低 rank 语义。
+      if (score < cut2 && score < bestScore) {
+        bestScore = score;
+        bestRank = i;
+      }
+    }
+    return bestRank;
+  }
+
   // [t, 夹角平方, rank]
   const candidates: [number, number, number][] = [];
   let tMin = Infinity;
