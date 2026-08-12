@@ -65,13 +65,42 @@ interface FactEntry {
   op?: [number, number][];
 }
 
+type VocabularyValues = readonly string[] | ReadonlyMap<number, string>;
+
 interface EntityVocab {
-  career: string[];
-  metaTags: string[];
-  tags: string[];
+  career: VocabularyValues;
+  metaTags: VocabularyValues;
+  tags: VocabularyValues;
 }
 
 type VocabFamily = keyof EntityVocab;
+type EntityVocabularyIds = Partial<Record<VocabFamily, number[]>>;
+
+const EMPTY_VOCABULARY: readonly string[] = [];
+
+const vocabularyValue = (values: VocabularyValues, id: number): string =>
+  (values instanceof Map
+    ? values.get(id)
+    : (values as readonly string[])[id]) ?? "";
+
+/** @internal Selects only vocabulary ids physically referenced by one tuple. */
+export function entityVocabularyIds(
+  kind: number,
+  tuple: unknown[],
+  requested?: ReadonlySet<string>,
+): EntityVocabularyIds {
+  const needs = (field: string): boolean => !requested || requested.has(field);
+  if (kind === 1) {
+    const ids: EntityVocabularyIds = {};
+    if (needs("metaTags")) ids.metaTags = [...(tuple[15] as number[])];
+    if (needs("tags"))
+      ids.tags = (tuple[16] as [number, number][]).map(([id]) => id);
+    return ids;
+  }
+  if (kind === 2 && needs("career"))
+    return { career: [...(tuple[2] as number[])] };
+  return {};
+}
 
 export interface VocabularyIndex {
   values: readonly string[];
@@ -362,11 +391,86 @@ export class Data {
     });
   }
 
-  private async vocab(): Promise<EntityVocab> {
+  /** Point reads decode only the compressed vocabulary chunks containing ids
+   * that occur in the selected tuple. Member caching still lets a later broad
+   * scan or autocomplete reuse those exact decoded chunks. */
+  private async selectedVocabulary(
+    family: VocabFamily,
+    ids: readonly number[],
+    signal?: AbortSignal,
+  ): Promise<ReadonlyMap<number, string>> {
+    const idx = await loadGzJson<VocabIdx>("vocab.idx");
+    signal?.throwIfAborted();
+    const diskFamily = family === "metaTags" ? "meta_tags" : family;
+    const ranges = idx.members[diskFamily] ?? [];
+    const chunks = [...new Set(ids.flatMap((id) => {
+      if (!Number.isSafeInteger(id) || id < 0) return [];
+      const chunk = Math.floor(id / idx.chunk);
+      return chunk < ranges.length ? [chunk] : [];
+    }))];
+    const parts = new Map(
+      await Promise.all(chunks.map(async (chunk) => {
+        const [offset, length] = ranges[chunk]!;
+        return [
+          chunk,
+          await member<string[]>(
+            "structure",
+            "vocab.pack",
+            offset,
+            length,
+            signal,
+          ),
+        ] as const;
+      })),
+    );
+    const selected = new Map<number, string>();
+    for (const id of ids) {
+      if (!Number.isSafeInteger(id) || id < 0) continue;
+      const chunk = Math.floor(id / idx.chunk);
+      const value = parts.get(chunk)?.[id % idx.chunk];
+      if (value !== undefined) selected.set(id, value);
+    }
+    return selected;
+  }
+
+  private async selectedEntityVocab(
+    kind: number,
+    tuple: unknown[],
+    requested?: ReadonlySet<string>,
+    signal?: AbortSignal,
+  ): Promise<EntityVocab> {
+    const ids = entityVocabularyIds(kind, tuple, requested);
     const [career, metaTags, tags] = await Promise.all([
-      this.vocabulary("career"),
-      this.vocabulary("metaTags"),
-      this.vocabulary("tags"),
+      ids.career
+        ? this.selectedVocabulary("career", ids.career, signal)
+        : Promise.resolve(EMPTY_VOCABULARY),
+      ids.metaTags
+        ? this.selectedVocabulary("metaTags", ids.metaTags, signal)
+        : Promise.resolve(EMPTY_VOCABULARY),
+      ids.tags
+        ? this.selectedVocabulary("tags", ids.tags, signal)
+        : Promise.resolve(EMPTY_VOCABULARY),
+    ]);
+    return { career, metaTags, tags };
+  }
+
+  /** Broad scans eventually visit the whole owner domain, so they retain the
+   * full-family path but skip families that owner/field cannot reference. */
+  private async fullEntityVocab(
+    kind: number,
+    requested?: ReadonlySet<string>,
+  ): Promise<EntityVocab> {
+    const needs = (field: string): boolean => !requested || requested.has(field);
+    const [career, metaTags, tags] = await Promise.all([
+      kind === 2 && needs("career")
+        ? this.vocabulary("career")
+        : Promise.resolve(EMPTY_VOCABULARY),
+      kind === 1 && needs("metaTags")
+        ? this.vocabulary("metaTags")
+        : Promise.resolve(EMPTY_VOCABULARY),
+      kind === 1 && needs("tags")
+        ? this.vocabulary("tags")
+        : Promise.resolve(EMPTY_VOCABULARY),
     ]);
     return { career, metaTags, tags };
   }
@@ -421,8 +525,8 @@ export class Data {
         favorite: [wish, done, doing, onHold, dropped],
         series: Boolean(series),
         scoreDetails,
-        metaTags: metaTags.map((tag) => vocab.metaTags[tag] ?? ""),
-        tags: tags.map(([tag, count]) => [vocab.tags[tag] ?? "", count]),
+        metaTags: metaTags.map((tag) => vocabularyValue(vocab.metaTags, tag)),
+        tags: tags.map(([tag, count]) => [vocabularyValue(vocab.tags, tag), count]),
         hasSummary: Boolean(hasSummary),
         hasInfobox: Boolean(hasInfobox),
       };
@@ -435,7 +539,7 @@ export class Data {
         key,
         name,
         type,
-        career: career.map((item) => vocab.career[item] ?? ""),
+        career: career.map((item) => vocabularyValue(vocab.career, item)),
         comments,
         collects,
         hasSummary: Boolean(hasSummary),
@@ -499,12 +603,15 @@ export class Data {
           case "scoreDetails": fields.scoreDetails = tuple[14] as number[]; break;
           case "metaTags":
             fields.metaTags = (tuple[15] as number[]).map(
-              (tag) => vocab?.metaTags[tag] ?? "",
+              (tag) => vocab ? vocabularyValue(vocab.metaTags, tag) : "",
             );
             break;
           case "tags":
             fields.tags = (tuple[16] as [number, number][]).map(
-              ([tag, count]) => ({ name: vocab?.tags[tag] ?? "", count }),
+              ([tag, count]) => ({
+                name: vocab ? vocabularyValue(vocab.tags, tag) : "",
+                count,
+              }),
             );
             break;
           case "hasSummary": fields.hasSummary = Boolean(tuple[17]); break;
@@ -521,7 +628,7 @@ export class Data {
           case "type": fields.type = Number(tuple[1]); break;
           case "career":
             fields.career = (tuple[2] as number[]).map(
-              (career) => vocab?.career[career] ?? "",
+              (career) => vocab ? vocabularyValue(vocab.career, career) : "",
             );
             break;
           case "comments": fields.comments = Number(tuple[3]); break;
@@ -572,7 +679,7 @@ export class Data {
     if (pos < 0) return null;
     const tup = m.r[pos];
     if (!tup) return null;
-    const vocab = await this.vocab();
+    const vocab = await this.selectedEntityVocab(kind, tup, undefined, signal);
     return this.decodeEntity(kind, id, tup, vocab);
   }
 
@@ -586,13 +693,7 @@ export class Data {
     const kind = key >>> 24;
     const id = key & 0xffffff;
     const requested = new Set(fieldNames);
-    const needsVocab = [...requested].some((field) =>
-      field === "career" || field === "metaTags" || field === "tags"
-    );
-    const [idx, vocab] = await Promise.all([
-      loadGzJson<EntitiesIdx>("entities.idx"),
-      needsVocab ? this.vocab() : Promise.resolve(null),
-    ]);
+    const idx = await loadGzJson<EntitiesIdx>("entities.idx");
     const row = findRange(idx.k[String(kind)] ?? [], id);
     if (!row) return null;
     const block = await member<{ i: number[]; r: unknown[][] }>(
@@ -605,9 +706,14 @@ export class Data {
     const pos = block.i.indexOf(id);
     if (pos < 0) return null;
     const tuple = block.r[pos];
-    return tuple
-      ? this.decodeProjectedEntity(kind, id, tuple, requested, vocab)
-      : null;
+    if (!tuple) return null;
+    const vocab = await this.selectedEntityVocab(
+      kind,
+      tuple,
+      requested,
+      signal,
+    );
+    return this.decodeProjectedEntity(kind, id, tuple, requested, vocab);
   }
 
   /** Broad indexed lookups switch from scattered member reads to one owner span. */
@@ -631,7 +737,7 @@ export class Data {
     const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
     const [idx, vocab] = await Promise.all([
       loadGzJson<EntitiesIdx>("entities.idx"),
-      this.vocab(),
+      this.fullEntityVocab(kind),
     ]);
     const ranges = idx.k[String(kind)] ?? [];
     const span = access === "whole" ? contiguousPackSpan(ranges) : null;
@@ -667,12 +773,9 @@ export class Data {
   ): AsyncIterable<ProjectedEntity> {
     const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
     const requested = new Set(fieldNames);
-    const needsVocab = [...requested].some((field) =>
-      field === "career" || field === "metaTags" || field === "tags"
-    );
     const [idx, vocab] = await Promise.all([
       loadGzJson<EntitiesIdx>("entities.idx"),
-      needsVocab ? this.vocab() : Promise.resolve(null),
+      this.fullEntityVocab(kind, requested),
     ]);
     const ranges = idx.k[String(kind)] ?? [];
     const span = access === "whole" ? contiguousPackSpan(ranges) : null;
