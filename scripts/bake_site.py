@@ -36,6 +36,7 @@ from .build_lock import parquet_layout_lock
 from .community_labels import build_community_labels
 from .enum_mappings import load_mappings
 from .layout import shape_digest
+from .position_encoding import decode_positions, quantize_positions
 from .query_contracts import (
     load_query_contract,
     query_schema_digest,
@@ -1428,11 +1429,37 @@ def bake_release(  # noqa: PLR0915
         sys.exit(f"FAILED: 布局与库不同步({failures}),先重跑 layout.py 再烘焙")
     del present_r, sub_ranks, per_ranks, cha_ranks, per_names, cha_names
 
-    # ---- 几何 SoA(25B/节点,定长记录支持 Range 点查)----
+    # ---- 几何 SoA(19B/节点,定长记录支持 Range 点查)----
+    # 坐标先以最终 float32 语义量化为逐轴 affine u16，再立即按浏览器
+    # 算法解码并复核物理间距。查询数据与 rank 完全不参与该有损层。
     coords_f32 = coords_r.astype("<f4", copy=False)
-    lo = [float(v) for v in coords_f32.min(0)]
-    hi = [float(v) for v in coords_f32.max(0)]
-    (SITE / "positions.bin").write_bytes(coords_f32.tobytes())
+    positions_u16, position_encoding = quantize_positions(coords_f32)
+    decoded_positions = decode_positions(positions_u16, position_encoding)
+    max_position_error = 0.0
+    for start in range(0, n, 100_000):
+        end = min(start + 100_000, n)
+        delta = decoded_positions[start:end].astype(np.float64) - coords_f32[
+            start:end
+        ].astype(np.float64)
+        max_position_error = max(
+            max_position_error,
+            float(np.linalg.norm(delta, axis=1).max(initial=0.0)),
+        )
+    quantized_violation = find_minimum_distance_violation(decoded_positions)
+    if quantized_violation is not None:
+        bad_rank_a, bad_rank_b, bad_distance = quantized_violation
+        sys.exit(
+            f"FAILED: u16 坐标 rank {bad_rank_a}/{bad_rank_b} 中心距 "
+            f"{bad_distance:.6f} < {MIN_NODE_CENTER_DISTANCE:g}"
+        )
+    lo = [float(v) for v in decoded_positions.min(0)]
+    hi = [float(v) for v in decoded_positions.max(0)]
+    published_layout["position_quantization"] = {
+        "encoding": position_encoding["encoding"],
+        "max_displacement": max_position_error,
+    }
+    (SITE / "positions.bin").write_bytes(positions_u16.tobytes())
+    del decoded_positions
     (SITE / "year.bin").write_bytes(year_r.tobytes())
     (SITE / "key.bin").write_bytes(key_r.tobytes())
     size_raw = np.round(18 * np.log2(1 + collect_r))
@@ -1468,7 +1495,7 @@ def bake_release(  # noqa: PLR0915
         tag_mask[i] = m
     (SITE / "tags.bin").write_bytes(tag_mask.tobytes())
     for fname, stride in (
-        ("positions.bin", 12),
+        ("positions.bin", 6),
         ("year.bin", 2),
         ("key.bin", 4),
         ("size.bin", 1),
@@ -1478,6 +1505,11 @@ def bake_release(  # noqa: PLR0915
     ):
         reconcile(f"{fname} 字节数", n * stride, (SITE / fname).stat().st_size)
     log("几何 SoA 写出完成")
+    log(
+        f"坐标 affine u16: {coords_f32.nbytes:,} → "
+        f"{positions_u16.nbytes:,} 字节,最大位移 "
+        f"{max_position_error:.6f}"
+    )
     del (
         sub_index,
         meta_tags_r,
@@ -1486,6 +1518,7 @@ def bake_release(  # noqa: PLR0915
         score_values,
         iso_r,
         coords_f32,
+        positions_u16,
         size_raw,
         size_u8,
         flags,
@@ -2555,6 +2588,7 @@ def bake_release(  # noqa: PLR0915
         "n_nodes": n,
         "n_edges_skeleton": n_edges_skeleton,
         "name_block_size": name_block_size,
+        "position_encoding": position_encoding,
         "bbox": [lo, hi],
         "year_range": [y_lo, y_hi],
         "tags": top_tags,

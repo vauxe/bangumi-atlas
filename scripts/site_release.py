@@ -18,6 +18,7 @@ import orjson
 from opencc import OpenCC
 
 from . import entity_key as _entity_key
+from .position_encoding import POSITION_COMPONENTS, POSITION_ENCODING
 
 SITE_CONTRACT_PATH = Path(__file__).with_name("site-contract.json")
 SITE_CONTRACT: dict[str, Any] = orjson.loads(SITE_CONTRACT_PATH.read_bytes())
@@ -173,6 +174,7 @@ FACT_ATTRS: dict[str, tuple[str, ...]] = {
 # 磁盘元组布局(参与 schema_digest;两端解码器的唯一权威)
 TUPLE_SCHEMAS: dict[str, Any] = {
     "file": ["bytes", "sha256", "content_addressed_name"],
+    "position": ["x_u16", "y_u16", "z_u16"],
     "name": ["name", "name_cn|null", "entity_kind"],
     "entity": {
         "subject": [
@@ -560,9 +562,16 @@ def schema_digest() -> str:
                 "fact_roles": FACT_ROLES,
                 "fact_attrs": FACT_ATTRS,
                 "rank_encoding": RANK_ENCODING,
+                "geometry": SITE_CONTRACT["geometry"],
             }
         )
     )
+    position_contract = SITE_CONTRACT["geometry"]["positions"]
+    if (
+        position_contract.get("encoding") != POSITION_ENCODING
+        or position_contract.get("components") != POSITION_COMPONENTS
+    ):
+        raise ValueError("site-contract position encoding is stale")
     expected = str(SITE_CONTRACT["schema_digest"])
     if digest != expected:
         raise ValueError(

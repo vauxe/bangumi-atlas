@@ -7,6 +7,7 @@ import type {
   Manifest,
   NameRow,
   Names,
+  PositionEncoding,
   SearchAliasRow,
   SearchAliases,
   SearchEntry,
@@ -68,8 +69,9 @@ const CACHE_BUDGET = {
 } as const;
 const EPISODE_SUBJECT_CACHE_BUDGET = 256_000;
 const EPISODE_SUBJECT_ENTRY_WEIGHT = 64;
+const POSITION_QUANTIZED_MAX = 0xffff;
 const GEOMETRY_STRIDES = {
-  "positions.bin": 12,
+  "positions.bin": 6,
   "year.bin": 2,
   "key.bin": 4,
   "size.bin": 1,
@@ -92,6 +94,70 @@ export class SiteDataContractError extends SiteRuntimeError {
       `站点数据版本不兼容:${detail},请重建站点数据`,
     );
     this.name = "SiteDataContractError";
+  }
+}
+
+function positionVector(value: unknown, nonnegative = false): value is [
+  number,
+  number,
+  number,
+] {
+  return Array.isArray(value) &&
+    value.length === 3 &&
+    value.every((item) =>
+      typeof item === "number" &&
+      Number.isFinite(item) &&
+      (!nonnegative || item >= 0)
+    );
+}
+
+function validPositionEncoding(value: unknown): value is PositionEncoding {
+  if (!value || typeof value !== "object") return false;
+  const encoding = value as Partial<PositionEncoding>;
+  if (
+    encoding.encoding !== siteContract.geometry.positions.encoding ||
+    encoding.components !== siteContract.geometry.positions.components ||
+    !positionVector(encoding.offset) ||
+    !positionVector(encoding.scale, true)
+  ) return false;
+  return encoding.offset.every((offset, axis) =>
+    Number.isFinite(
+      offset + (encoding.scale?.[axis] ?? Number.NaN) * POSITION_QUANTIZED_MAX,
+    )
+  );
+}
+
+function decodePosition(
+  encoding: PositionEncoding,
+  x: number,
+  y: number,
+  z: number,
+): [number, number, number] {
+  return [
+    Math.fround(encoding.offset[0] + x * encoding.scale[0]),
+    Math.fround(encoding.offset[1] + y * encoding.scale[1]),
+    Math.fround(encoding.offset[2] + z * encoding.scale[2]),
+  ];
+}
+
+function decodePositionRange(
+  encoded: Uint16Array,
+  output: Float32Array,
+  startRank: number,
+  endRank: number,
+  encoding: PositionEncoding,
+): void {
+  for (let rank = startRank; rank < endRank; rank++) {
+    const offset = rank * 3;
+    const [x, y, z] = decodePosition(
+      encoding,
+      encoded[offset] ?? 0,
+      encoded[offset + 1] ?? 0,
+      encoded[offset + 2] ?? 0,
+    );
+    output[offset] = x;
+    output[offset + 1] = y;
+    output[offset + 2] = z;
   }
 }
 
@@ -355,6 +421,8 @@ export async function loadManifest(): Promise<Manifest> {
         `${path} 应为 ${expected} 字节,实际为 ${actual ?? "缺失"}`,
       );
   }
+  if (!validPositionEncoding(m.position_encoding))
+    throw new SiteDataContractError("position_encoding 无效");
   if (m.layout?.dimensions !== 3)
     throw new SiteDataContractError(
       `布局应为 3D,实际为 ${String(m.layout?.dimensions ?? "缺失")}`,
@@ -371,6 +439,22 @@ export async function loadManifest(): Promise<Manifest> {
     m.bbox[0].some((value, axis) => value > (m.bbox[1][axis] ?? value))
   )
     throw new SiteDataContractError("bbox 必须是有限且有序的 3D 边界");
+  const positionBounds = [
+    m.position_encoding.offset.map((value) => Math.fround(value)),
+    m.position_encoding.offset.map((value, axis) =>
+      Math.fround(
+        value +
+          (m.position_encoding.scale[axis] ?? Number.NaN) *
+            POSITION_QUANTIZED_MAX,
+      )
+    ),
+  ];
+  if (
+    positionBounds.some((point, side) =>
+      point.some((value, axis) => value !== m.bbox[side]?.[axis])
+    )
+  )
+    throw new SiteDataContractError("position_encoding 与 bbox 不一致");
   const nameBlockSize = m.name_block_size;
   if (
     !Number.isInteger(nameBlockSize) ||
@@ -577,14 +661,18 @@ export interface GeometryStream {
 export function openGeometry(manifest: Manifest): GeometryStream {
   const n = manifest.n_nodes;
   const raw = {
-    positions: new Uint8Array(n * 12),
     key: new Uint8Array(n * 4),
     size: new Uint8Array(n),
     flags: new Uint8Array(n),
   };
-  const progress: Record<string, number> = {};
+  const progress: Record<"positions" | keyof typeof raw, number> = {
+    positions: 0,
+    key: 0,
+    size: 0,
+    flags: 0,
+  };
   const geo: Geometry = {
-    positions: new Float32Array(raw.positions.buffer),
+    positions: new Float32Array(n * 3),
     key: new Uint32Array(raw.key.buffer),
     size: raw.size,
     flags: raw.flags,
@@ -596,7 +684,9 @@ export function openGeometry(manifest: Manifest): GeometryStream {
   const start = (onChunk: (loaded: number) => void): Promise<void> => {
     const update = (): void => {
       const loaded = Math.min(
-        ...(Object.keys(raw) as (keyof typeof raw)[]).map((k) =>
+        ...(
+          Object.keys(progress) as (keyof typeof progress)[]
+        ).map((k) =>
           Math.floor(
             (progress[k] ?? 0) / CANVAS_STREAM_STRIDES[k],
           ),
@@ -609,14 +699,35 @@ export function openGeometry(manifest: Manifest): GeometryStream {
         onChunk(loaded);
       }
     };
-    return Promise.all(
-      (Object.keys(raw) as (keyof typeof raw)[]).map((k) =>
+    const encodedPositionBytes = new Uint8Array(n * 6);
+    const encodedPositions = new Uint16Array(encodedPositionBytes.buffer);
+    let decodedRanks = 0;
+    const positionStream = streamInto(
+      "positions.bin",
+      encodedPositionBytes,
+      (bytes) => {
+        const completeRanks = Math.floor(bytes / CANVAS_STREAM_STRIDES.positions);
+        decodePositionRange(
+          encodedPositions,
+          geo.positions,
+          decodedRanks,
+          completeRanks,
+          manifest.position_encoding,
+        );
+        decodedRanks = completeRanks;
+        progress.positions = bytes;
+        update();
+      },
+    );
+    return Promise.all([
+      positionStream,
+      ...(Object.keys(raw) as (keyof typeof raw)[]).map((k) =>
         streamInto(`${k}.bin`, raw[k], (bytes) => {
           progress[k] = bytes;
           update();
         }),
       ),
-    ).then(() => update());
+    ]).then(() => update());
   };
   return { geo, start };
 }
@@ -1289,13 +1400,18 @@ export async function pointByRank(
   if (!Number.isInteger(rank) || rank < 0 || rank >= manifest.n_nodes)
     throw new RangeError(`rank ${rank} is outside geometry`);
   const [posBuf, keyBuf] = await Promise.all([
-    packSlice("positions.bin", rank * 12, 12),
+    packSlice("positions.bin", rank * 6, 6),
     packSlice("key.bin", rank * 4, 4),
   ]);
-  if (posBuf.byteLength < 12 || keyBuf.byteLength < 4) return null;
-  const xyz = new Float32Array(posBuf.slice(0, 12));
+  if (posBuf.byteLength < 6 || keyBuf.byteLength < 4) return null;
+  const xyz = new DataView(posBuf, 0, 6);
   return {
-    pos: [xyz[0] ?? 0, xyz[1] ?? 0, xyz[2] ?? 0],
+    pos: decodePosition(
+      manifest.position_encoding,
+      xyz.getUint16(0, true),
+      xyz.getUint16(2, true),
+      xyz.getUint16(4, true),
+    ),
     key: new Uint32Array(keyBuf.slice(0, 4))[0] ?? 0,
   };
 }

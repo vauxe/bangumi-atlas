@@ -16,6 +16,13 @@ export interface TextLayout {
   members: number;
 }
 
+export interface PositionEncoding {
+  encoding: "u16le-affine-3d-v1";
+  components: 3;
+  offset: [number, number, number];
+  scale: [number, number, number];
+}
+
 export interface Manifest {
   /** 除自身外规范 manifest 内容的 SHA-256(内容身份)。 */
   version: string;
@@ -88,6 +95,8 @@ export interface Manifest {
   n_edges_skeleton: number;
   /** names.pack 每个独立 gzip 成员包含的连续 rank 数。 */
   name_block_size: number;
+  /** positions.bin 的逐轴仿射 uint16 解码参数。 */
+  position_encoding: PositionEncoding;
   bbox: Bounds3D;
   year_range: [number, number];
   /** top-32 元标签名,下标 = tags.bin 位图的 bit 序。 */

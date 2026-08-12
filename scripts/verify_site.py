@@ -76,7 +76,7 @@ FACT_INDEX_DTYPE = np.dtype(
     ]
 )
 GEOMETRY_STRIDES = {
-    "positions.bin": 12,
+    "positions.bin": 6,
     "year.bin": 2,
     "key.bin": 4,
     "size.bin": 1,
@@ -84,6 +84,8 @@ GEOMETRY_STRIDES = {
     "score.bin": 1,
     "tags.bin": 4,
 }
+POSITION_ENCODING = "u16le-affine-3d-v1"
+POSITION_QUANTIZED_MAX = (1 << 16) - 1
 
 
 def _natural(value: Any) -> bool:
@@ -274,6 +276,40 @@ def geometry_sizes_are_valid(sizes: Any, n_nodes: int) -> bool:
             _natural(sizes.get(name)) and sizes[name] == n_nodes * stride
             for name, stride in GEOMETRY_STRIDES.items()
         )
+    )
+
+
+def position_encoding_is_valid(value: Any) -> bool:
+    """Independently validate the browser's affine uint16 decoder contract."""
+
+    if (
+        not isinstance(value, dict)
+        or value.get("encoding") != POSITION_ENCODING
+        or value.get("components") != 3
+    ):
+        return False
+    offset = value.get("offset")
+    scale = value.get("scale")
+    if (
+        not isinstance(offset, list)
+        or not isinstance(scale, list)
+        or len(offset) != 3
+        or len(scale) != 3
+        or any(
+            not isinstance(item, (int, float)) or isinstance(item, bool)
+            for item in [*offset, *scale]
+        )
+    ):
+        return False
+    offset_array = np.asarray(offset, dtype=np.float64)
+    scale_array = np.asarray(scale, dtype=np.float64)
+    return bool(
+        np.isfinite(offset_array).all()
+        and np.isfinite(scale_array).all()
+        and (scale_array >= 0).all()
+        and np.isfinite(
+            offset_array + scale_array * POSITION_QUANTIZED_MAX
+        ).all()
     )
 
 
@@ -1172,13 +1208,24 @@ def verify_release(  # noqa: PLR0915
     )
     del edges
 
-    positions_flat = load_array("positions.bin", "<f4")
-    reconcile("positions.bin 记录数", n * 3, len(positions_flat))
-    if len(positions_flat) != n * 3:
-        raise ValueError("positions.bin has an invalid float32 record count")
-    positions = positions_flat.reshape(n, 3)
+    position_encoding = manifest.get("position_encoding")
+    check(
+        "position_encoding 是 affine u16 三维合同",
+        position_encoding_is_valid(position_encoding),
+    )
+    if not position_encoding_is_valid(position_encoding):
+        raise ValueError("manifest has an invalid position_encoding")
+    positions_u16 = load_array("positions.bin", "<u2")
+    reconcile("positions.bin 记录数", n * 3, len(positions_u16))
+    if len(positions_u16) != n * 3:
+        raise ValueError("positions.bin has an invalid uint16 record count")
+    offset = np.asarray(position_encoding["offset"], dtype=np.float64)
+    scale = np.asarray(position_encoding["scale"], dtype=np.float64)
+    positions = (
+        offset + positions_u16.reshape(n, 3).astype(np.float64) * scale
+    ).astype("<f4")
     positions_finite = bool(np.isfinite(positions).all())
-    check("positions.bin 坐标全部有限", positions_finite)
+    check("positions.bin 解码坐标全部有限", positions_finite)
     if positions_finite:
         actual_bbox = [
             [float(value) for value in positions.min(axis=0)],
@@ -1210,7 +1257,7 @@ def verify_release(  # noqa: PLR0915
             f"{violation[2]:.6f} < {MIN_NODE_CENTER_DISTANCE:g}"
         ),
     )
-    del positions_flat, positions
+    del positions_u16, positions
     raw = np.frombuffer(site_file("rank-by-key.bin").read_bytes(), np.uint8)
     rank_layout_ok = rank_index_layout_is_valid(
         manifest["rank_index"], len(raw)
