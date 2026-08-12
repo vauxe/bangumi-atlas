@@ -480,6 +480,7 @@ export class QueryWorkbench {
       let shown = Math.min(50, result.rows.length);
       let loadingMore = false;
       let publishedRows = -1;
+      let answerView: ReturnType<typeof renderAnswer> | null = null;
       const showMore = async (): Promise<void> => {
         if (loadingMore) return;
         if (shown < result.rows.length) {
@@ -507,19 +508,23 @@ export class QueryWorkbench {
         }
       };
       const render = (focusMore = false): void => {
-        const { visible, highlightRefs } = queryResultPresentation(result, shown);
+        const visible = revealQueryResult(result, shown);
         if (publishedRows !== result.rows.length) {
+          const highlightRefs = queryResultEntityRefs(result);
           publishedRows = result.rows.length;
           onResult(highlightRefs, sectionHighlights);
         }
-        renderAnswer(card, section.answer, visible, {
-          onEntity: (ref) => {
-            void Promise.resolve(this.dependencies.onEntity(ref))
-              .catch((error) => this.showError(error));
-          },
-          onMore: visible.hasMore ? () => void showMore() : undefined,
-          mappings,
-        });
+        if (answerView) answerView.update(visible);
+        else {
+          answerView = renderAnswer(card, section.answer, visible, {
+            onEntity: (ref) => {
+              void Promise.resolve(this.dependencies.onEntity(ref))
+                .catch((error) => this.showError(error));
+            },
+            onMore: visible.hasMore ? () => void showMore() : undefined,
+            mappings,
+          });
+        }
         if (focusMore)
           card.querySelector<HTMLElement>(".query-more")?.focus();
       };

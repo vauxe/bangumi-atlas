@@ -303,44 +303,49 @@ function valueNode(
   return span;
 }
 
-function renderTable(
+interface TableLayout {
+  columns: string[];
+  displayColumns: string[];
+  hasEntityColumn: boolean;
+}
+
+interface RenderedTable {
+  element: HTMLElement;
+  body: HTMLTableSectionElement;
+  layout: TableLayout;
+}
+
+function tableLayout(result: QueryResult): TableLayout {
+  const columns = [...new Set(result.rows.flatMap((row) => Object.keys(row)))];
+  const hasEntityColumn = result.rows.some((row, index) =>
+    rowEntityRef(row, result.evidence[index]) !== null
+  );
+  return {
+    columns,
+    hasEntityColumn,
+    displayColumns: hasEntityColumn
+      ? columns.filter((column) =>
+        column !== "ref" && column !== "name" && column !== "nameCn"
+      )
+      : columns,
+  };
+}
+
+function appendTableRows(
+  body: HTMLTableSectionElement,
   result: QueryResult,
   options: AnswerViewOptions,
-): HTMLElement {
-  const wrapper = document.createElement("div");
-  wrapper.className = "query-table-wrap";
-  const table = document.createElement("table");
-  const columns = [...new Set(result.rows.flatMap((row) => Object.keys(row)))];
-  const rowRefs = result.rows.map((row, index) =>
-    rowEntityRef(row, result.evidence[index])
-  );
-  const hasEntityColumn = rowRefs.some((ref) => ref !== null);
-  table.className = hasEntityColumn ? "query-table query-entity-table" : "query-table";
-  const displayColumns = hasEntityColumn
-    ? columns.filter((column) =>
-      column !== "ref" && column !== "name" && column !== "nameCn"
-    )
-    : columns;
-  const head = table.createTHead().insertRow();
-  if (hasEntityColumn) {
-    const cell = document.createElement("th");
-    cell.scope = "col";
-    cell.textContent = "条目";
-    head.append(cell);
-  }
-  for (const column of displayColumns) {
-    const cell = document.createElement("th");
-    cell.scope = "col";
-    cell.textContent = columnLabel(column);
-    head.append(cell);
-  }
-  const body = table.createTBody();
-  result.rows.forEach((row, rowIndex) => {
+  layout: TableLayout,
+  start: number,
+): void {
+  for (let rowIndex = start; rowIndex < result.rows.length; rowIndex++) {
+    const row = result.rows[rowIndex];
+    if (!row) continue;
     const tr = body.insertRow();
-    if (hasEntityColumn) {
+    if (layout.hasEntityColumn) {
       const cell = tr.insertCell();
       cell.setAttribute("data-label", "条目");
-      const ref = rowRefs[rowIndex];
+      const ref = rowEntityRef(row, result.evidence[rowIndex]);
       const names = entityNames(row.name, row.nameCn);
       const value = ref ?? null;
       cell.append(valueNode(
@@ -350,7 +355,7 @@ function renderTable(
         names?.secondary,
       ));
     }
-    for (const column of displayColumns) {
+    for (const column of layout.displayColumns) {
       const cell = tr.insertCell();
       cell.setAttribute("data-label", columnLabel(column));
       const value = row[column];
@@ -369,21 +374,49 @@ function renderTable(
       const matchRow = body.insertRow();
       matchRow.className = "query-match-row";
       const cell = matchRow.insertCell();
-      cell.colSpan = Math.max(1, displayColumns.length);
+      cell.colSpan = Math.max(1, layout.displayColumns.length);
       cell.textContent = snippet;
     }
-  });
-  wrapper.append(table);
-  return wrapper;
+  }
 }
 
-function renderPaths(
+function renderTable(
   result: QueryResult,
   options: AnswerViewOptions,
-): HTMLElement {
-  const list = document.createElement("ol");
-  list.className = "query-path-list";
-  for (const row of result.rows) {
+): RenderedTable {
+  const wrapper = document.createElement("div");
+  wrapper.className = "query-table-wrap";
+  const table = document.createElement("table");
+  const layout = tableLayout(result);
+  table.className = layout.hasEntityColumn
+    ? "query-table query-entity-table"
+    : "query-table";
+  const head = table.createTHead().insertRow();
+  if (layout.hasEntityColumn) {
+    const cell = document.createElement("th");
+    cell.scope = "col";
+    cell.textContent = "条目";
+    head.append(cell);
+  }
+  for (const column of layout.displayColumns) {
+    const cell = document.createElement("th");
+    cell.scope = "col";
+    cell.textContent = columnLabel(column);
+    head.append(cell);
+  }
+  const body = table.createTBody();
+  appendTableRows(body, result, options, layout, 0);
+  wrapper.append(table);
+  return { element: wrapper, body, layout };
+}
+
+function appendPaths(
+  list: HTMLOListElement,
+  result: QueryResult,
+  options: AnswerViewOptions,
+  start: number,
+): void {
+  for (const row of result.rows.slice(start)) {
     const value = Object.values(row).find(path);
     if (!value) continue;
     const item = document.createElement("li");
@@ -425,7 +458,63 @@ function renderPaths(
     item.append(chain);
     list.append(item);
   }
+}
+
+function renderPaths(
+  result: QueryResult,
+  options: AnswerViewOptions,
+): HTMLOListElement {
+  const list = document.createElement("ol");
+  list.className = "query-path-list";
+  appendPaths(list, result, options, 0);
   return list;
+}
+
+export interface AnswerView {
+  update(result: QueryResult): void;
+}
+
+type RenderedAnswerContent =
+  | { kind: "empty"; element: HTMLElement }
+  | { kind: "path"; element: HTMLOListElement }
+  | { kind: "table"; table: RenderedTable };
+
+// Buffered pagination retains row and evidence identities. If a caller replaces
+// any visible item, rebuilding is safer than attempting to patch unknown edits.
+function sameResultPrefix(previous: QueryResult, result: QueryResult): boolean {
+  if (
+    previous.queryDigest !== result.queryDigest ||
+    previous.releaseId !== result.releaseId ||
+    previous.coverage.digest !== result.coverage.digest ||
+    previous.totalMatches !== result.totalMatches ||
+    previous.visibleMatches !== result.visibleMatches ||
+    previous.rows.length > result.rows.length ||
+    previous.columns !== result.columns &&
+      JSON.stringify(previous.columns) !== JSON.stringify(result.columns)
+  ) return false;
+  for (let index = 0; index < previous.rows.length; index++)
+    if (
+      previous.rows[index] !== result.rows[index] ||
+      previous.evidence[index] !== result.evidence[index]
+    ) return false;
+  return true;
+}
+
+function tableCanAppend(
+  rendered: RenderedTable,
+  result: QueryResult,
+  start: number,
+): boolean {
+  const columns = new Set(rendered.layout.columns);
+  for (let index = start; index < result.rows.length; index++) {
+    const row = result.rows[index];
+    if (!row || Object.keys(row).some((column) => !columns.has(column))) return false;
+    if (
+      !rendered.layout.hasEntityColumn &&
+      rowEntityRef(row, result.evidence[index]) !== null
+    ) return false;
+  }
+  return true;
 }
 
 export function renderAnswer(
@@ -433,30 +522,88 @@ export function renderAnswer(
   answer: AnswerSpec,
   result: QueryResult,
   options: AnswerViewOptions = {},
-): void {
-  container.replaceChildren();
+): AnswerView {
   const heading = document.createElement("h2");
   heading.textContent = answer.title;
   const count = document.createElement("p");
   count.className = "query-result-count";
-  count.textContent = result.totalMatches === result.visibleMatches
-    ? `${result.totalMatches.toLocaleString()} 条完整结果`
-    : `${result.totalMatches.toLocaleString()} 条匹配，问题限制显示 ${result.visibleMatches.toLocaleString()} 条`;
-  container.append(heading, count);
-  if (!result.rows.length) {
-    const empty = document.createElement("p");
-    empty.className = "query-empty";
-    empty.textContent = "没有找到符合条件的结果。";
-    container.append(empty);
-  } else if (answer.shape === "path-list")
-    container.append(renderPaths(result, options));
-  else container.append(renderTable(result, options));
-  if (result.hasMore && options.onMore) {
-    const more = document.createElement("button");
+  const moreHost = document.createElement("div");
+  moreHost.className = "query-more-host";
+  const onMore = options.onMore;
+  const more = onMore
+    ? document.createElement("button")
+    : null;
+  if (more && onMore) {
     more.type = "button";
     more.className = "secondary-action query-more";
-    more.textContent = `继续显示（已显示 ${result.rows.length} / ${result.visibleMatches}）`;
-    more.addEventListener("click", options.onMore);
-    container.append(more);
+    more.addEventListener("click", onMore);
   }
+  let moreVisible = false;
+  let previous: QueryResult | null = null;
+  let content: RenderedAnswerContent | null = null;
+
+  const updateCount = (next: QueryResult): void => {
+    count.textContent = next.totalMatches === next.visibleMatches
+      ? `${next.totalMatches.toLocaleString()} 条完整结果`
+      : `${next.totalMatches.toLocaleString()} 条匹配，问题限制显示 ${next.visibleMatches.toLocaleString()} 条`;
+  };
+  const updateMore = (next: QueryResult): void => {
+    const visible = Boolean(more && next.hasMore);
+    if (more && visible) {
+      more.textContent = `继续显示（已显示 ${next.rows.length} / ${next.visibleMatches}）`;
+      if (!moreVisible) moreHost.append(more);
+    } else if (moreVisible) moreHost.replaceChildren();
+    moreVisible = visible;
+  };
+  const rebuild = (next: QueryResult): void => {
+    if (!next.rows.length) {
+      const empty = document.createElement("p");
+      empty.className = "query-empty";
+      empty.textContent = "没有找到符合条件的结果。";
+      content = { kind: "empty", element: empty };
+    } else if (answer.shape === "path-list") {
+      const element = renderPaths(next, options);
+      content = { kind: "path", element };
+    } else {
+      const table = renderTable(next, options);
+      content = { kind: "table", table };
+    }
+    const element = content.kind === "table"
+      ? content.table.element
+      : content.element;
+    container.replaceChildren(heading, count, element, moreHost);
+  };
+  const view: AnswerView = {
+    update: (next) => {
+      updateCount(next);
+      const prior = previous;
+      const rendered = content;
+      const append = prior !== null && rendered !== null &&
+        sameResultPrefix(prior, next);
+      let reused = false;
+      if (
+        append &&
+        rendered.kind === "table" &&
+        tableCanAppend(rendered.table, next, prior.rows.length)
+      ) {
+        appendTableRows(
+          rendered.table.body,
+          next,
+          options,
+          rendered.table.layout,
+          prior.rows.length,
+        );
+        reused = true;
+      } else if (append && rendered.kind === "path") {
+        appendPaths(rendered.element, next, options, prior.rows.length);
+        reused = true;
+      } else if (append && rendered.kind === "empty" && !next.rows.length)
+        reused = true;
+      if (!reused) rebuild(next);
+      updateMore(next);
+      previous = next;
+    },
+  };
+  view.update(result);
+  return view;
 }
