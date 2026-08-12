@@ -54,7 +54,7 @@ console.log(
 );
 const names = openNames(manifest);
 const searchAliases = openSearchAliases(manifest);
-const data = new Data();
+const data = new Data(manifest);
 await ensureRankIndex();
 
 await loadCharmap();

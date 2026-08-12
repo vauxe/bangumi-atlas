@@ -284,7 +284,11 @@ gzip 成员边界拆分，每个文件不超过 80,000,000 字节。拆分边界
 
 `names.pack` 为地图按 VisualRank 读取，`entities.pack` 为查询按稳定身份读取；两者都保存
 名称以避免全量查询穿过视觉排名缓存。它们是同源、逐行对账的读取投影，不是两份数据权威。
-实体扫描一次预取并校验 `entities.pack`，点查仍只读取一个成员。
+声明 `subject-query-columns-v1` 的 Release 可以把全量 Subject 查询中的 `id`、`ref`、
+`name`、`nameCn`、`type`、`year`、`score` 和 `nsfw` 从 `rank-by-key.bin`、`names.pack`
+及现有 `year.bin`、`score.bin`、`flags.bin` 精确投影，仍保持源 ID 顺序。只有所需列会被
+读取；流式前 N 条和包含其他字段的查询继续读取 `entities.pack`，旧 Release 也自动回退。
+该能力只是经验证的读取路径，不改变字段权威或查询语义。
 
 实体桶以 EntityKey 为键，因此实体元组不重复保存 `id` 或 `kind`。事实先按种类分组，
 incidence 元组再保存 FactRef、multiplicity、本地角色、其他参与者和结构属性。Episode
@@ -483,6 +487,8 @@ Data 用 Promise memo 合并进行中的相同请求；请求完成后只进入�
   桶到成员、成员偏移、首尾 rank 和计数覆盖完整 gzip 成员 pack。
 - 完整 Unicode casefold 表、每个 rank 的构建期别名及前缀/子串两类索引均由原始名称
   独立重算；简繁与日文转换不能串联成虚假等价。
+- `subject-query-columns-v1` 的源 ID 到 rank 映射完整且单射；名称、类型、年份、评分和
+  NSFW 值按查询空值语义与 Subject Parquet 独立逐项对账，无法无损编码时禁止发布能力。
 - 本地 smoke 对实际加载请求强制正确的 HTTP 206 与 `Content-Range`，但不证明生产托管；
   整包回退不能作为生产性能保证。真实浏览器还必须在几何未完成时通过深链 Range 点查
   恢复节点，防止 CDN 内容编码改变 Range 所属的字节表示。

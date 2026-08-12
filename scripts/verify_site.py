@@ -12,6 +12,8 @@ import argparse
 import gzip
 import hashlib
 import heapq
+import math
+import re
 import sys
 import tempfile
 import time
@@ -1044,6 +1046,7 @@ def verify_release(  # noqa: PLR0915
             "atlas-query-v1",
             "fact-ref-v1",
             "full-text-v1",
+            "subject-query-columns-v1",
         ]
         and query_release.get("contractDigest") == query_schema_digest(),
     )
@@ -1141,11 +1144,10 @@ def verify_release(  # noqa: PLR0915
         "key.bin rank 顺序 = layout",
         np.array_equal(key_r, expected_geometry["key"]),
     )
+    published_years = load_array("year.bin", "<u2")
     check(
         "year.bin = layout",
-        np.array_equal(
-            load_array("year.bin", "<u2"), expected_geometry["year"]
-        ),
+        np.array_equal(published_years, expected_geometry["year"]),
     )
     check(
         "size.bin = layout collect 编码",
@@ -1472,6 +1474,8 @@ def verify_release(  # noqa: PLR0915
 
     pq_ent_fp = RowFingerprint()
     expected_scores = np.zeros(n, dtype=np.uint8)
+    expected_query_years = np.zeros(n, dtype=np.uint16)
+    query_columns_lossless = True
     expected_tags = np.zeros(n, dtype=np.uint32)
     tag_counts: Counter[str] = Counter()
     tag_first: dict[str, tuple[int, int]] = {}
@@ -1509,8 +1513,30 @@ def verify_release(  # noqa: PLR0915
                 expected_flags[rank] |= np.uint8(
                     int(bool(sub["nsfw"][i])) | (int(sub["type"][i]) << 2)
                 )
+                date = sub["date"][i]
+                year_match = (
+                    re.match(r"^([0-9]{4})(?:-|$)", date)
+                    if isinstance(date, str)
+                    else None
+                )
+                query_year = int(year_match.group(1)) if year_match else 0
+                if year_match and query_year == 0:
+                    query_columns_lossless = False
+                expected_query_years[rank] = np.uint16(query_year)
                 score = float(sub["score"][i] or 0)
-                expected_scores[rank] = np.uint8(np.round(score * 10))
+                scaled_score = score * 10
+                encoded_score = (
+                    round(scaled_score) if math.isfinite(scaled_score) else 0
+                )
+                if (
+                    not math.isfinite(scaled_score)
+                    or encoded_score < 0
+                    or encoded_score > 255
+                    or encoded_score / 10 != score
+                ):
+                    query_columns_lossless = False
+                else:
+                    expected_scores[rank] = np.uint8(encoded_score)
                 mask = 0
                 for tag_index, tag in enumerate(sub["meta_tags"][i]):
                     first = (rank, tag_index)
@@ -1587,6 +1613,11 @@ def verify_release(  # noqa: PLR0915
         "flags.bin = parquet + layout",
         np.array_equal(load_array("flags.bin", "u1"), expected_flags),
     )
+    check("Subject 查询列可无损编码", query_columns_lossless)
+    check(
+        "year.bin = Subject 查询 year",
+        np.array_equal(published_years, expected_query_years),
+    )
     check(
         "score.bin = parquet",
         np.array_equal(load_array("score.bin", "u1"), expected_scores),
@@ -1597,8 +1628,10 @@ def verify_release(  # noqa: PLR0915
     )
     del (
         expected_flags,
+        expected_query_years,
         expected_scores,
         expected_tags,
+        published_years,
     )
     del ent_idx, ent_sizes, pq_ent_fp, site_ent_fp, vocab
 
