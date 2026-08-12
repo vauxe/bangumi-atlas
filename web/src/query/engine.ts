@@ -1250,34 +1250,51 @@ async function* rowsFor(
       const scalarGroups = operator.groupBy.length === 1
         ? new CanonicalValueMap<AggregateState>()
         : null;
+      const globalGroup = operator.groupBy.length === 0
+        ? createAggregateState(operator, {}, {})
+        : null;
       for await (const row of rowsFor(operator.input, operators, source, context, signal)) {
         signal?.throwIfAborted();
-        const groupRow: QueryRow = {};
-        const groupEvidence: RowEvidence = {};
-        for (const group of operator.groupBy) {
-          groupRow[group.name] = evaluate(group.value, row);
-          groupEvidence[group.name] = expressionEvidence(group.value, row, context);
-        }
-        const create = (): AggregateState =>
-          createAggregateState(operator, groupRow, groupEvidence);
         let state: AggregateState;
-        if (scalarGroups) {
+        if (globalGroup) {
+          state = globalGroup;
+        } else if (scalarGroups) {
           const groupName = operator.groupBy[0]!.name;
-          state = scalarGroups.getOrCreate(jsonValue(own(groupRow, groupName)), create);
+          const expression = operator.groupBy[0]!.value;
+          const value = evaluate(expression, row);
+          state = scalarGroups.getOrCreate(jsonValue(value), () =>
+            createAggregateState(
+              operator,
+              { [groupName]: value },
+              { [groupName]: expressionEvidence(expression, row, context) },
+            )
+          );
         } else {
+          const groupRow: QueryRow = {};
+          for (const group of operator.groupBy)
+            groupRow[group.name] = evaluate(group.value, row);
           const key = rowKey(groupRow);
-          state = groups.get(key) ?? create();
-          if (!groups.has(key)) groups.set(key, state);
+          const existing = groups.get(key);
+          if (existing) state = existing;
+          else {
+            const groupEvidence: RowEvidence = {};
+            for (const group of operator.groupBy)
+              groupEvidence[group.name] = expressionEvidence(
+                group.value,
+                row,
+                context,
+              );
+            state = createAggregateState(operator, groupRow, groupEvidence);
+            groups.set(key, state);
+          }
         }
         addAggregateValue(operator, state, row);
       }
-      if (!(scalarGroups?.size ?? groups.size) && !operator.groupBy.length) {
-        const state = createAggregateState(operator, {}, {});
-        groups.set(rowKey(state.row), state);
-      }
-      const states = scalarGroups
-        ? [...scalarGroups.values()]
-        : [...groups.values()];
+      const states = globalGroup
+        ? [globalGroup]
+        : scalarGroups
+          ? [...scalarGroups.values()]
+          : [...groups.values()];
       states.sort((left, right) => {
         const a = rowKey(left.row);
         const b = rowKey(right.row);

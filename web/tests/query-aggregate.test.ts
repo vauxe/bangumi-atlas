@@ -56,6 +56,54 @@ test("aggregates groups while ignoring null and missing measure values", async (
   assert.equal(result.evidence[0]?.average?.[0]?.kind, "aggregate-lineage");
 });
 
+test("collects group evidence once per distinct group instead of once per row", async () => {
+  let refReads = 0;
+  const repeatedGroups: QueryDataSource = {
+    scan: async function* () {
+      for (let index = 0; index < 1_000; index++) {
+        const entity = {
+          kind: "entity",
+          owner: "subject",
+          fields: { type: index % 2 },
+        } as Omit<EntityValue, "ref"> & { ref?: EntityValue["ref"] };
+        Object.defineProperty(entity, "ref", {
+          enumerable: true,
+          get: () => {
+            refReads++;
+            return `subject:${index + 1}`;
+          },
+        });
+        yield entity as EntityValue;
+      }
+    },
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "aggregate",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "subject", binding: "subject" },
+      aggregate: {
+        kind: "aggregate",
+        input: "scan",
+        groupBy: [{
+          name: "type",
+          value: { kind: "field", binding: "subject", field: "type" },
+        }],
+        metrics: [{ name: "count", function: "count" }],
+      },
+    },
+  };
+
+  const result = await executeQuery(query, {}, repeatedGroups, { pageSize: 20 });
+
+  assert.deepEqual(result.rows, [
+    { type: 0, count: 500 },
+    { type: 1, count: 500 },
+  ]);
+  assert.ok(refReads <= 4, `group evidence read entity refs ${refReads} times`);
+});
+
 test("returns the defined empty global aggregate", async () => {
   const query: QueryDocument = {
     schema: "atlas-query-document-v1",
