@@ -5,6 +5,7 @@ import {
   Data,
   buildVocabularyIndex,
   contiguousPackSpan,
+  entityVocabularyIds,
   requireLongTextValue,
   suggestVocabularyValues,
 } from "../src/data";
@@ -28,6 +29,26 @@ test("derives one exact byte span from contiguous member locators", () => {
       [11, 20, 126, 40],
     ]),
     /not contiguous/,
+  );
+});
+
+test("loads only vocabulary families referenced by one entity tuple", () => {
+  const subject: unknown[] = Array.from({ length: 19 }, () => null);
+  subject[15] = [241, 185];
+  subject[16] = [[72_834, 5], [1_617, 3]];
+  assert.deepEqual(entityVocabularyIds(1, subject), {
+    metaTags: [241, 185],
+    tags: [72_834, 1_617],
+  });
+
+  const person = ["name", 1, [4, 7], 0, 0, 0, 0];
+  assert.deepEqual(entityVocabularyIds(2, person), { career: [4, 7] });
+  assert.deepEqual(entityVocabularyIds(3, ["name", 1, 0, 0, 0, 0]), {});
+
+  assert.deepEqual(entityVocabularyIds(1, subject, new Set(["name"])), {});
+  assert.deepEqual(
+    entityVocabularyIds(1, subject, new Set(["tags"])),
+    { tags: [72_834, 1_617] },
   );
 });
 
