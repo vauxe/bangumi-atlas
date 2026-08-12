@@ -102,3 +102,38 @@ contract or published data semantics.
   and deterministic work-count tests are the current evidence source.
 - CDN protocol and cache headers must be verified in deployment before treating
   local HTTP/1.1 waterfall latency as a production latency prediction.
+
+## Whole-frontend continuation
+
+The query audit above is complete. The follow-up audit covers the rest of the
+desktop explorer without weakening the existing query correctness boundary.
+
+### Phase 5: Initial load and interaction baseline
+
+- [ ] Task 9: Measure the production bundle by module family and record initial
+      script, CSS, geometry, parse, and startup costs.
+- [ ] Task 10: Benchmark camera anchoring, nearby labels, selection rendering,
+      drawer opening, and name/tag suggestions against the 996,459-node release.
+
+### Phase 6: Main-thread and data-path slices
+
+- [ ] Task 11: Remove proven allocation or sorting work from camera/label hot
+      paths while preserving exact rank selection and visual behavior.
+- [ ] Task 12: Avoid entity-type-inapplicable vocabulary reads and other proven
+      drawer/search data over-fetch while preserving decoded entity values.
+
+### Phase 7: Delivery and bundle slices
+
+- [ ] Task 13: Evaluate query-UI code splitting against the current 953 KiB
+      production app bundle; retain it only if initial bytes/parse improve
+      without delaying the documented query interaction contract.
+- [ ] Task 14: Add stable bundle/work-count guards and record both retained and
+      rejected experiments in a whole-frontend performance ledger.
+
+### Checkpoint: Whole frontend complete
+
+- [ ] Every retained change has same-condition before/after measurements.
+- [ ] Camera picks, labels, drawer values, search order, query output, focus, and
+      accessibility remain correct.
+- [ ] Full tests, type-check, production build, real-release smoke, browser
+      console/network/accessibility, and representative traces pass.
