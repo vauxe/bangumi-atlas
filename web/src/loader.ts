@@ -30,6 +30,7 @@ const {
   pack_cap: PACK_CAP,
   search_leaf_cap: SEARCH_LEAF_CAP,
   search_top: SEARCH_TOP,
+  search_prefix_shards: SEARCH_PREFIX_SHARDS,
   search_fold: SEARCH_FOLD,
   search_fold_max_expansion: SEARCH_FOLD_MAX_EXPANSION,
   search_ngram_width: SEARCH_NGRAM_WIDTH,
@@ -48,13 +49,16 @@ const RANK_INDEX_CAP = RANK_SENTINEL * 3 * 3;
 const SITE_BYTE_CAP = 1_000_000_000;
 const REQUIRED_SEARCH_FILES = [
   "charmap.json",
-  "search.idx.json",
   "search.pack",
   "search.ngram.idx",
   "search.ngram.pack",
   "search.alias.idx",
   "search.alias.pack",
-] as const;
+  ...Array.from(
+    { length: SEARCH_PREFIX_SHARDS },
+    (_, shard) => `search.idx-${shard}.json.gz`,
+  ),
+];
 const REQUIRED_TEXT_QUERY_FILES = [
   "text.search.members",
   "text.search.ngram.idx",
@@ -265,6 +269,7 @@ export async function loadManifest(): Promise<Manifest> {
     m.limits.search_ngram_width !== SEARCH_NGRAM_WIDTH ||
     m.limits.search_ngram_buckets !== SEARCH_NGRAM_BUCKETS ||
     m.limits.search_ngram_member_ranks !== SEARCH_NGRAM_MEMBER_RANKS ||
+    m.limits.search_prefix_shards !== SEARCH_PREFIX_SHARDS ||
     !Number.isInteger(m.limits.search_alias_block_ranks) ||
     m.limits.search_alias_block_ranks <= 0 ||
     m.limits.search_alias_block_ranks > SEARCH_ALIAS_BLOCK_RANKS_MAX ||
@@ -2139,10 +2144,14 @@ export async function searchSubstringPage(
 }
 
 /** 搜索目录在搜索框获得焦点时读取;启动不预取任何搜索成员。 */
-export function loadSearchDir(): Promise<Record<string, SearchNode>> {
-  return pinned.get("search.idx.json", () =>
-    loadPublishedJson<Record<string, SearchNode>>("search.idx.json"),
-  ) as Promise<Record<string, SearchNode>>;
+export function loadSearchDir(
+  normalized: string,
+): Promise<Record<string, SearchNode>> {
+  const first = [...normalized][0];
+  if (!first) return Promise.resolve({});
+  const shard = (first.codePointAt(0) ?? 0) % SEARCH_PREFIX_SHARDS;
+  const path = `search.idx-${shard}.json.gz`;
+  return loadGzJson<Record<string, SearchNode>>(path);
 }
 
 export async function searchMember(

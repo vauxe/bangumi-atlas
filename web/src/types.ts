@@ -64,6 +64,7 @@ export interface Manifest {
     episode_block_subjects: number;
     search_leaf_cap: number;
     search_top: number;
+    search_prefix_shards: number;
     search_fold: string;
     search_ngram_width: number;
     search_ngram_buckets: number;

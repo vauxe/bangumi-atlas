@@ -1186,7 +1186,16 @@ def build_search_index(
         children = emit_search(prefix, items)
         pending.extend(reversed(children))
     search_pack.write()
-    (SITE / "search.idx.json").write_bytes(jdump(search_dir))
+    search_shards: list[dict[str, Any]] = [
+        {} for _ in range(sr.SEARCH_PREFIX_SHARDS)
+    ]
+    for prefix, node in search_dir.items():
+        search_shards[ord(prefix[0]) % sr.SEARCH_PREFIX_SHARDS][prefix] = node
+    for shard, directory in enumerate(search_shards):
+        (SITE / f"search.idx-{shard}.json.gz").write_bytes(
+            sr.gzip_member(directory, search_level)
+        )
+    del search_shards
     (SITE / "charmap.json").write_bytes(jdump(charmap))
     search_q = quantiles(search_pack.sizes)
     reconcile(

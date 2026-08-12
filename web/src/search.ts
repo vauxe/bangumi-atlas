@@ -286,7 +286,7 @@ async function prefixEntries(
   dependencies: SearchDependencies,
   signal: AbortSignal,
 ): Promise<PrefixEntryResult> {
-  const directory = await dependencies.loadSearchDir();
+  const directory = await dependencies.loadSearchDir(query);
   signal.throwIfAborted();
   let node: SearchNode | undefined;
   let prefix = "";
@@ -430,11 +430,8 @@ export class Search {
         this.runUpdate();
         return;
       }
-      // 目录与折叠表在聚焦时就绪,首次输入即可解析前缀
-      void Promise.all([
-        this.dependencies.loadCharmap(),
-        this.dependencies.loadSearchDir(),
-      ]).catch(() => undefined);
+      // 折叠表在聚焦时就绪；前缀目录按首字符分片，输入后再取目标片。
+      void this.dependencies.loadCharmap().catch(() => undefined);
     });
     this.box.addEventListener("input", () => this.runUpdate());
     this.box.addEventListener("keydown", (ev) => this.onKey(ev));
@@ -507,7 +504,7 @@ export class Search {
       this.reset();
       return;
     }
-    const directory = await this.dependencies.loadSearchDir();
+    const directory = await this.dependencies.loadSearchDir(query);
     signal.throwIfAborted();
     let node: SearchNode | undefined;
     let prefix = "";

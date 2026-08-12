@@ -64,6 +64,7 @@ SEARCH_TRIM_CHARS: Final = (
 SEARCH_NGRAM_WIDTH = int(SITE_LIMITS["search_ngram_width"])
 SEARCH_NGRAM_BUCKETS = int(SITE_LIMITS["search_ngram_buckets"])
 SEARCH_NGRAM_MEMBER_RANKS = int(SITE_LIMITS["search_ngram_member_ranks"])
+SEARCH_PREFIX_SHARDS = int(SITE_LIMITS["search_prefix_shards"])
 # 发布可确定性缩小该值，客户端将它视为编译期上限。
 SEARCH_ALIAS_BLOCK_RANKS_MAX = int(SITE_LIMITS["search_alias_block_ranks_max"])
 TEXT_P99_CAP = 75_000
@@ -121,6 +122,7 @@ def release_limits(
         "episode_block_subjects": EPISODE_BLOCK_SUBJECTS,
         "search_leaf_cap": SEARCH_LEAF_CAP,
         "search_top": SEARCH_TOP,
+        "search_prefix_shards": SEARCH_PREFIX_SHARDS,
         "search_fold": SEARCH_FOLD,
         "search_ngram_width": SEARCH_NGRAM_WIDTH,
         "search_ngram_buckets": SEARCH_NGRAM_BUCKETS,
