@@ -49,6 +49,10 @@ export interface SiteQueryReader {
     descriptor: TextSearchMember,
     signal?: AbortSignal,
   ): Promise<TextSearchRow[]>;
+  prefetchTextSearchRows?(
+    descriptors: readonly TextSearchMember[],
+    signal?: AbortSignal,
+  ): Promise<void | (() => void)>;
   factsFor(
     key: number,
     cursor?: string,

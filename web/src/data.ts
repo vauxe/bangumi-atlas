@@ -21,10 +21,12 @@ import {
   loadGzJson,
   loadPublishedJson,
   member,
+  prefetchMemberRanges,
   prefetchPack,
   prefetchPackRange,
   rankOfKey,
   subjectForEpisode,
+  type CacheFamily,
   type TextSearchMember,
 } from "./loader";
 
@@ -881,17 +883,88 @@ export class Data {
     return null;
   }
 
+  private async textSearchMemberLocation(
+    descriptor: TextSearchMember,
+  ): Promise<{
+    cacheFamily: CacheFamily;
+    path: string;
+    offset: number;
+    length: number;
+  }> {
+    const [family, , fileIndex, offset, length] = descriptor;
+    if (family === "episode-identity") {
+      if (fileIndex !== 0)
+        throw new Error("episode identity member has an invalid storage file");
+      return {
+        cacheFamily: "structure",
+        path: "episodes.pack",
+        offset,
+        length,
+      };
+    }
+    const index = await loadGzJson<{ families: Record<string, TextFamily> }>(
+      "text.idx",
+    );
+    const definition = index.families[family];
+    const path = definition?.files[fileIndex];
+    if (!definition || !path)
+      throw new Error(`${family}: text search member file is missing`);
+    return { cacheFamily: "text", path, offset, length };
+  }
+
+  async prefetchTextSearchRows(
+    descriptors: readonly TextSearchMember[],
+    signal?: AbortSignal,
+  ): Promise<() => void> {
+    signal?.throwIfAborted();
+    const locations = await Promise.all(descriptors.map((descriptor) =>
+      this.textSearchMemberLocation(descriptor)
+    ));
+    const groups = new Map<
+      string,
+      {
+        cacheFamily: CacheFamily;
+        path: string;
+        ranges: [offset: number, length: number][];
+      }
+    >();
+    for (const { cacheFamily, path, offset, length } of locations) {
+      const key = `${cacheFamily}:${path}`;
+      const group = groups.get(key) ?? { cacheFamily, path, ranges: [] };
+      group.ranges.push([offset, length]);
+      groups.set(key, group);
+    }
+    const releases: (() => void)[] = [];
+    try {
+      for (const group of groups.values())
+        releases.push(await prefetchMemberRanges(
+          group.cacheFamily,
+          group.path,
+          group.ranges,
+          signal,
+        ));
+    } catch (error) {
+      for (const release of releases) release();
+      throw error;
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      for (const release of releases) release();
+    };
+  }
+
   async textSearchRows(
     descriptor: TextSearchMember,
     signal?: AbortSignal,
   ): Promise<TextSearchRow[]> {
-    const [family, entityKind, fileIndex, offset, length] = descriptor;
+    const [family, entityKind, , offset, length] = descriptor;
+    const location = await this.textSearchMemberLocation(descriptor);
     if (family === "episode-identity") {
-      if (fileIndex !== 0)
-        throw new Error("episode identity member has an invalid storage file");
       const block = await member<{ i: number[]; g: EpisodeEntry[] }>(
-        "structure",
-        "episodes.pack",
+        location.cacheFamily,
+        location.path,
         offset,
         length,
         signal,
@@ -924,16 +997,9 @@ export class Data {
         ];
       });
     }
-    const index = await loadGzJson<{ families: Record<string, TextFamily> }>(
-      "text.idx",
-    );
-    const definition = index.families[family];
-    const path = definition?.files[fileIndex];
-    if (!definition || !path)
-      throw new Error(`${family}: text search member file is missing`);
     const block = await member<{ i: number[]; t: unknown[] }>(
-      "text",
-      path,
+      location.cacheFamily,
+      location.path,
       offset,
       length,
       signal,

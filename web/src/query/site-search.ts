@@ -90,6 +90,25 @@ function episodeIdentityCandidateWeight(
   return candidate.text.length * 2 + episodeWeight + 80;
 }
 
+async function withTextMemberPrefetch<T>(
+  reader: SiteQueryReader,
+  descriptors: readonly TextSearchMember[],
+  signal: AbortSignal,
+  read: () => Promise<T>,
+): Promise<T> {
+  if (!descriptors.length) {
+    signal.throwIfAborted();
+    return read();
+  }
+  const release = await reader.prefetchTextSearchRows?.(descriptors, signal);
+  try {
+    signal.throwIfAborted();
+    return await read();
+  } finally {
+    if (typeof release === "function") release();
+  }
+}
+
 async function* textRowBlocks(
   reader: SiteQueryReader,
   descriptors: readonly TextSearchMember[],
@@ -103,9 +122,17 @@ async function* textRowBlocks(
     start += TEXT_MEMBER_READ_CONCURRENCY
   ) {
     signal.throwIfAborted();
-    const blocks = await Promise.all(
-      descriptors.slice(start, start + TEXT_MEMBER_READ_CONCURRENCY)
-        .map((descriptor) => reader.textSearchRows!(descriptor, signal)),
+    const batch = descriptors.slice(
+      start,
+      start + TEXT_MEMBER_READ_CONCURRENCY,
+    );
+    const blocks = await withTextMemberPrefetch(
+      reader,
+      batch,
+      signal,
+      () => Promise.all(batch.map((descriptor) =>
+        reader.textSearchRows!(descriptor, signal)
+      )),
     );
     signal.throwIfAborted();
     for (const rows of blocks) yield rows;
@@ -629,11 +656,17 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
           const cached = cacheKeys.map((key) =>
             this.episodeIdentityMatches.get(key)
           );
-          const blocks = await Promise.all(batch.map((descriptor, index) =>
-            cached[index]
-              ? Promise.resolve(null)
-              : this.reader.textSearchRows!(descriptor, signal)
-          ));
+          const uncached = batch.filter((_, index) => !cached[index]);
+          const blocks = await withTextMemberPrefetch(
+            this.reader,
+            uncached,
+            signal,
+            () => Promise.all(batch.map((descriptor, index) =>
+              cached[index]
+                ? Promise.resolve(null)
+                : this.reader.textSearchRows!(descriptor, signal)
+            )),
+          );
           signal.throwIfAborted();
           for (let index = 0; index < batch.length; index++) {
             let candidates = cached[index];
@@ -837,15 +870,20 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
         descriptorStart += TEXT_MEMBER_READ_CONCURRENCY
       ) {
         signal.throwIfAborted();
-        const blocks = await Promise.all(
-          descriptors
-            .slice(
-              descriptorStart,
-              descriptorStart + TEXT_MEMBER_READ_CONCURRENCY,
-            )
-            .map((descriptor) =>
-              this.verifiedTextRows(descriptor, query, owner, field, signal)
-            ),
+        const batch = descriptors.slice(
+          descriptorStart,
+          descriptorStart + TEXT_MEMBER_READ_CONCURRENCY,
+        );
+        const uncached = batch.filter((descriptor) =>
+          !this.textMatches.get(JSON.stringify([descriptor, query, owner, field]))
+        );
+        const blocks = await withTextMemberPrefetch(
+          this.reader,
+          uncached,
+          signal,
+          () => Promise.all(batch.map((descriptor) =>
+            this.verifiedTextRows(descriptor, query, owner, field, signal)
+          )),
         );
         signal.throwIfAborted();
         for (const rows of blocks) {
