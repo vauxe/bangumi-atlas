@@ -2456,11 +2456,10 @@ def verify_release(  # noqa: PLR0915
 
     search_dir: dict[str, Any] = {}
     for shard in range(sr.SEARCH_PREFIX_SHARDS):
-        shard_dir = orjson.loads(
-            gzip.decompress(
-                site_file(f"search.idx-{shard}.json.gz").read_bytes()
-            )
-        )
+        logical_name = f"search.idx-{shard}.json.gz"
+        encoded = site_file(logical_name).read_bytes()
+        sr.require_member_size(encoded, logical_name)
+        shard_dir = orjson.loads(gzip.decompress(encoded))
         if not isinstance(shard_dir, dict):
             raise ValueError("search prefix shard must be an object")
         if any(

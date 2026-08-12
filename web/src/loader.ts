@@ -2188,7 +2188,7 @@ export async function searchSubstringPage(
   };
 }
 
-/** 搜索目录在搜索框获得焦点时读取;启动不预取任何搜索成员。 */
+/** 归一化查询确定首字符后只读取对应目录分片。 */
 export function loadSearchDir(
   normalized: string,
 ): Promise<Record<string, SearchNode>> {

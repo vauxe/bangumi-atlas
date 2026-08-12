@@ -1226,9 +1226,10 @@ def build_search_index(
     for prefix, node in search_dir.items():
         search_shards[ord(prefix[0]) % sr.SEARCH_PREFIX_SHARDS][prefix] = node
     for shard, prefix_directory in enumerate(search_shards):
-        (SITE / f"search.idx-{shard}.json.gz").write_bytes(
-            sr.gzip_member(prefix_directory, search_level)
-        )
+        logical_name = f"search.idx-{shard}.json.gz"
+        encoded = sr.gzip_member(prefix_directory, search_level)
+        sr.require_member_size(encoded, logical_name)
+        (SITE / logical_name).write_bytes(encoded)
     del search_shards
     (SITE / "charmap.json").write_bytes(jdump(charmap))
     search_q = quantiles(search_pack.sizes)

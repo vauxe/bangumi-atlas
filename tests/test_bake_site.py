@@ -555,10 +555,29 @@ class SearchIndexTests(unittest.TestCase):
         names = ["alpha", "境界線上のホライゾン", "月姫"]
         with tempfile.TemporaryDirectory() as directory:
             site = Path(directory)
-            with patch.object(bake_site, "SITE", site):
+            with (
+                patch.object(bake_site, "SITE", site),
+                patch.object(
+                    bake_site.sr,
+                    "require_member_size",
+                    wraps=bake_site.sr.require_member_size,
+                ) as require_member_size,
+            ):
                 bake_site.build_search_index(names, ["", "", ""], [1, 1, 1])
 
             self.assertFalse((site / "search.idx.json").exists())
+            prefix_members = [
+                call.args[1]
+                for call in require_member_size.call_args_list
+                if call.args[1].startswith("search.idx-")
+            ]
+            self.assertEqual(
+                prefix_members,
+                [
+                    f"search.idx-{shard}.json.gz"
+                    for shard in range(bake_site.sr.SEARCH_PREFIX_SHARDS)
+                ],
+            )
             merged = load_search_directory(site)
             for prefix, node in merged.items():
                 shard = ord(prefix[0]) % bake_site.sr.SEARCH_PREFIX_SHARDS
