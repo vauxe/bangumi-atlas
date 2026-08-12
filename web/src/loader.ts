@@ -415,6 +415,7 @@ export async function loadManifest(): Promise<Manifest> {
   ephemeralPackRangeRefs.clear();
   episodeSubjects.clear();
   episodeSubjectLoads.clear();
+  loadedKeyIndex = null;
   rankBytes = null;
   rankPromise = null;
   charmap = null;
