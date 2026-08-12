@@ -19,6 +19,8 @@ LadybugDB 图数据库和可静态部署的关系星图。
   结构语义和可随机读取的长文本侧车（SiteRelease 格式契约）。
 - [静态查询能力设计](docs/QUERY_CAPABILITY_DESIGN.md)：从用户问题反推统一查询合同、
   版本化静态发布、GitHub Pages 运行时边界及语义/容量门禁。
+- [前端查询性能审计](docs/QUERY_PERFORMANCE.md)：完整查询场景、真实数据基准、
+  正确性门禁、已保留优化和已撤销实验。
 
 ## 许可
 
