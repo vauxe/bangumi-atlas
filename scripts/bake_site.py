@@ -1098,13 +1098,46 @@ def build_search_index(
     member_offsets = np.empty(len(ngram_pack.sizes) + 1, dtype="<u4")
     member_offsets[0] = 0
     np.cumsum(ngram_pack.sizes, dtype=np.uint32, out=member_offsets[1:])
-    (SITE / "search.ngram.idx").write_bytes(
-        bucket_members.tobytes()
-        + member_offsets.tobytes()
-        + np.asarray(member_first, dtype="<u4").tobytes()
-        + np.asarray(member_last, dtype="<u4").tobytes()
-        + ngram_counts.tobytes()
-    )
+    if sr.SEARCH_NGRAM_BUCKETS % sr.SEARCH_NGRAM_SHARDS:
+        raise ValueError("search ngram buckets must divide evenly into shards")
+    buckets_per_shard = sr.SEARCH_NGRAM_BUCKETS // sr.SEARCH_NGRAM_SHARDS
+    ngram_directories: list[list[Any]] = [
+        [None] * buckets_per_shard for _ in range(sr.SEARCH_NGRAM_SHARDS)
+    ]
+    for bucket in range(sr.SEARCH_NGRAM_BUCKETS):
+        count = int(ngram_counts[bucket])
+        if not count:
+            continue
+        locations = []
+        for member in range(
+            int(bucket_members[bucket]),
+            int(bucket_members[bucket + 1]),
+        ):
+            start = int(member_offsets[member])
+            end = int(member_offsets[member + 1])
+            locations.append(
+                [
+                    start,
+                    end - start,
+                    member_first[member],
+                    member_last[member],
+                ]
+            )
+        ngram_directories[bucket % sr.SEARCH_NGRAM_SHARDS][
+            bucket // sr.SEARCH_NGRAM_SHARDS
+        ] = [count, locations]
+    ngram_index_bytes = 0
+    for shard, ngram_directory in enumerate(ngram_directories):
+        encoded = sr.gzip_member(
+            ngram_directory,
+            sr.GZIP_LEVELS["search"],
+        )
+        sr.require_member_size(
+            encoded,
+            f"search.ngram.idx-{shard}.json.gz",
+        )
+        (SITE / f"search.ngram.idx-{shard}.json.gz").write_bytes(encoded)
+        ngram_index_bytes += len(encoded)
     ngram_size = ngram_pack.size
     ngram_postings = sum(len(ranks) for ranks in postings)
     del (
@@ -1114,6 +1147,7 @@ def build_search_index(
         member_first,
         member_last,
         ngram_counts,
+        ngram_directories,
     )
 
     # 名称别名负载、子串 postings 与前缀树条目都很大，但彼此没有
@@ -1191,9 +1225,9 @@ def build_search_index(
     ]
     for prefix, node in search_dir.items():
         search_shards[ord(prefix[0]) % sr.SEARCH_PREFIX_SHARDS][prefix] = node
-    for shard, directory in enumerate(search_shards):
+    for shard, prefix_directory in enumerate(search_shards):
         (SITE / f"search.idx-{shard}.json.gz").write_bytes(
-            sr.gzip_member(directory, search_level)
+            sr.gzip_member(prefix_directory, search_level)
         )
     del search_shards
     (SITE / "charmap.json").write_bytes(jdump(charmap))
@@ -1208,7 +1242,10 @@ def build_search_index(
         f"{search_pack.size / 1e6:,.1f}MB,最大成员 "
         f"{search_q['max']:,}B"
     )
-    log(f"子串候选:{ngram_postings:,} 条 u24,{ngram_size / 1e6:,.1f}MB")
+    log(
+        f"子串候选:{ngram_postings:,} 条 u24,{ngram_size / 1e6:,.1f}MB,"
+        f"分片目录 {ngram_index_bytes / 1e6:,.1f}MB"
+    )
     return alias_block_size
 
 

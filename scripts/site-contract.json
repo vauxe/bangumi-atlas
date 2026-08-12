@@ -1,7 +1,7 @@
 {
   "schema": "structural-site-v1",
   "profile": "explorer-v1",
-  "schema_digest": "22445ecb6a8cd657cd2816e6621e11ec01f1ceb21c5171d0555bcc20bd60f445",
+  "schema_digest": "905833d67c9515777f5169a57fce2a9ec85ffb822db75f3b90f6201a32cb3570",
   "rank": {
     "encoding": "u24le",
     "sentinel": 16777215
@@ -23,6 +23,7 @@
     "search_fold_max_expansion": 3,
     "search_ngram_width": 2,
     "search_ngram_buckets": 65536,
+    "search_ngram_shards": 16,
     "search_ngram_member_ranks": 60000,
     "search_alias_block_ranks_max": 1024
   }
