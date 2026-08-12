@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 import {
   interactionHint,
+  hasVisibleSortedRank,
   NodeStyleExtension,
   Scene,
   updateQueryResultMask,
@@ -236,6 +237,12 @@ test("dims context only when a query result exists in the context layer", () => 
     state.selection = previous.selection;
     state.queryResultRanks = previous.queryResultRanks;
   }
+});
+
+test("checks sorted query-result visibility from its first rank", () => {
+  assert.equal(hasVisibleSortedRank(new Uint32Array(), 100), false);
+  assert.equal(hasVisibleSortedRank(Uint32Array.of(4, 900_000), 4), false);
+  assert.equal(hasVisibleSortedRank(Uint32Array.of(4, 900_000), 5), true);
 });
 
 test("keeps query results in the base layer without color or outline overlays", () => {

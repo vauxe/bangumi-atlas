@@ -116,9 +116,19 @@ export function nearbyLabelRanks(
     Math.max(0, Math.floor(loaded)),
     Math.floor(positions.length / 3),
   );
-  const nearest: RankedDistance[] = [];
-  const compare = (a: RankedDistance, b: RankedDistance): number =>
-    a.distance2 - b.distance2 || a.rank - b.rank;
+  // 固定上限的最大堆：根是当前最差候选。维护成本由 O(cap) 的数组
+  // 插入降为 O(log cap)，且扫描途中不再为候选分配对象。
+  const heapRanks = new Uint32Array(cap);
+  const heapDistances = new Float64Array(cap);
+  let heapLength = 0;
+  const isWorse = (
+    distance: number,
+    rank: number,
+    otherDistance: number,
+    otherRank: number,
+  ): boolean =>
+    distance > otherDistance ||
+    (distance === otherDistance && rank > otherRank);
 
   for (let rank = 0; rank < count; rank++) {
     const offset = rank * 3;
@@ -130,14 +140,65 @@ export function nearbyLabelRanks(
     const dz = z - target[2];
     const distance2 = dx * dx + dy * dy + dz * dz;
     if (!Number.isFinite(distance2) || distance2 > radius2) continue;
-    const candidate = { rank, distance2 };
-    if (nearest.length === cap && compare(candidate, nearest[cap - 1]!) >= 0)
-      continue;
+    if (
+      heapLength === cap &&
+      !isWorse(
+        heapDistances[0] ?? Number.POSITIVE_INFINITY,
+        heapRanks[0] ?? 0,
+        distance2,
+        rank,
+      )
+    ) continue;
     if (options.visible && !options.visible([x, y, z])) continue;
-    const index = nearest.findIndex((current) => compare(candidate, current) < 0);
-    nearest.splice(index < 0 ? nearest.length : index, 0, candidate);
-    if (nearest.length > cap) nearest.pop();
+    if (heapLength < cap) {
+      let child = heapLength++;
+      while (child > 0) {
+        const parent = (child - 1) >> 1;
+        const parentDistance = heapDistances[parent] ?? 0;
+        const parentRank = heapRanks[parent] ?? 0;
+        if (!isWorse(distance2, rank, parentDistance, parentRank)) break;
+        heapDistances[child] = parentDistance;
+        heapRanks[child] = parentRank;
+        child = parent;
+      }
+      heapDistances[child] = distance2;
+      heapRanks[child] = rank;
+      continue;
+    }
+
+    let parent = 0;
+    while (true) {
+      const left = parent * 2 + 1;
+      if (left >= heapLength) break;
+      const right = left + 1;
+      let worseChild = left;
+      if (
+        right < heapLength &&
+        isWorse(
+          heapDistances[right] ?? 0,
+          heapRanks[right] ?? 0,
+          heapDistances[left] ?? 0,
+          heapRanks[left] ?? 0,
+        )
+      ) worseChild = right;
+      const childDistance = heapDistances[worseChild] ?? 0;
+      const childRank = heapRanks[worseChild] ?? 0;
+      if (!isWorse(childDistance, childRank, distance2, rank)) break;
+      heapDistances[parent] = childDistance;
+      heapRanks[parent] = childRank;
+      parent = worseChild;
+    }
+    heapDistances[parent] = distance2;
+    heapRanks[parent] = rank;
   }
+  const nearest: RankedDistance[] = Array.from(
+    { length: heapLength },
+    (_, index) => ({
+      rank: heapRanks[index] ?? 0,
+      distance2: heapDistances[index] ?? 0,
+    }),
+  );
+  nearest.sort((a, b) => a.distance2 - b.distance2 || a.rank - b.rank);
   return nearest.map(({ rank }) => rank);
 }
 

@@ -14,6 +14,7 @@ import {
   relationNeighbors,
   resolveLoadedNeighborRanks,
 } from "../src/neighbors";
+import { hasVisibleSortedRank } from "../src/scene";
 import type { Fact, Mappings } from "../src/types";
 
 interface PublishedFile {
@@ -212,10 +213,7 @@ if (scenario === "anchor" || scenario === "nearby-labels") {
   const ranks = new Uint32Array(manifest.n_nodes);
   for (let rank = 0; rank < ranks.length; rank++) ranks[rank] = rank;
   const styled = 0;
-  const execute = (): boolean => {
-    for (const rank of ranks) if (rank < styled) return true;
-    return false;
-  };
+  const execute = (): boolean => hasVisibleSortedRank(ranks, styled);
   const expected = execute();
   const samples: number[] = [];
   for (let index = 0; index < runCount; index++) {
