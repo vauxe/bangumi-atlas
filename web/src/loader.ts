@@ -1040,6 +1040,7 @@ export function loadGzJson<T>(path: string): Promise<T> {
 }
 
 const idxCache = new AsyncMemo<string, Uint32Array>();
+let loadedKeyIndex: Uint32Array | null = null;
 
 /** u32 累计偏移索引；校验与读取一起进入发布级 Promise 缓存。 */
 function loadIdx(
@@ -1074,9 +1075,15 @@ export function loadEntityKeys(signal?: AbortSignal): Promise<Uint32Array> {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     for (let offset = 0; offset < bytes.byteLength; offset += 4)
       keys[offset / 4] = view.getUint32(offset, true);
+    loadedKeyIndex = keys;
     return keys;
   });
   return waitForSignal(pending, signal);
+}
+
+/** 已完成整表加载时返回 rank 有序的 EntityKey；不会触发网络请求。 */
+export function loadedEntityKeys(): Uint32Array | null {
+  return loadedKeyIndex;
 }
 
 /** EpisodeId -> Subject 源 id；Range 服务器只读取一个 u32。 */

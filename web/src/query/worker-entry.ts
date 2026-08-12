@@ -1,12 +1,17 @@
 import { Data } from "../data";
 import {
   ensureRankIndex,
+  loadedEntityKeys,
   loadManifest,
   rankOfKey,
 } from "../loader";
 import { executeQuery } from "./engine";
 import { QueryHighlightBuilder } from "./highlights";
 import { queryGraphEntityKey } from "./graph-results";
+import {
+  queryCanReuseLoadedEntityKeys,
+  resolveQueryHighlights,
+} from "./highlight-resolver";
 import { SiteQueryDataSource } from "./site-source";
 import { SiteQuerySearchIndex } from "./site-search";
 import { createQueryWorkerRuntime } from "./worker-runtime";
@@ -72,10 +77,15 @@ async function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T
 
 const runtime = createQueryWorkerRuntime(async (request, signal) => {
   const { manifest, source } = await abortable(runtimeSource, signal);
-  const highlights = request.includeHighlights
+  const reuseLoadedEntityKeys = request.includeHighlights &&
+    queryCanReuseLoadedEntityKeys(request.document);
+  const highlightKeys = reuseLoadedEntityKeys
+    ? new Set<number>()
+    : null;
+  const rankHighlights = request.includeHighlights && !reuseLoadedEntityKeys
     ? new QueryHighlightBuilder(manifest.n_nodes)
     : null;
-  if (highlights) await abortable(ensureRankIndex(), signal);
+  if (rankHighlights) await abortable(ensureRankIndex(), signal);
   const result = await executeQuery(
     request.document,
     request.parameters,
@@ -84,14 +94,19 @@ const runtime = createQueryWorkerRuntime(async (request, signal) => {
       pageSize: request.pageSize,
       offset: request.offset,
       signal,
-      ...(highlights
+      ...(highlightKeys || rankHighlights
         ? {
             onResultEntities: (entities) => {
               for (const entity of entities) {
                 if (!entity.graphRef) continue;
                 const key = queryGraphEntityKey(entity.graphRef);
-                const rank = key === null ? null : rankOfKey(key);
-                if (rank !== null) highlights.add(rank);
+                if (key === null) continue;
+                if (highlightKeys) {
+                  highlightKeys.add(key);
+                  continue;
+                }
+                const rank = rankOfKey(key);
+                if (rank !== null) rankHighlights?.add(rank);
               }
             },
           }
@@ -100,7 +115,18 @@ const runtime = createQueryWorkerRuntime(async (request, signal) => {
   );
   return {
     result,
-    ...(highlights ? { highlights: highlights.finish() } : {}),
+    ...(highlightKeys
+      ? {
+          highlights: await resolveQueryHighlights(highlightKeys, {
+            nodeCount: manifest.n_nodes,
+            loadedEntityKeys,
+            ensureRankIndex: () => abortable(ensureRankIndex(), signal),
+            rankOfKey,
+          }),
+        }
+      : rankHighlights
+        ? { highlights: rankHighlights.finish() }
+        : {}),
   };
 }, (response, transfer) => scope.postMessage(response, transfer));
 
