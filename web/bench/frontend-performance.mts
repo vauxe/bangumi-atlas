@@ -9,12 +9,16 @@ import { performance } from "node:perf_hooks";
 import { nearestAlongRay } from "../src/anchor";
 import { Data } from "../src/data";
 import { nearbyLabelRanks, NEARBY_LABEL_ZOOM } from "../src/labels";
-import { loadManifest } from "../src/loader";
+import {
+  loadManifest,
+  openSearchAliases,
+} from "../src/loader";
 import {
   relationNeighbors,
   resolveLoadedNeighborRanks,
 } from "../src/neighbors";
 import { hasVisibleSortedRank } from "../src/scene";
+import { searchNameSuggestions } from "../src/search";
 import type { Fact, Mappings } from "../src/types";
 
 interface PublishedFile {
@@ -38,6 +42,8 @@ const scenarios = [
   "neighbor-fallback",
   "nearby-labels",
   "query-visibility",
+  "search-prefix",
+  "search-substring",
 ] as const;
 if (!scenarios.includes(requestedScenario as (typeof scenarios)[number]))
   throw new TypeError(`frontend scenario must be ${scenarios.join(", ")}`);
@@ -232,6 +238,57 @@ if (scenario === "anchor" || scenario === "nearby-labels") {
     visible: expected,
     runs: samples,
     median: samples[Math.floor(samples.length / 2)],
+  }, null, 2));
+} else if (scenario === "search-prefix" || scenario === "search-substring") {
+  const base = process.env["SMOKE_BASE"] ?? "http://127.0.0.1:8391";
+  const realFetch = globalThis.fetch;
+  let requests = 0;
+  let bytes = 0;
+  const resources = new Map<string, { requests: number; bytes: number }>();
+  globalThis.fetch = (async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    const request = new Request(
+      typeof input === "string" ? new URL(input, `${base}/`) : input,
+      init,
+    );
+    const response = await realFetch(request);
+    requests++;
+    const length = Number(response.headers.get("Content-Length"));
+    if (Number.isFinite(length)) bytes += length;
+    const path = new URL(request.url).pathname.replace(/^.*\/data\//, "");
+    const previous = resources.get(path) ?? { requests: 0, bytes: 0 };
+    previous.requests++;
+    if (Number.isFinite(length)) previous.bytes += length;
+    resources.set(path, previous);
+    return response;
+  }) as typeof fetch;
+
+  const loadedManifest = await loadManifest();
+  const aliases = openSearchAliases(loadedManifest);
+  requests = 0;
+  bytes = 0;
+  resources.clear();
+  const query = scenario === "search-prefix" ? "鬼" : "境界";
+  const started = performance.now();
+  const results = await searchNameSuggestions(query, aliases, {
+    limit: 18,
+    entityKinds: [1, 2, 3],
+  });
+  const elapsed = Number((performance.now() - started).toFixed(2));
+  console.log(JSON.stringify({
+    scenario,
+    releaseId: manifest.version,
+    query,
+    results: results.length,
+    requests,
+    bytes,
+    elapsed,
+    resources: [...resources].map(([path, value]) => ({ path, ...value })),
+    signature: createHash("sha256")
+      .update(JSON.stringify(results))
+      .digest("hex"),
   }, null, 2));
 } else {
   const owner = scenario.slice("entity-".length) as

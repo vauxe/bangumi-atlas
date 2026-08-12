@@ -32,6 +32,8 @@ export interface SubstringSearchOptions {
   cursor?: number;
   loadPage?: SubstringPageLoader;
   prefetchAliases?: boolean;
+  /** 单次验证的候选上限；默认保持完整交互页的 64 项契约。 */
+  scanLimit?: number;
   signal?: AbortSignal;
 }
 
@@ -169,18 +171,24 @@ export async function findSubstringEntries(
   const {
     cursor = 0,
     loadPage = searchSubstringPage,
+    scanLimit = SUBSTRING_SCAN_LIMIT,
     signal = new AbortController().signal,
   } = options;
   if (!Number.isInteger(cursor) || cursor < 0)
     throw new RangeError("substring result cursor must be non-negative");
+  if (
+    !Number.isSafeInteger(scanLimit) ||
+    scanLimit < 1 ||
+    scanLimit > SUBSTRING_SCAN_LIMIT
+  ) throw new RangeError("substring scan limit is invalid");
   const entries: SearchEntry[] = [];
   let candidateCursor = cursor;
   let scanned = 0;
   let scannedThroughRank: number | null = null;
-  while (scanned < SUBSTRING_SCAN_LIMIT) {
+  while (scanned < scanLimit) {
     signal.throwIfAborted();
     const requestCursor = candidateCursor;
-    const requestLimit = SUBSTRING_SCAN_LIMIT - scanned;
+    const requestLimit = scanLimit - scanned;
     const page = await loadPage(
       query,
       requestCursor,
@@ -267,11 +275,17 @@ export interface NameSuggestionOptions {
   dependencies?: SearchDependencies;
 }
 
+interface PrefixEntryResult {
+  entries: SearchEntry[];
+  /** true 表示所有以 query 开头的别名都已在 entries 中。 */
+  complete: boolean;
+}
+
 async function prefixEntries(
   query: string,
   dependencies: SearchDependencies,
   signal: AbortSignal,
-): Promise<SearchEntry[]> {
+): Promise<PrefixEntryResult> {
   const directory = await dependencies.loadSearchDir();
   signal.throwIfAborted();
   let node: SearchNode | undefined;
@@ -289,14 +303,17 @@ async function prefixEntries(
   if (node && "l" in node) {
     const entries = await dependencies.searchMember(node.l, signal);
     signal.throwIfAborted();
-    return entries.filter((entry) => entry[0].startsWith(query));
+    return {
+      entries: entries.filter((entry) => entry[0].startsWith(query)),
+      complete: true,
+    };
   }
   if (node && prefix === query) {
     const entries = await dependencies.searchMember(node.t, signal);
     signal.throwIfAborted();
-    return entries;
+    return { entries, complete: false };
   }
-  return [];
+  return { entries: [], complete: true };
 }
 
 /** Compact autocomplete projection. Exact answers still run through QueryDraft. */
@@ -313,18 +330,37 @@ export async function searchNameSuggestions(
   signal.throwIfAborted();
   const query = fold(text);
   if (!query) return [];
-  const entries = await prefixEntries(query, dependencies, signal);
-  if ([...query].length >= 2) {
-    const page = await findSubstringEntries(query, aliases, {
-      loadPage: dependencies.searchSubstringPage,
-      signal,
-    });
-    entries.push(...page.entries);
-  }
   const kinds = new Set(options.entityKinds);
-  return rankSearchEntries(query, entries)
-    .filter((result) => kinds.has(result.entityKind))
-    .slice(0, options.limit);
+  const prefix = await prefixEntries(query, dependencies, signal);
+  const entries = prefix.entries;
+  let ranked = rankSearchEntries(query, entries)
+    .filter((result) => kinds.has(result.entityKind));
+  if ([...query].length >= 2) {
+    const batchSize = Math.min(32, Math.max(8, options.limit));
+    let cursor: number | null = 0;
+    let remaining = SUBSTRING_SCAN_LIMIT;
+    while (cursor !== null && remaining > 0) {
+      const page = await findSubstringEntries(query, aliases, {
+        cursor,
+        loadPage: dependencies.searchSubstringPage,
+        scanLimit: Math.min(batchSize, remaining),
+        signal,
+      });
+      entries.push(...page.entries);
+      ranked = rankSearchEntries(query, entries)
+        .filter((result) => kinds.has(result.entityKind));
+      if (page.next === null) break;
+      const consumed = page.next - cursor;
+      remaining -= consumed;
+      cursor = page.next;
+      const cutoff = ranked[options.limit - 1];
+      if (!cutoff || page.scannedThroughRank === null) continue;
+      const nextRank = page.scannedThroughRank + 1;
+      const optimisticScore = (nextRank + 1) * (prefix.complete ? 4 : 1);
+      if (optimisticScore > resultScore(cutoff)) break;
+    }
+  }
+  return ranked.slice(0, options.limit);
 }
 
 function isAbortError(error: unknown): boolean {
