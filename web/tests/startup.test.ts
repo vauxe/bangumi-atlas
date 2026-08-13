@@ -51,6 +51,21 @@ test("keeps the detail drawer out of the initial ESM entry", () => {
   );
 });
 
+test("starts drawer preparation before waiting for structural detail data", () => {
+  const main = readFileSync("src/main.ts", "utf8");
+  const selectStart = main.indexOf("async function select(");
+  const selectEnd = main.indexOf("\n  function deselect", selectStart);
+  const select = main.slice(selectStart, selectEnd);
+  const prepare = select.indexOf("drawer.prepare()");
+  const detailReads = select.indexOf("const [factsPage, mappings] = await Promise.all");
+  const show = select.indexOf("drawer.show(");
+
+  assert.ok(selectStart >= 0 && selectEnd > selectStart);
+  assert.ok(prepare >= 0, "selection should eagerly prepare the drawer chunk");
+  assert.ok(prepare < detailReads, "drawer preparation should overlap detail reads");
+  assert.ok(show > detailReads, "drawer content should wait for structural detail data");
+});
+
 test("waits for geometry completion before warming the reverse index", () => {
   const main = readFileSync("src/main.ts", "utf8");
   const streamStart = main.indexOf("const geoDone = gstream.start");

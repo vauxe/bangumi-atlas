@@ -288,6 +288,8 @@ async function boot(): Promise<void> {
       return;
     }
     state.selectionKey = key;
+    // 模块请求与事实/映射读取并行；真正展示仍在邻居状态就绪后进行。
+    void drawer.prepare().catch(() => undefined);
     if (cam === "fly") scene.flyTo(rank);
     else if (cam === "center")
       scene.centerSelection(rank);

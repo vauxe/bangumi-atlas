@@ -1,5 +1,5 @@
-import { readFileSync, rmSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { relative, resolve, sep } from "node:path";
 import { gzipSync } from "node:zlib";
 
 import { build } from "esbuild";
@@ -64,7 +64,40 @@ if (initialRaw > 850_000 || initialGzip > 245_000 || totalGzip > 290_000)
     `app bundle budget exceeded: initial ${initialRaw}/${initialGzip} gzip, ` +
       `all ${totalGzip} gzip`,
   );
+
+const preloadStart = "<!-- atlas:initial-modulepreloads:start -->";
+const preloadEnd = "<!-- atlas:initial-modulepreloads:end -->";
+const pagePath = resolve(outdir, "index.html");
+const page = readFileSync(pagePath, "utf8");
+const start = page.indexOf(preloadStart);
+const end = page.indexOf(preloadEnd);
+if (
+  start < 0 ||
+  end < start ||
+  page.indexOf(preloadStart, start + preloadStart.length) >= 0 ||
+  page.indexOf(preloadEnd, end + preloadEnd.length) >= 0
+) throw new Error("index.html has an invalid initial modulepreload block");
+const initialHrefs = [...initial].map((path) => {
+  const href = relative(outdir, resolve(path)).split(sep).join("/");
+  if (
+    !href ||
+    href === ".." ||
+    href.startsWith("../") ||
+    !/^[A-Za-z0-9._/-]+$/.test(href)
+  ) throw new Error(`initial module path ${path} is not publishable`);
+  return href;
+});
+const preloadBlock = [
+  preloadStart,
+  ...initialHrefs.map((href) => `<link rel="modulepreload" href="${href}">`),
+  preloadEnd,
+].join("\n");
+const nextPage = page.slice(0, start) + preloadBlock +
+  page.slice(end + preloadEnd.length);
+if (nextPage !== page) writeFileSync(pagePath, nextPage);
+
 console.log(
   `app initial ${initialRaw.toLocaleString()} bytes / ` +
-    `${initialGzip.toLocaleString()} gzip; all chunks ${totalGzip.toLocaleString()} gzip`,
+    `${initialGzip.toLocaleString()} gzip; all chunks ${totalGzip.toLocaleString()} gzip; ` +
+    `${initialHrefs.length} modulepreloads`,
 );
