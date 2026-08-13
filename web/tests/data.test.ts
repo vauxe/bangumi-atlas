@@ -149,6 +149,26 @@ test("projects exact Subject query values from verified rank columns", () => {
   );
 });
 
+test("projects exact Subject date and Bangumi rank from source columns", () => {
+  const requested = new Set(["date", "rank"]);
+  const columns = {
+    nodeCount: 2,
+    sourceCount: 5,
+    dateCodes: Uint16Array.of(0, 0, 2, 0, 1),
+    dateDictionary: ["", "1999-12-31", "2024-01-02"],
+    bgmRank: Uint16Array.of(0, 0, 17, 0, 0),
+  };
+
+  assert.deepEqual(
+    projectSubjectQueryEntity(2, 0, requested, columns, null).fields,
+    { date: "2024-01-02", rank: 17 },
+  );
+  assert.deepEqual(
+    projectSubjectQueryEntity(4, 1, requested, columns, null).fields,
+    { date: "1999-12-31", rank: null },
+  );
+});
+
 test("gates Subject query columns on release capability and whole scans", () => {
   const manifest = {
     query: {
@@ -169,6 +189,38 @@ test("gates Subject query columns on release capability and whole scans", () => 
   assert.equal(
     canProjectSubjectQueryColumns(manifest, "subject", "whole", ["rank"]),
     false,
+  );
+  const v2Manifest = {
+    ...manifest,
+    query: {
+      ...manifest.query,
+      capabilities: [
+        "subject-query-columns-v1",
+        "subject-query-columns-v2",
+      ],
+      subjectColumns: {
+        order: "source-id",
+        count: 10,
+        date: {
+          encoding: "u16le-dictionary-v1",
+          codes: "subject-date-code.bin",
+          dictionary: "subject-date-dictionary.json.gz",
+        },
+        rank: {
+          encoding: "u16le-zero-null-v1",
+          values: "subject-bgm-rank.bin",
+        },
+      },
+    },
+  } as Manifest;
+  assert.equal(
+    canProjectSubjectQueryColumns(
+      v2Manifest,
+      "subject",
+      "whole",
+      ["date", "rank", "score"],
+    ),
+    true,
   );
   assert.equal(
     canProjectSubjectQueryColumns(

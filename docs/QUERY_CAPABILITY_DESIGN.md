@@ -254,7 +254,8 @@ Exists / NotExists、Union / Intersect / Except、Aggregate 和 Path。
 主线程只维护编辑、焦点和结果视图；扫描、连接、集合、聚合和路径在 Worker 中执行。执行固定一个不可变
 Release，协议、查询合同或映射摘要不兼容时停止查询。物理执行优先使用身份索引、名称/全文候选、投影扫描、
 邻接和 Episode 引用目录；正向关联存在性查询只读取内层命中的实体候选，全量 Subject 扫描只在 Release
-声明并通过 `subject-query-columns-v1` 验证时使用所需的 rank 对齐列。其他形状保持规范扫描回退；无 Range 时
+声明并通过 `subject-query-columns-v1` 验证时使用所需的 rank 对齐列，`date`/`rank` 还要求附加的
+`subject-query-columns-v2` 源 ID 对齐列。其他形状保持规范扫描回退；无 Range 时
 允许在缓存预算内读取完整 pack。
 
 查询工作量和结果数没有隐藏配额。需要全局排序、聚合或完整集合时允许读取完整输入，用户通过“停止”取消。

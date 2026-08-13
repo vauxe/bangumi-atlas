@@ -50,6 +50,8 @@ if (!scenario || !scenarios.includes(scenario))
 const runCount = Number(process.env["QUERY_BENCH_RUNS"] ?? 5);
 if (!Number.isSafeInteger(runCount) || runCount < 1 || runCount > 20)
   throw new TypeError("QUERY_BENCH_RUNS must be an integer from 1 to 20");
+const forceSubjectRowScan =
+  process.env["QUERY_BENCH_FORCE_SUBJECT_ROW_SCAN"] === "1";
 
 const base = process.env["SMOKE_BASE"] ?? "http://127.0.0.1:8391";
 const realFetch = globalThis.fetch;
@@ -88,7 +90,18 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
 }) as typeof fetch;
 
 const manifest = await loadManifest();
-const data = new Data(manifest);
+const runtimeManifest = forceSubjectRowScan && manifest.query
+  ? {
+    ...manifest,
+    query: {
+      ...manifest.query,
+      capabilities: manifest.query.capabilities.filter(
+        (capability) => !capability.startsWith("subject-query-columns-v"),
+      ),
+    },
+  }
+  : manifest;
+const data = new Data(runtimeManifest);
 const source = new SiteQueryDataSource(
   data,
   new SiteQuerySearchIndex(data, manifest),
@@ -203,6 +216,7 @@ const median = elapsed[Math.floor(elapsed.length / 2)] as number;
 
 console.log(JSON.stringify({
   scenario,
+  subjectScanPath: forceSubjectRowScan ? "entities.pack" : "release-default",
   releaseId: manifest.version,
   cold,
   warm: {

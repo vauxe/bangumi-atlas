@@ -7,6 +7,7 @@ import {
 import type { Manifest, NameRow } from "./types";
 
 const SUBJECT_QUERY_COLUMN_CAPABILITY = "subject-query-columns-v1";
+const SUBJECT_SOURCE_QUERY_COLUMN_CAPABILITY = "subject-query-columns-v2";
 const SUBJECT_QUERY_COLUMN_FIELDS = new Set([
   "ref",
   "id",
@@ -17,6 +18,7 @@ const SUBJECT_QUERY_COLUMN_FIELDS = new Set([
   "score",
   "nsfw",
 ]);
+const SUBJECT_SOURCE_QUERY_COLUMN_FIELDS = new Set(["date", "rank"]);
 const SUBJECT_NAME_BLOCK_BATCH = 16;
 const SUBJECT_QUERY_ENTITY_BATCH = 4096;
 const MISSING_RANK = 0xffffff;
@@ -41,7 +43,18 @@ export function canProjectSubjectQueryColumns(
     manifest.query?.capabilities.includes(
       SUBJECT_QUERY_COLUMN_CAPABILITY,
     ) === true &&
-    fields.every((field) => SUBJECT_QUERY_COLUMN_FIELDS.has(field));
+    fields.every((field) =>
+      SUBJECT_QUERY_COLUMN_FIELDS.has(field) ||
+      SUBJECT_SOURCE_QUERY_COLUMN_FIELDS.has(field)
+    ) &&
+    (
+      fields.every((field) => !SUBJECT_SOURCE_QUERY_COLUMN_FIELDS.has(field)) ||
+      (
+        manifest.query.capabilities.includes(
+          SUBJECT_SOURCE_QUERY_COLUMN_CAPABILITY,
+        ) && manifest.query.subjectColumns !== undefined
+      )
+    );
 }
 
 /** @internal Exact decoding contract shared by the fast scan and tests. */
@@ -80,6 +93,23 @@ export function projectSubjectQueryEntity(
     if (score === undefined)
       throw new TypeError("Subject score query column is missing");
     fields.score = score === 0 ? null : score / 10;
+  }
+  if (requested.has("date")) {
+    const sourceCount = columns.sourceCount;
+    const code = columns.dateCodes?.[id];
+    const date = code === undefined
+      ? undefined
+      : columns.dateDictionary?.[code];
+    if (sourceCount === undefined || id >= sourceCount || date === undefined)
+      throw new TypeError("Subject date query column is missing");
+    fields.date = date;
+  }
+  if (requested.has("rank")) {
+    const sourceCount = columns.sourceCount;
+    const bgmRank = columns.bgmRank?.[id];
+    if (sourceCount === undefined || id >= sourceCount || bgmRank === undefined)
+      throw new TypeError("Subject Bangumi rank query column is missing");
+    fields.rank = bgmRank === 0 ? null : bgmRank;
   }
   if (requested.has("nsfw")) fields.nsfw = Boolean((flags as number) & 1);
   return { kind: "subject", key: (1 << 24) | id, fields };

@@ -23,6 +23,20 @@ export interface PositionEncoding {
   scale: [number, number, number];
 }
 
+export interface SubjectQueryColumnLayout {
+  order: "source-id";
+  count: number;
+  date: {
+    encoding: "u16le-dictionary-v1";
+    codes: string;
+    dictionary: string;
+  };
+  rank: {
+    encoding: "u16le-zero-null-v1";
+    values: string;
+  };
+}
+
 export interface Manifest {
   /** 除自身外规范 manifest 内容的 SHA-256(内容身份)。 */
   version: string;
@@ -38,6 +52,7 @@ export interface Manifest {
     schema: "atlas-release-query-v1";
     capabilities: string[];
     contractDigest: string;
+    subjectColumns?: SubjectQueryColumnLayout;
   };
   counts: {
     entities: { subject: number; person: number; character: number };

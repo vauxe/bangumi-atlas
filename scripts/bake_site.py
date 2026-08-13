@@ -24,6 +24,7 @@ import time
 from array import array
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any, BinaryIO, cast
@@ -74,6 +75,9 @@ SIZE_WARN = 900_000_000
 FILE_BUDGET = 20_000  # CF Pages 迁移预案的文件数上限
 FACT_BATCH_ROWS = 100_000
 INCIDENCE_SHARDS = 64
+SUBJECT_DATE_CODE_PATH = "subject-date-code.bin"
+SUBJECT_DATE_DICTIONARY_PATH = "subject-date-dictionary.json.gz"
+SUBJECT_BGM_RANK_PATH = "subject-bgm-rank.bin"
 
 # 人物类型与角色分类没有上游映射文件;这是站点显示映射的权威声明,
 # 参与 mappings.json 摘要。未覆盖的原始码由客户端按数值显示。
@@ -96,6 +100,15 @@ type FactRow = tuple[tuple[int, ...], tuple[Any, ...]]
 type RankLookup = dict[int, np.ndarray]
 type IncidenceEntry = tuple[int, str, list[Any]]
 type SearchEntry = tuple[str, str, int, str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class SubjectSourceQueryColumns:
+    """Lossless Subject query scalars aligned by archive source id."""
+
+    date_dictionary: list[str]
+    date_codes: np.ndarray
+    ranks: np.ndarray
 
 
 def log(msg: str) -> None:
@@ -246,6 +259,85 @@ def subject_query_score(value: Any) -> int:
             f"Subject score {value!r} cannot be represented losslessly as u8"
         )
     return encoded
+
+
+def build_subject_source_query_columns(
+    *,
+    source_ids: Sequence[Any],
+    dates: Sequence[Any],
+    ranks: Sequence[Any],
+    source_count: int,
+) -> SubjectSourceQueryColumns:
+    """Encode exact date/rank values without materializing entity tuples."""
+
+    if (
+        not isinstance(source_count, int)
+        or isinstance(source_count, bool)
+        or source_count < 0
+    ):
+        raise ValueError("Subject query source id count is invalid")
+    if len(source_ids) != len(dates) or len(source_ids) != len(ranks):
+        raise ValueError("Subject query source columns have different lengths")
+
+    seen = np.zeros(source_count, dtype=np.bool_)
+    date_values: list[str] = []
+    encoded_ranks = np.zeros(source_count, dtype="<u2")
+    normalized_ids: list[int] = []
+    for raw_id, raw_date, raw_rank in zip(
+        source_ids, dates, ranks, strict=True
+    ):
+        if not isinstance(raw_id, (int, np.integer)) or isinstance(
+            raw_id, (bool, np.bool_)
+        ):
+            raise ValueError(f"Subject query source id {raw_id!r} is invalid")
+        source_id = int(raw_id)
+        if source_id < 0 or source_id >= source_count:
+            raise ValueError(
+                f"Subject query source id {source_id} is out of range"
+            )
+        if seen[source_id]:
+            raise ValueError(f"duplicate Subject query source id {source_id}")
+        seen[source_id] = True
+        normalized_ids.append(source_id)
+
+        if raw_date is None:
+            date_values.append("")
+        elif isinstance(raw_date, str):
+            date_values.append(raw_date)
+        else:
+            raise ValueError(
+                f"Subject date {raw_date!r} cannot be represented losslessly"
+            )
+
+        if raw_rank is None:
+            encoded_rank = 0
+        elif (
+            isinstance(raw_rank, (int, np.integer))
+            and not isinstance(raw_rank, (bool, np.bool_))
+            and 0 <= int(raw_rank) <= np.iinfo(np.uint16).max
+        ):
+            encoded_rank = int(raw_rank)
+        else:
+            raise ValueError(
+                f"Subject rank {raw_rank!r} cannot be represented losslessly"
+            )
+        encoded_ranks[source_id] = encoded_rank
+
+    date_dictionary = sorted(
+        set(date_values), key=lambda value: value.encode("utf-8")
+    )
+    if len(date_dictionary) > np.iinfo(np.uint16).max + 1:
+        raise ValueError("Subject date dictionary exceeds u16 capacity")
+    code_by_date = {value: code for code, value in enumerate(date_dictionary)}
+    date_codes = np.zeros(source_count, dtype="<u2")
+    for source_id, value in zip(normalized_ids, date_values, strict=True):
+        date_codes[source_id] = code_by_date[value]
+
+    return SubjectSourceQueryColumns(
+        date_dictionary=date_dictionary,
+        date_codes=date_codes,
+        ranks=encoded_ranks,
+    )
 
 
 def quantiles(sizes: list[int]) -> dict[str, int]:
@@ -1443,6 +1535,7 @@ def bake_release(  # noqa: PLR0915
             "name_cn",
             "date",
             "score",
+            "rank",
             "nsfw",
             "meta_tags",
         ],
@@ -1473,6 +1566,13 @@ def bake_release(  # noqa: PLR0915
 
     sub_ranks = ranks_for_source_ids(
         rank_lookup, sr.KIND_SUBJECT, sub_index["id"]
+    )
+    subject_source_count = len(rank_lookup[sr.KIND_SUBJECT])
+    subject_source_query_columns = build_subject_source_query_columns(
+        source_ids=sub_index["id"],
+        dates=sub_index["date"],
+        ranks=sub_index["rank"],
+        source_count=subject_source_count,
     )
     for i, rank_value in enumerate(sub_ranks):
         rank = int(rank_value)
@@ -1567,6 +1667,17 @@ def bake_release(  # noqa: PLR0915
     flags |= (media_vals.astype(np.uint8)) << 2
     (SITE / "flags.bin").write_bytes(flags.tobytes())
     (SITE / "score.bin").write_bytes(score_u8.tobytes())
+    (SITE / SUBJECT_DATE_CODE_PATH).write_bytes(
+        subject_source_query_columns.date_codes.tobytes()
+    )
+    write_gzip_json(
+        SUBJECT_DATE_DICTIONARY_PATH,
+        subject_source_query_columns.date_dictionary,
+        6,
+    )
+    (SITE / SUBJECT_BGM_RANK_PATH).write_bytes(
+        subject_source_query_columns.ranks.tobytes()
+    )
     tag_counts: Counter[str] = Counter()
     for meta_tags in meta_tags_r:
         tag_counts.update(meta_tags or [])
@@ -1591,6 +1702,16 @@ def bake_release(  # noqa: PLR0915
         ("tags.bin", 4),
     ):
         reconcile(f"{fname} 字节数", n * stride, (SITE / fname).stat().st_size)
+    reconcile(
+        f"{SUBJECT_DATE_CODE_PATH} 字节数",
+        subject_source_count * 2,
+        (SITE / SUBJECT_DATE_CODE_PATH).stat().st_size,
+    )
+    reconcile(
+        f"{SUBJECT_BGM_RANK_PATH} 字节数",
+        subject_source_count * 2,
+        (SITE / SUBJECT_BGM_RANK_PATH).stat().st_size,
+    )
     log("几何 SoA 写出完成")
     log(
         f"坐标 affine u16: {coords_f32.nbytes:,} → "
@@ -1609,6 +1730,7 @@ def bake_release(  # noqa: PLR0915
         size_u8,
         flags,
         score_u8,
+        subject_source_query_columns,
         tag_counts,
         tag_bit,
         tag_mask,
@@ -2635,8 +2757,22 @@ def bake_release(  # noqa: PLR0915
                 "fact-ref-v1",
                 "full-text-v1",
                 "subject-query-columns-v1",
+                "subject-query-columns-v2",
             ],
             "contractDigest": query_schema_digest(),
+            "subjectColumns": {
+                "order": "source-id",
+                "count": subject_source_count,
+                "date": {
+                    "encoding": "u16le-dictionary-v1",
+                    "codes": SUBJECT_DATE_CODE_PATH,
+                    "dictionary": SUBJECT_DATE_DICTIONARY_PATH,
+                },
+                "rank": {
+                    "encoding": "u16le-zero-null-v1",
+                    "values": SUBJECT_BGM_RANK_PATH,
+                },
+            },
         },
         "counts": counts,
         "text_bytes": {

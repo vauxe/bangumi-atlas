@@ -179,6 +179,46 @@ class SubjectQueryColumnTests(unittest.TestCase):
             ):
                 bake_site.subject_query_score(value)
 
+    def test_builds_exact_source_id_aligned_date_and_rank_columns(
+        self,
+    ) -> None:
+        columns = bake_site.build_subject_source_query_columns(
+            source_ids=[2, 0, 4],
+            dates=["2024-01-02", "", "1999-12-31"],
+            ranks=[17, 0, None],
+            source_count=6,
+        )
+
+        self.assertEqual(
+            columns.date_dictionary,
+            ["", "1999-12-31", "2024-01-02"],
+        )
+        self.assertEqual(columns.date_codes.dtype.str, "<u2")
+        self.assertEqual(columns.date_codes.tolist(), [0, 0, 2, 0, 1, 0])
+        self.assertEqual(columns.ranks.dtype.str, "<u2")
+        self.assertEqual(columns.ranks.tolist(), [0, 0, 17, 0, 0, 0])
+
+    def test_rejects_lossy_source_query_column_values(self) -> None:
+        cases = (
+            ([0], [123], [1], 1, "date"),
+            ([0], ["2024-01-02"], [65_536], 1, "rank"),
+            ([0], ["2024-01-02"], [False], 1, "rank"),
+            ([0], ["2024-01-02"], [0.0], 1, "rank"),
+            ([0, 0], ["", ""], [0, 0], 1, "duplicate"),
+            ([1], [""], [0], 1, "source id"),
+        )
+        for source_ids, dates, ranks, source_count, message in cases:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(ValueError, message),
+            ):
+                bake_site.build_subject_source_query_columns(
+                    source_ids=source_ids,
+                    dates=dates,
+                    ranks=ranks,
+                    source_count=source_count,
+                )
+
 
 class ManifestPublicationTests(unittest.TestCase):
     def test_reconciliation_failure_does_not_publish_a_manifest(self) -> None:
