@@ -68,6 +68,8 @@ const REQUIRED_TEXT_QUERY_FILES = [
   "text.search.ngram.idx",
   "text.search.ngram.pack",
 ] as const;
+const SUBJECT_QUERY_COLUMNS_V1 = "subject-query-columns-v1";
+const SUBJECT_QUERY_COLUMNS_V2 = "subject-query-columns-v2";
 const CACHE_BUDGET = {
   total: 64_000_000,
   names: 12_000_000,
@@ -331,6 +333,37 @@ export async function loadManifest(): Promise<Manifest> {
     m.files["rank-by-key.bin"]?.[0] !== rankIndexBytes
   )
     throw new SiteDataContractError("rank_index 与 rank-by-key.bin 不一致");
+  const subjectQueryColumns = m.query?.subjectColumns;
+  const declaresSubjectColumnsV2 = m.query?.capabilities.includes(
+    SUBJECT_QUERY_COLUMNS_V2,
+  ) === true;
+  if (
+    declaresSubjectColumnsV2 !== (subjectQueryColumns !== undefined) ||
+    (declaresSubjectColumnsV2 &&
+      !m.query?.capabilities.includes(SUBJECT_QUERY_COLUMNS_V1)) ||
+    (subjectQueryColumns !== undefined && (
+      subjectQueryColumns.order !== "source-id" ||
+      !Number.isSafeInteger(subjectQueryColumns.count) ||
+      subjectQueryColumns.count !== rankSegments["1"]?.count ||
+      subjectQueryColumns.date?.encoding !== "u16le-dictionary-v1" ||
+      typeof subjectQueryColumns.date.codes !== "string" ||
+      typeof subjectQueryColumns.date.dictionary !== "string" ||
+      subjectQueryColumns.rank?.encoding !== "u16le-zero-null-v1" ||
+      typeof subjectQueryColumns.rank.values !== "string" ||
+      new Set([
+        subjectQueryColumns.date.codes,
+        subjectQueryColumns.date.dictionary,
+        subjectQueryColumns.rank.values,
+      ]).size !== 3 ||
+      m.files[subjectQueryColumns.date.codes]?.[0] !==
+        subjectQueryColumns.count * 2 ||
+      !m.files[subjectQueryColumns.date.dictionary] ||
+      m.files[subjectQueryColumns.date.dictionary]![0] > SMALL_FILE_CAP ||
+      m.files[subjectQueryColumns.rank.values]?.[0] !==
+        subjectQueryColumns.count * 2
+    ))
+  )
+    throw new SiteDataContractError("subject-query-columns-v2 查询列声明无效");
   if (
     m.episode_index?.encoding !== "u32le-subject-id" ||
     m.episode_index.sentinel !== EPISODE_SUBJECT_SENTINEL ||
@@ -1266,33 +1299,48 @@ let loadedKeyIndex: Uint32Array | null = null;
 
 export interface SubjectQueryColumns {
   nodeCount: number;
+  sourceCount?: number;
   year?: Uint16Array;
   score?: Uint8Array;
   flags?: Uint8Array;
+  dateCodes?: Uint16Array;
+  dateDictionary?: readonly string[];
+  bgmRank?: Uint16Array;
 }
 
-/** Exact, rank-aligned Subject columns used only by a release that declares
- * subject-query-columns-v1. */
+/** Exact Subject columns used only by a release that declares the matching
+ * rank-aligned v1 and source-id-aligned v2 capabilities. */
 export async function loadSubjectQueryColumns(
   fields: readonly string[] = ["year", "score", "type", "nsfw"],
   signal?: AbortSignal,
 ): Promise<SubjectQueryColumns> {
   const count = manifestRef?.n_nodes ?? 0;
-  const loadYear = (): Promise<Uint16Array> =>
-    pinned.get("subject-query-year", async () => {
-      const yearBytes = await loadPublishedBytes("year.bin");
-      if (yearBytes.byteLength !== count * 2)
-        throw new SiteDataContractError("Subject year 查询列宽度与 n_nodes 不一致");
-      const year = new Uint16Array(count);
+  const sourceLayout = manifestRef?.query?.subjectColumns;
+  const sourceCount = sourceLayout?.count ?? 0;
+  const loadUint16 = (
+    key: string,
+    path: string,
+    expectedCount: number,
+    label: string,
+  ): Promise<Uint16Array> =>
+    pinned.get(key, async () => {
+      const bytes = await loadPublishedBytes(path);
+      if (bytes.byteLength !== expectedCount * 2)
+        throw new SiteDataContractError(
+          `${label} 查询列宽度与声明 count 不一致`,
+        );
+      const values = new Uint16Array(expectedCount);
       const view = new DataView(
-        yearBytes.buffer,
-        yearBytes.byteOffset,
-        yearBytes.byteLength,
+        bytes.buffer,
+        bytes.byteOffset,
+        bytes.byteLength,
       );
-      for (let rank = 0; rank < count; rank++)
-        year[rank] = view.getUint16(rank * 2, true);
-      return year;
+      for (let index = 0; index < expectedCount; index++)
+        values[index] = view.getUint16(index * 2, true);
+      return values;
     }) as Promise<Uint16Array>;
+  const loadYear = (): Promise<Uint16Array> =>
+    loadUint16("subject-query-year", "year.bin", count, "Subject year");
   const loadBytes = (path: "score.bin" | "flags.bin"): Promise<Uint8Array> =>
     pinned.get(`subject-query-${path}`, async () => {
       const bytes = await loadPublishedBytes(path);
@@ -1303,7 +1351,37 @@ export async function loadSubjectQueryColumns(
   const needsYear = fields.includes("year");
   const needsScore = fields.includes("score");
   const needsFlags = fields.includes("type") || fields.includes("nsfw");
-  const [year, score, flags] = await Promise.all([
+  const needsDate = fields.includes("date");
+  const needsRank = fields.includes("rank");
+  if ((needsDate || needsRank) && !sourceLayout)
+    throw new SiteDataContractError("Subject source-id 查询列声明缺失");
+  const loadDate = (): Promise<{
+    codes: Uint16Array;
+    dictionary: readonly string[];
+  }> => pinned.get("subject-query-date", async () => {
+    const layout = sourceLayout!;
+    const [codes, rawDictionary] = await Promise.all([
+      loadUint16(
+        `subject-query-${layout.date.codes}`,
+        layout.date.codes,
+        sourceCount,
+        "Subject date code",
+      ),
+      loadGzJson<unknown>(layout.date.dictionary),
+    ]);
+    if (
+      !Array.isArray(rawDictionary) ||
+      rawDictionary.length > 0x1_0000 ||
+      rawDictionary.some((value) => typeof value !== "string") ||
+      new Set(rawDictionary).size !== rawDictionary.length
+    ) throw new SiteDataContractError("Subject date 查询字典无效");
+    const dictionary = rawDictionary as string[];
+    for (const code of codes)
+      if (code >= dictionary.length)
+        throw new SiteDataContractError("Subject date 查询列引用字典外编码");
+    return { codes, dictionary };
+  }) as Promise<{ codes: Uint16Array; dictionary: readonly string[] }>;
+  const [year, score, flags, date, bgmRank] = await Promise.all([
     needsYear ? waitForSignal(loadYear(), signal) : Promise.resolve(undefined),
     needsScore
       ? waitForSignal(loadBytes("score.bin"), signal)
@@ -1311,8 +1389,31 @@ export async function loadSubjectQueryColumns(
     needsFlags
       ? waitForSignal(loadBytes("flags.bin"), signal)
       : Promise.resolve(undefined),
+    needsDate
+      ? waitForSignal(loadDate(), signal)
+      : Promise.resolve(undefined),
+    needsRank
+      ? waitForSignal(
+        loadUint16(
+          `subject-query-${sourceLayout!.rank.values}`,
+          sourceLayout!.rank.values,
+          sourceCount,
+          "Subject Bangumi rank",
+        ),
+        signal,
+      )
+      : Promise.resolve(undefined),
   ]);
-  return { nodeCount: count, year, score, flags };
+  return {
+    nodeCount: count,
+    sourceCount,
+    year,
+    score,
+    flags,
+    dateCodes: date?.codes,
+    dateDictionary: date?.dictionary,
+    bgmRank,
+  };
 }
 
 /** u32 累计偏移索引；校验与读取一起进入发布级 Promise 缓存。 */

@@ -217,6 +217,8 @@ JSON 使用无额外空白的 UTF-8 编码；gzip 固定 `mtime=0`。相同 sche
 | `manifest.json` | schema、字段策略、来源、计数、限制和所有文件摘要 |
 | 现有几何 SoA | `positions`、`year`、`key`、`size`、`flags`、`score`、`tags` |
 | `rank-by-key.bin` | 稳定键到 Canvas VisualRank 的紧凑反向索引 |
+| `subject-date-code.bin` / `subject-date-dictionary.json.gz` | 按 Subject 源 ID 对齐的无损日期字典编码 |
+| `subject-bgm-rank.bin` | 按 Subject 源 ID 对齐的 `u16` Bangumi 排名；`0` 保持查询空值语义 |
 | `episode-subject.bin` | EpisodeId 到 Subject 源 ID 的定长反向索引 |
 | `fact-anchor.bin` | FactRef 到一个规范参与实体的定长索引，用于精确取回事实 |
 | `names.idx` / `names.pack` | 核心实体 `name`、`name_cn` 与实体种类的规范副本，每 2,048 个 VisualRank 一个初始成员 |
@@ -289,8 +291,10 @@ gzip 成员边界拆分，每个文件不超过 80,000,000 字节。拆分边界
 声明 `subject-query-columns-v1` 的 Release 可以把全量 Subject 查询中的 `id`、`ref`、
 `name`、`nameCn`、`type`、`year`、`score` 和 `nsfw` 从 `rank-by-key.bin`、`names.pack`
 及现有 `year.bin`、`score.bin`、`flags.bin` 精确投影，仍保持源 ID 顺序。只有所需列会被
-读取；流式前 N 条和包含其他字段的查询继续读取 `entities.pack`，旧 Release 也自动回退。
-该能力只是经验证的读取路径，不改变字段权威或查询语义。
+读取。附加声明 `subject-query-columns-v2` 时，`date` 从按源 ID 对齐的 `u16` 字典编码读取，
+`rank` 从按源 ID 对齐的 `u16` 列读取；字典保留原字符串，排名 `0` 解码为查询 `null`。
+流式前 N 条和包含其他字段的查询继续读取 `entities.pack`，旧 Release 也自动回退。两项能力
+只是经验证的读取路径，不改变字段权威或查询语义。
 
 实体桶以 EntityKey 为键，因此实体元组不重复保存 `id` 或 `kind`。事实先按种类分组，
 incidence 元组再保存 FactRef、multiplicity、本地角色、其他参与者和结构属性。Episode
@@ -489,8 +493,9 @@ Data 用 Promise memo 合并进行中的相同请求；请求完成后只进入�
   桶到成员、成员偏移、首尾 rank 和计数覆盖完整 gzip 成员 pack。
 - 完整 Unicode casefold 表、每个 rank 的构建期别名及前缀/子串两类索引均由原始名称
   独立重算；简繁与日文转换不能串联成虚假等价。
-- `subject-query-columns-v1` 的源 ID 到 rank 映射完整且单射；名称、类型、年份、评分和
-  NSFW 值按查询空值语义与 Subject Parquet 独立逐项对账，无法无损编码时禁止发布能力。
+- `subject-query-columns-v1/v2` 的源 ID 到 rank 映射完整且单射；名称、类型、日期、年份、
+  评分、Bangumi 排名和 NSFW 值按查询空值语义与 Subject Parquet 独立逐项对账，字典码、
+  源 ID 空洞和 `0 → null` 均须验证；无法无损编码时禁止发布能力。
 - `positions.bin` 的每个 rank 都与布局输入重新推导的规范化、全局分离坐标逐项对应；
   三维位移不超过逐轴 affine u16 的理论舍入上限，manifest 声明的最大位移与解码实值一致，
   解码后的全局最小中心距仍不低于 `0.28`。

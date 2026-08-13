@@ -535,6 +535,62 @@ test("accepts a query release without a deployment marker", async () => {
   assert.equal(loaded.query?.schema, "atlas-release-query-v1");
 });
 
+test("rejects incomplete Subject source-column declarations", async () => {
+  const dictionary = new Uint8Array(gzipSync(JSON.stringify([""])));
+  const files = {
+    "subject-date-code.bin": [2, hash(u16le([0]))] as [number, string],
+    "subject-date-dictionary.json.gz": [
+      dictionary.byteLength,
+      hash(dictionary),
+    ] as [number, string],
+    "subject-bgm-rank.bin": [2, hash(u16le([0]))] as [number, string],
+  };
+  const sourceColumns = {
+    order: "source-id" as const,
+    count: 1,
+    date: {
+      encoding: "u16le-dictionary-v1" as const,
+      codes: "subject-date-code.bin",
+      dictionary: "subject-date-dictionary.json.gz",
+    },
+    rank: {
+      encoding: "u16le-zero-null-v1" as const,
+      values: "subject-bgm-rank.bin",
+    },
+  };
+  const makeManifest = (): Manifest => {
+    const manifest = testManifest(files);
+    manifest.query = {
+      schema: "atlas-release-query-v1",
+      capabilities: [
+        "subject-query-columns-v1",
+        "subject-query-columns-v2",
+      ],
+      contractDigest: "0".repeat(64),
+      subjectColumns: structuredClone(sourceColumns),
+    };
+    return manifest;
+  };
+
+  const missingLayout = makeManifest();
+  delete missingLayout.query!.subjectColumns;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(missingLayout))) as typeof fetch;
+  await assert.rejects(loadManifest(), /subject-query-columns-v2/);
+
+  const missingBase = makeManifest();
+  missingBase.query!.capabilities = ["subject-query-columns-v2"];
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(missingBase))) as typeof fetch;
+  await assert.rejects(loadManifest(), /subject-query-columns-v2/);
+
+  const wrongCount = makeManifest();
+  wrongCount.query!.subjectColumns!.count++;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(wrongCount))) as typeof fetch;
+  await assert.rejects(loadManifest(), /subject-query-columns-v2/);
+});
+
 test("hashes Unicode bigrams exactly like the site baker", () => {
   assert.deepEqual(searchGramBuckets("ab"), [36752]);
   assert.deepEqual(searchGramBuckets("之境界"), [53925, 53696]);
@@ -1598,6 +1654,13 @@ test("projects verified Subject columns through Data in archive-id order", async
   const years = u16le([0, 2025, 2020]);
   const scores = Uint8Array.of(0, 91, 85);
   const flags = Uint8Array.of(2 << 2, (6 << 2) | 1, (1 << 2) | 1);
+  const dateCodes = u16le([1, 0, 0, 2]);
+  const dateDictionary = new Uint8Array(gzipSync(JSON.stringify([
+    "",
+    "2020-01-01",
+    "2025-04-01",
+  ])));
+  const bgmRanks = u16le([50, 0, 0, 7]);
   const firstNames = gzipSync(JSON.stringify([
     ["Two", "二", 1],
     ["Three", null, 1],
@@ -1614,6 +1677,9 @@ test("projects verified Subject columns through Data in archive-id order", async
     ["year.bin", years],
     ["score.bin", scores],
     ["flags.bin", flags],
+    ["subject-date-code.bin", dateCodes],
+    ["subject-date-dictionary.json.gz", dateDictionary],
+    ["subject-bgm-rank.bin", bgmRanks],
     ["names.idx", namesIndex],
     ["names.pack", namesPack],
   ]);
@@ -1643,8 +1709,24 @@ test("projects verified Subject columns through Data in archive-id order", async
     },
     query: {
       schema: "atlas-release-query-v1",
-      capabilities: ["subject-query-columns-v1"],
+      capabilities: [
+        "subject-query-columns-v1",
+        "subject-query-columns-v2",
+      ],
       contractDigest: "0".repeat(64),
+      subjectColumns: {
+        order: "source-id",
+        count: 4,
+        date: {
+          encoding: "u16le-dictionary-v1",
+          codes: "subject-date-code.bin",
+          dictionary: "subject-date-dictionary.json.gz",
+        },
+        rank: {
+          encoding: "u16le-zero-null-v1",
+          values: "subject-bgm-rank.bin",
+        },
+      },
     },
   };
   const requested = new Set<string>();
@@ -1659,7 +1741,7 @@ test("projects verified Subject columns through Data in archive-id order", async
   const projected = [];
   for await (const entity of data.projectEntities(
     "subject",
-    ["name", "nameCn", "type", "year", "score", "nsfw"],
+    ["name", "nameCn", "type", "date", "year", "score", "rank", "nsfw"],
     undefined,
     "whole",
   )) projected.push(entity);
@@ -1672,8 +1754,10 @@ test("projects verified Subject columns through Data in archive-id order", async
         name: "Zero",
         nameCn: "零",
         type: 1,
+        date: "2020-01-01",
         year: 2020,
         score: 8.5,
+        rank: 50,
         nsfw: true,
       },
     },
@@ -1684,8 +1768,10 @@ test("projects verified Subject columns through Data in archive-id order", async
         name: "Two",
         nameCn: "二",
         type: 2,
+        date: "",
         year: null,
         score: null,
+        rank: null,
         nsfw: false,
       },
     },
@@ -1696,8 +1782,10 @@ test("projects verified Subject columns through Data in archive-id order", async
         name: "Three",
         nameCn: "",
         type: 6,
+        date: "2025-04-01",
         year: 2025,
         score: 9.1,
+        rank: 7,
         nsfw: true,
       },
     },
@@ -1705,7 +1793,7 @@ test("projects verified Subject columns through Data in archive-id order", async
   const projectedBatches = [];
   for await (const batch of data.projectEntityBatches(
     "subject",
-    ["name", "nameCn", "type", "year", "score", "nsfw"],
+    ["name", "nameCn", "type", "date", "year", "score", "rank", "nsfw"],
     undefined,
     "whole",
   )) projectedBatches.push(batch);

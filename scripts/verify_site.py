@@ -61,6 +61,9 @@ artifact_files: dict[str, list[Any]] = {}
 member_spans: dict[str, set[tuple[int, int]]] = defaultdict(set)
 MIN_NODE_CENTER_DISTANCE = 0.28
 VERIFY_BATCH_ROWS = 32_768
+SUBJECT_DATE_CODE_PATH = "subject-date-code.bin"
+SUBJECT_DATE_DICTIONARY_PATH = "subject-date-dictionary.json.gz"
+SUBJECT_BGM_RANK_PATH = "subject-bgm-rank.bin"
 EPISODE_TYPE_NAMES = {
     "0": "本篇",
     "1": "特别篇",
@@ -1162,6 +1165,7 @@ def verify_release(  # noqa: PLR0915
         manifest.get("source"),
     )
     query_release = manifest.get("query", {})
+    subject_source_count = manifest["rank_index"]["segments"]["1"]["count"]
     check(
         "查询能力合同完整",
         query_release.get("schema") == "atlas-release-query-v1"
@@ -1171,8 +1175,23 @@ def verify_release(  # noqa: PLR0915
             "fact-ref-v1",
             "full-text-v1",
             "subject-query-columns-v1",
+            "subject-query-columns-v2",
         ]
-        and query_release.get("contractDigest") == query_schema_digest(),
+        and query_release.get("contractDigest") == query_schema_digest()
+        and query_release.get("subjectColumns")
+        == {
+            "order": "source-id",
+            "count": subject_source_count,
+            "date": {
+                "encoding": "u16le-dictionary-v1",
+                "codes": SUBJECT_DATE_CODE_PATH,
+                "dictionary": SUBJECT_DATE_DICTIONARY_PATH,
+            },
+            "rank": {
+                "encoding": "u16le-zero-null-v1",
+                "values": SUBJECT_BGM_RANK_PATH,
+            },
+        },
     )
     alias_block_size = manifest["limits"].get("search_alias_block_ranks")
     if (
@@ -1629,10 +1648,54 @@ def verify_release(  # noqa: PLR0915
     reconcile("实体总数 = n_nodes", n, sum(ent_counts.values()))
     check("实体成员硬上限", max(ent_sizes) <= sr.MEMBER_CAP)
 
+    published_date_codes = load_array(SUBJECT_DATE_CODE_PATH, "<u2")
+    published_bgm_ranks = load_array(SUBJECT_BGM_RANK_PATH, "<u2")
+    published_date_dictionary = orjson.loads(
+        decompress_member(
+            site_file(SUBJECT_DATE_DICTIONARY_PATH).read_bytes(),
+            SUBJECT_DATE_DICTIONARY_PATH,
+        )
+    )
+    date_dictionary_valid = (
+        isinstance(published_date_dictionary, list)
+        and len(published_date_dictionary) <= np.iinfo(np.uint16).max + 1
+        and all(isinstance(value, str) for value in published_date_dictionary)
+        and len(set(published_date_dictionary))
+        == len(published_date_dictionary)
+        and all(
+            left.encode("utf-8") < right.encode("utf-8")
+            for left, right in pairwise(published_date_dictionary)
+        )
+    )
+    check("Subject date 查询字典格式与顺序合法", date_dictionary_valid)
+    if not date_dictionary_valid:
+        raise ValueError("Subject date query dictionary is invalid")
+    reconcile(
+        f"{SUBJECT_DATE_CODE_PATH} 记录数",
+        subject_source_count,
+        len(published_date_codes),
+    )
+    reconcile(
+        f"{SUBJECT_BGM_RANK_PATH} 记录数",
+        subject_source_count,
+        len(published_bgm_ranks),
+    )
+    check(
+        "Subject date 查询编码均指向字典",
+        not len(published_date_codes)
+        or (
+            len(published_date_dictionary) > 0
+            and int(published_date_codes.max())
+            < len(published_date_dictionary)
+        ),
+    )
+
     pq_ent_fp = RowFingerprint()
     expected_scores = np.zeros(n, dtype=np.uint8)
     expected_query_years = np.zeros(n, dtype=np.uint16)
     query_columns_lossless = True
+    expected_source_dates: list[str | None] = [None] * subject_source_count
+    expected_source_ranks = np.zeros(subject_source_count, dtype="<u2")
     expected_tags = np.zeros(n, dtype=np.uint32)
     tag_counts: Counter[str] = Counter()
     tag_first: dict[str, tuple[int, int]] = {}
@@ -1663,6 +1726,23 @@ def verify_release(  # noqa: PLR0915
     ):
         for i in range(len(sub["id"])):
             source_id = sub["id"][i]
+            if expected_source_dates[source_id] is not None:
+                query_columns_lossless = False
+            raw_date = sub["date"][i]
+            if raw_date is None:
+                source_date = ""
+            elif isinstance(raw_date, str):
+                source_date = raw_date
+            else:
+                source_date = ""
+                query_columns_lossless = False
+            expected_source_dates[source_id] = source_date
+            raw_bgm_rank = sub["rank"][i]
+            bgm_rank = int(raw_bgm_rank or 0)
+            if bgm_rank < 0 or bgm_rank > np.iinfo(np.uint16).max:
+                query_columns_lossless = False
+            else:
+                expected_source_ranks[source_id] = np.uint16(bgm_rank)
             rank = int(decoded[sr.KIND_SUBJECT][source_id])
             if rank == sr.RANK_SENTINEL:
                 check("subject 几何投影存在于 rank", False, str(source_id))
@@ -1761,6 +1841,35 @@ def verify_release(  # noqa: PLR0915
         "实体结构内容指纹 = parquet",
         site_ent_fp.snapshot() == pq_ent_fp.snapshot(),
     )
+    expected_date_dictionary = sorted(
+        {value for value in expected_source_dates if value is not None},
+        key=lambda value: value.encode("utf-8"),
+    )
+    if len(expected_date_dictionary) > np.iinfo(np.uint16).max + 1:
+        query_columns_lossless = False
+        expected_date_codes = np.empty(0, dtype="<u2")
+    else:
+        expected_code_by_date = {
+            value: code for code, value in enumerate(expected_date_dictionary)
+        }
+        expected_date_codes = np.zeros(subject_source_count, dtype="<u2")
+        for source_id, value in enumerate(expected_source_dates):
+            if value is not None:
+                expected_date_codes[source_id] = expected_code_by_date[value]
+    check(
+        "Subject date 查询字典 = parquet",
+        expected_date_dictionary == published_date_dictionary,
+        f"expected {len(expected_date_dictionary):,} values, "
+        f"got {len(published_date_dictionary):,}",
+    )
+    check(
+        f"{SUBJECT_DATE_CODE_PATH} = parquet source-id 投影",
+        np.array_equal(published_date_codes, expected_date_codes),
+    )
+    check(
+        f"{SUBJECT_BGM_RANK_PATH} = parquet source-id 投影",
+        np.array_equal(published_bgm_ranks, expected_source_ranks),
+    )
     top_tags = sorted(
         tag_counts,
         key=lambda tag: (-tag_counts[tag], tag_first[tag]),
@@ -1787,6 +1896,12 @@ def verify_release(  # noqa: PLR0915
         expected_flags,
         expected_query_years,
         expected_scores,
+        expected_source_dates,
+        expected_source_ranks,
+        expected_date_codes,
+        published_date_codes,
+        published_bgm_ranks,
+        published_date_dictionary,
         expected_tags,
         published_years,
     )
