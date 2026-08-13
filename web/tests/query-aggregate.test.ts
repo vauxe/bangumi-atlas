@@ -104,6 +104,45 @@ test("collects group evidence once per distinct group instead of once per row", 
   assert.ok(refReads <= 4, `group evidence read entity refs ${refReads} times`);
 });
 
+test("retains Episode graph ownership through an aggregate group", async () => {
+  const episodeSource: QueryDataSource = {
+    scan: async function* () {
+      yield {
+        kind: "entity",
+        owner: "episode",
+        ref: "episode:17",
+        fields: { subjectRef: "subject:3" },
+      };
+    },
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "aggregate",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "episode", binding: "episode" },
+      aggregate: {
+        kind: "aggregate",
+        input: "scan",
+        groupBy: [{
+          name: "episode",
+          value: { kind: "field", binding: "episode", field: "ref" },
+        }],
+        metrics: [{ name: "count", function: "count" }],
+      },
+    },
+  };
+  const entities: unknown[] = [];
+
+  const result = await executeQuery(query, {}, episodeSource, {
+    pageSize: 20,
+    onResultEntities: (items) => entities.push(...items),
+  });
+
+  assert.deepEqual(result.rows, [{ episode: "episode:17", count: 1 }]);
+  assert.deepEqual(entities, [{ ref: "episode:17", graphRef: "subject:3" }]);
+});
+
 test("returns the defined empty global aggregate", async () => {
   const query: QueryDocument = {
     schema: "atlas-query-document-v1",

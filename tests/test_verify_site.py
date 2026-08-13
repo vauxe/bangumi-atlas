@@ -408,6 +408,64 @@ class RoutingContractTests(unittest.TestCase):
             )
         )
 
+    def test_position_quantization_rejects_a_rank_swap(self) -> None:
+        expected = np.array([[-10.0, 2.0, 4.0], [10.0, 6.0, 4.0]], dtype="<f4")
+        decoded = np.array([[-9.9, 2.1, 4.0], [9.9, 5.9, 4.0]], dtype="<f4")
+        encoding = {
+            "encoding": "u16le-affine-3d-v1",
+            "components": 3,
+            "offset": [-10.0, 2.0, 4.0],
+            "scale": [0.25, 0.5, 0.0],
+        }
+
+        aligned_error = verify_site.maximum_position_displacement(
+            expected, decoded
+        )
+        swapped_error = verify_site.maximum_position_displacement(
+            expected, decoded[::-1]
+        )
+        bound = verify_site.position_quantization_error_bound(encoding)
+
+        self.assertLessEqual(aligned_error, bound)
+        self.assertGreater(swapped_error, bound)
+        self.assertTrue(
+            verify_site.position_quantization_report_is_valid(
+                {
+                    "encoding": "u16le-affine-3d-v1",
+                    "max_displacement": aligned_error,
+                },
+                actual_max_displacement=aligned_error,
+            )
+        )
+        self.assertFalse(
+            verify_site.position_quantization_report_is_valid(
+                {
+                    "encoding": "u16le-affine-3d-v1",
+                    "max_displacement": swapped_error,
+                },
+                actual_max_displacement=aligned_error,
+            )
+        )
+
+    def test_position_quantization_bound_includes_float32_rounding(
+        self,
+    ) -> None:
+        encoding = {
+            "encoding": "u16le-affine-3d-v1",
+            "components": 3,
+            "offset": [-300.0, -300.0, -300.0],
+            "scale": [600.0 / 65_535] * 3,
+        }
+
+        naive_rounding_bound = float(
+            np.linalg.norm(np.asarray(encoding["scale"])) / 2
+        )
+        rigorous_bound = verify_site.position_quantization_error_bound(
+            encoding
+        )
+
+        self.assertGreater(rigorous_bound, naive_rounding_bound + 1e-5)
+
     def test_range_directory_routes_each_identity_to_its_member(self) -> None:
         ranges = [[1, 3, 0, 10], [7, 9, 10, 10]]
         identities = [[1, 3], [7, 8, 9]]
@@ -544,6 +602,9 @@ class RoutingContractTests(unittest.TestCase):
                 "collect": np.array([0, 7, 3], dtype=np.int64),
                 "year": np.array([2000, 2001, 2002], dtype=np.uint16),
                 "isolated": np.array([False, True, False]),
+                "x": np.array([0.0, 1.0, 2.0], dtype=np.float32),
+                "y": np.zeros(3, dtype=np.float32),
+                "z": np.zeros(3, dtype=np.float32),
             }
         )
 
@@ -554,6 +615,9 @@ class RoutingContractTests(unittest.TestCase):
             np.round(18 * np.log2(1 + np.array([7, 3, 0]))).astype(np.uint8),
         )
         np.testing.assert_array_equal(projection["isolated"], [1, 0, 0])
+        np.testing.assert_allclose(
+            projection["position"][:, 0], [300.0, 600.0, 0.0], atol=0.2
+        )
         self.assertEqual(
             verify_site.expected_year_range(
                 np.array([0, 701, 1900, 2035, 9000], dtype=np.uint16)

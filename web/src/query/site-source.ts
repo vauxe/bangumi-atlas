@@ -31,6 +31,13 @@ export interface SiteQueryReader {
     signal?: AbortSignal,
     access?: ScanAccess,
   ): AsyncIterable<ProjectedEntity>;
+  /** Candidate projection preserves projectEntities(owner) relative order. */
+  projectEntityCandidates?(
+    owner: StructuralOwner,
+    keys: readonly number[],
+    fields: readonly string[],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProjectedEntity>;
   projectEntity?(
     key: number,
     fields: readonly string[],
@@ -45,6 +52,10 @@ export interface SiteQueryReader {
     signal?: AbortSignal,
   ): Promise<Page<EpisodeRecord>>;
   episode?(id: number, signal?: AbortSignal): Promise<EpisodeRecord | null>;
+  episodeSubjectId?(
+    id: number,
+    signal?: AbortSignal,
+  ): Promise<number | null>;
   textSearchRows?(
     descriptor: TextSearchMember,
     signal?: AbortSignal,
@@ -392,12 +403,33 @@ function factValue(fact: Fact): FactValue {
 
 export class SiteQueryDataSource implements QueryDataSource {
   private mappingsPromise: Promise<Mappings | null> | null = null;
+  readonly resolveEpisodeGraphRef?: NonNullable<
+    QueryDataSource["resolveEpisodeGraphRef"]
+  >;
 
   constructor(
     private reader: SiteQueryReader,
     private searchIndex?: SiteQuerySearch,
     readonly releaseId?: string,
-  ) {}
+  ) {
+    if (reader.episodeSubjectId)
+      this.resolveEpisodeGraphRef = async (ref, signal) => {
+        const parsed = parseEntityRef(ref);
+        if (parsed.owner !== "episode")
+          throw new TypeError("Episode graph resolver received another owner");
+        const subjectId = await reader.episodeSubjectId!(
+          parsed.archiveId,
+          signal,
+        );
+        if (subjectId === null) return null;
+        if (
+          !Number.isSafeInteger(subjectId) ||
+          subjectId < 0 ||
+          subjectId > 0xffffff
+        ) throw new TypeError("Episode graph resolver returned an invalid Subject id");
+        return `subject:${subjectId}`;
+      };
+  }
 
   private mappings(): Promise<Mappings | null> {
     this.mappingsPromise ??= this.reader.mappings?.() ?? Promise.resolve(null);
@@ -444,6 +476,50 @@ export class SiteQueryDataSource implements QueryDataSource {
       if (entity.kind !== owner)
         throw new TypeError(`SiteRelease returned ${entity.kind} for ${owner} scan`);
       yield entityValue(entity, mappings);
+    }
+  }
+
+  async *scanCandidates(
+    owner: Owner,
+    refs: readonly `${Owner}:${number}`[],
+    signal?: AbortSignal,
+    fields: readonly string[] = [],
+  ): AsyncIterable<EntityValue> {
+    const uniqueRefs = [...new Set(refs)];
+    for (const ref of uniqueRefs)
+      if (parseEntityRef(ref).owner !== owner)
+        throw new TypeError("candidate ref owner does not match its scan");
+    if (!uniqueRefs.length) return;
+    if (owner !== "episode" && this.reader.projectEntityCandidates) {
+      const requested = new Set(fields);
+      const physicalFields = physicalProjectionFields(owner, fields);
+      const keys = uniqueRefs.map(keyFromRef);
+      const requestedKeys = new Set(keys);
+      const returned = new Set<number>();
+      const mappings = owner === "subject" && requested.has("platform")
+        ? await this.mappings()
+        : null;
+      for await (const entity of this.reader.projectEntityCandidates(
+        owner,
+        keys,
+        physicalFields,
+        signal,
+      )) {
+        signal?.throwIfAborted();
+        if (entity.kind !== owner || !requestedKeys.has(entity.key))
+          throw new TypeError("SiteRelease returned an unrequested candidate");
+        if (returned.has(entity.key))
+          throw new TypeError("SiteRelease returned a duplicate candidate");
+        returned.add(entity.key);
+        yield projectedEntityValue(entity, requested, mappings);
+      }
+      return;
+    }
+    const remaining = new Set(uniqueRefs);
+    for await (const entity of this.scan(owner, signal, fields, "stream")) {
+      if (!remaining.delete(entity.ref)) continue;
+      yield entity;
+      if (!remaining.size) return;
     }
   }
 

@@ -105,6 +105,19 @@ export interface QueryDataSource {
     fields?: readonly string[],
     access?: ScanAccess,
   ): AsyncIterable<EntityValue>;
+  /** Reads an entity subset in the same relative order as scan(owner).
+   * Duplicate refs are ignored and refs absent from the source are omitted. */
+  scanCandidates?(
+    owner: Owner,
+    refs: readonly `${Owner}:${number}`[],
+    signal?: AbortSignal,
+    fields?: readonly string[],
+  ): AsyncIterable<EntityValue>;
+  /** Resolves an Episode reference independently from scan history. */
+  resolveEpisodeGraphRef?(
+    ref: `episode:${number}`,
+    signal?: AbortSignal,
+  ): Promise<`subject:${number}` | null>;
   lookup?(
     text: string,
     owner: Owner,
@@ -208,9 +221,16 @@ export type Evidence =
 
 export type RowEvidence = Record<string, Evidence[]>;
 
+type EpisodeGraphRefs = Map<
+  `episode:${number}`,
+  QueryGraphEntityRef | null
+>;
+
+type StoredEpisodeGraphRefs = EpisodeGraphRefs | (() => EpisodeGraphRefs);
+
 interface ExecutionContext {
   evidence: WeakMap<QueryRow, RowEvidence | (() => RowEvidence)>;
-  episodeGraphRefs: Map<QueryEntityRef, QueryGraphEntityRef | null>;
+  episodeGraphRefs: WeakMap<QueryRow, StoredEpisodeGraphRefs> | null;
   scanFields: Map<string, readonly string[]>;
   scanAccess: ScanAccess;
 }
@@ -529,7 +549,10 @@ function rowEvidence(context: ExecutionContext, row: QueryRow): RowEvidence {
   return inferred;
 }
 
-function rememberGraphEntities(context: ExecutionContext, row: QueryRow): QueryRow {
+function episodeGraphRefsInRow(
+  row: QueryRow,
+): EpisodeGraphRefs {
+  const graphRefs: EpisodeGraphRefs = new Map();
   const remember = (value: RuntimeValue): void => {
     if (Array.isArray(value)) return;
     if (isEntityValue(value)) {
@@ -542,7 +565,7 @@ function rememberGraphEntities(context: ExecutionContext, row: QueryRow): QueryR
             throw new TypeError("Episode subjectRef must identify a Subject");
           graphRef = subjectRef as QueryGraphEntityRef;
         }
-        context.episodeGraphRefs.set(value.ref, graphRef);
+        graphRefs.set(value.ref as `episode:${number}`, graphRef);
       }
       return;
     }
@@ -550,16 +573,81 @@ function rememberGraphEntities(context: ExecutionContext, row: QueryRow): QueryR
       for (const node of value.nodes) remember(node);
   };
   for (const value of Object.values(row)) remember(value);
+  return graphRefs;
+}
+
+function episodeLineageRefs(evidence: RowEvidence): Set<`episode:${number}`> {
+  const refs = new Set<`episode:${number}`>();
+  for (const items of Object.values(evidence))
+    for (const item of items)
+      if (item.kind === "entity-field" && item.ref.startsWith("episode:"))
+        refs.add(item.ref as `episode:${number}`);
+  return refs;
+}
+
+function rowEpisodeGraphRefs(
+  context: ExecutionContext,
+  row: QueryRow,
+): EpisodeGraphRefs | undefined {
+  const stored = context.episodeGraphRefs?.get(row);
+  if (typeof stored !== "function") return stored;
+  const resolved = stored();
+  context.episodeGraphRefs?.set(row, resolved);
+  return resolved;
+}
+
+function rememberRowGraphEntities(
+  context: ExecutionContext,
+  row: QueryRow,
+  sources: readonly QueryRow[] = [],
+  evidence?: RowEvidence | (() => RowEvidence),
+): QueryRow {
+  const directGraphRefs = episodeGraphRefsInRow(row);
+  if (!context.episodeGraphRefs) return row;
+  const resolve = (): EpisodeGraphRefs => {
+    const graphRefs = new Map(directGraphRefs);
+    const lineageRefs = evidence
+      ? episodeLineageRefs(typeof evidence === "function" ? evidence() : evidence)
+      : new Set<`episode:${number}`>();
+    for (const source of sources) {
+      const sourceGraphRefs = rowEpisodeGraphRefs(context, source);
+      for (const ref of lineageRefs) {
+        const graphRef = sourceGraphRefs?.get(ref);
+        if (graphRef !== undefined && !graphRefs.has(ref))
+          graphRefs.set(ref, graphRef);
+      }
+    }
+    return graphRefs;
+  };
+  if (typeof evidence === "function") context.episodeGraphRefs.set(row, resolve);
+  else {
+    const graphRefs = resolve();
+    if (graphRefs.size) context.episodeGraphRefs.set(row, graphRefs);
+  }
   return row;
+}
+
+function mergeRowGraphEntities(
+  context: ExecutionContext,
+  target: QueryRow,
+  source: QueryRow,
+): void {
+  const sourceRefs = rowEpisodeGraphRefs(context, source);
+  if (!sourceRefs?.size) return;
+  const targetRefs = rowEpisodeGraphRefs(context, target) ?? new Map();
+  for (const [ref, graphRef] of sourceRefs)
+    if (!targetRefs.has(ref)) targetRefs.set(ref, graphRef);
+  context.episodeGraphRefs?.set(target, targetRefs);
 }
 
 function rememberEvidence(
   context: ExecutionContext,
   row: QueryRow,
   evidence: RowEvidence,
+  sources: readonly QueryRow[] = [],
 ): QueryRow {
-  rememberGraphEntities(context, row);
   context.evidence.set(row, evidence);
+  rememberRowGraphEntities(context, row, sources, evidence);
   return row;
 }
 
@@ -567,9 +655,10 @@ function rememberLazyEvidence(
   context: ExecutionContext,
   row: QueryRow,
   evidence: () => RowEvidence,
+  sources: readonly QueryRow[] = [],
 ): QueryRow {
-  rememberGraphEntities(context, row);
   context.evidence.set(row, evidence);
+  rememberRowGraphEntities(context, row, sources, () => rowEvidence(context, row));
   return row;
 }
 
@@ -743,7 +832,7 @@ function finishAggregate(
       ),
     }];
   });
-  return rememberEvidence(context, row, evidence);
+  return rememberEvidence(context, row, evidence, [state.row]);
 }
 
 interface PathCandidate {
@@ -949,7 +1038,7 @@ async function* rowsFor(
         signal?.throwIfAborted();
         if (entity.owner !== operator.owner)
           throw new TypeError("data source returned the wrong entity owner");
-        yield rememberGraphEntities(context, { [operator.binding]: entity });
+        yield rememberRowGraphEntities(context, { [operator.binding]: entity });
       }
       return;
     case "lookup": {
@@ -1144,6 +1233,7 @@ async function* rowsFor(
               expressionEvidence(column.value, row, context),
             ]),
           ),
+          [row],
         );
       }
       return;
@@ -1191,7 +1281,7 @@ async function* rowsFor(
           if (!matches) continue;
           expanded[operator.factBinding] = fact;
           evidence[operator.factBinding] = [{ kind: "fact", ref: fact.ref }];
-          yield rememberEvidence(context, expanded, evidence);
+          yield rememberEvidence(context, expanded, evidence, [row]);
         }
       }
       return;
@@ -1240,7 +1330,7 @@ async function* rowsFor(
                 target: target.ref,
               },
             ],
-          });
+          }, [row]);
         }
       }
       return;
@@ -1262,13 +1352,18 @@ async function* rowsFor(
           const groupName = operator.groupBy[0]!.name;
           const expression = operator.groupBy[0]!.value;
           const value = evaluate(expression, row);
-          state = scalarGroups.getOrCreate(jsonValue(value), () =>
-            createAggregateState(
+          state = scalarGroups.getOrCreate(jsonValue(value), () => {
+            const groupRow: QueryRow = { [groupName]: value };
+            const groupEvidence = {
+              [groupName]: expressionEvidence(expression, row, context),
+            };
+            rememberRowGraphEntities(context, groupRow, [row], groupEvidence);
+            return createAggregateState(
               operator,
-              { [groupName]: value },
-              { [groupName]: expressionEvidence(expression, row, context) },
-            )
-          );
+              groupRow,
+              groupEvidence,
+            );
+          });
         } else {
           const groupRow: QueryRow = {};
           for (const group of operator.groupBy)
@@ -1284,6 +1379,7 @@ async function* rowsFor(
                 row,
                 context,
               );
+            rememberRowGraphEntities(context, groupRow, [row], groupEvidence);
             state = createAggregateState(operator, groupRow, groupEvidence);
             groups.set(key, state);
           }
@@ -1317,19 +1413,77 @@ async function* rowsFor(
               kind: "path",
               facts: path.steps.map((step) => step.fact.ref),
             }],
-          });
+          }, [row]);
         }
       }
       return;
     case "exists":
     case "notExists": {
       const matches = new Map<string, RowEvidence>();
+      const outer = operators[operator.input];
+      const candidateColumn = operator.kind === "exists" &&
+          source.scanCandidates &&
+          outer?.kind === "scan" &&
+          operator.columns.length === 1 &&
+          operator.columns[0]?.outer === outer.binding
+        ? operator.columns[0]
+        : null;
+      const candidateRefs: `${Owner}:${number}`[] = [];
+      let candidateScanIsSafe = candidateColumn !== null;
       for await (const row of rowsFor(operator.match, operators, source, context, signal)) {
         signal?.throwIfAborted();
         const key = canonicalJson(operator.columns.map((column) =>
           jsonValue(own(row, column.inner)),
         ));
-        if (!matches.has(key)) matches.set(key, rowEvidence(context, row));
+        if (!matches.has(key)) {
+          matches.set(key, rowEvidence(context, row));
+          if (candidateColumn) {
+            const candidate = own(row, candidateColumn.inner);
+            if (
+              isEntityValue(candidate) &&
+              outer?.kind === "scan" &&
+              candidate.owner === outer.owner
+            ) candidateRefs.push(candidate.ref);
+            else candidateScanIsSafe = false;
+          }
+        }
+      }
+      if (
+        candidateScanIsSafe &&
+        candidateColumn &&
+        outer?.kind === "scan" &&
+        source.scanCandidates
+      ) {
+        const requested = new Set(candidateRefs);
+        const returned = new Set<string>();
+        for await (const entity of source.scanCandidates(
+          outer.owner,
+          candidateRefs,
+          signal,
+          context.scanFields.get(operator.input) ?? [],
+        )) {
+          signal?.throwIfAborted();
+          if (entity.owner !== outer.owner || !requested.has(entity.ref))
+            throw new TypeError("candidate scan returned an unrequested entity");
+          if (returned.has(entity.ref))
+            throw new TypeError("candidate scan returned a duplicate entity");
+          returned.add(entity.ref);
+          const row = rememberRowGraphEntities(context, {
+            [outer.binding]: entity,
+          });
+          const key = canonicalJson(operator.columns.map((column) =>
+            jsonValue(own(row, column.outer)),
+          ));
+          const matched = matches.get(key);
+          if (!matched)
+            throw new TypeError("candidate scan returned an unmatched entity");
+          context.evidence.set(
+            row,
+            mergeRowEvidence(rowEvidence(context, row), matched),
+          );
+          yield row;
+        }
+        return;
       }
       for await (const row of rowsFor(operator.input, operators, source, context, signal)) {
         signal?.throwIfAborted();
@@ -1366,7 +1520,9 @@ async function* rowsFor(
           }
           const key = rowKey(mapped);
           const previous = values.get(key);
-          if (!previous) values.set(key, rememberEvidence(context, mapped, evidence));
+          if (!previous)
+            values.set(key, rememberEvidence(context, mapped, evidence, [row]));
+          else mergeRowGraphEntities(context, previous, row);
         }
         return values;
       };
@@ -1384,19 +1540,24 @@ async function* rowsFor(
                   rowEvidence(context, row),
                 ),
               );
+            if (previous) mergeRowGraphEntities(context, previous, row);
             else result.set(key, row);
           }
         } else if (operator.kind === "intersect") {
-          for (const [key, row] of result)
-            if (!rows.has(key)) result.delete(key);
-            else
+          for (const [key, row] of result) {
+            const matched = rows.get(key);
+            if (!matched) result.delete(key);
+            else {
               context.evidence.set(
                 row,
                 mergeRowEvidence(
                   rowEvidence(context, row),
-                  rowEvidence(context, rows.get(key) as QueryRow),
+                  rowEvidence(context, matched),
                 ),
               );
+              mergeRowGraphEntities(context, row, matched);
+            }
+          }
         } else {
           for (const key of rows.keys()) result.delete(key);
         }
@@ -1517,9 +1678,13 @@ export function insertTop(
   if (rows.length > cap) rows.pop();
 }
 
-interface RankedResultEntities {
-  ranked: RankedRow;
+interface PendingResultEntities {
   entities: QueryResultEntity[];
+  unresolved: { index: number; ref: `episode:${number}` }[];
+}
+
+interface RankedResultEntities extends PendingResultEntities {
+  ranked: RankedRow;
 }
 
 function compareRankedResultEntities(
@@ -1610,7 +1775,7 @@ export async function executeQuery(
   const top: RankedRow[] = [];
   const context: ExecutionContext = {
     evidence: new WeakMap(),
-    episodeGraphRefs: new Map(),
+    episodeGraphRefs: options.onResultEntities ? new WeakMap() : null,
     scanFields: scanFieldRequirements(query.operators, query.root, columns),
     scanAccess: canStopAtLimit ? "stream" : "whole",
   };
@@ -1642,18 +1807,42 @@ export async function executeQuery(
     Object.entries(rowEvidence(context, row))
       .filter(([column]) => visibleColumns.has(column)),
   );
-  const resultEntities = (row: QueryRow): QueryResultEntity[] => {
+  const pendingResultEntities = (row: QueryRow): PendingResultEntities => {
     const visibleRow = publicRow(row);
-    const refs = queryRowEntityRefs(visibleRow, publicEvidence(row));
-    return refs.map((ref) => {
+    const evidence = publicEvidence(row);
+    const refs = queryRowEntityRefs(visibleRow, evidence);
+    const visibleGraphRefs = episodeGraphRefsInRow(visibleRow);
+    const lineageRefs = episodeLineageRefs(evidence);
+    const rememberedGraphRefs = rowEpisodeGraphRefs(context, row);
+    const unresolved: { index: number; ref: `episode:${number}` }[] = [];
+    const entities = refs.map((ref, index): QueryResultEntity => {
       const parsed = parseEntityRef(ref);
+      if (parsed.owner !== "episode")
+        return { ref, graphRef: ref as QueryGraphEntityRef };
+      const episodeRef = ref as `episode:${number}`;
+      if (visibleGraphRefs.has(episodeRef))
+        return { ref, graphRef: visibleGraphRefs.get(episodeRef) ?? null };
+      if (lineageRefs.has(episodeRef) && rememberedGraphRefs?.has(episodeRef))
+        return { ref, graphRef: rememberedGraphRefs.get(episodeRef) ?? null };
+      if (source.resolveEpisodeGraphRef)
+        unresolved.push({ index, ref: episodeRef });
       return {
         ref,
-        graphRef: parsed.owner === "episode"
-          ? context.episodeGraphRefs.get(ref) ?? null
-          : ref as QueryGraphEntityRef,
+        graphRef: null,
       };
     });
+    return { entities, unresolved };
+  };
+  const resolveResultEntities = async (
+    pending: PendingResultEntities,
+  ): Promise<QueryResultEntity[]> => {
+    await Promise.all(pending.unresolved.map(async ({ index, ref }) => {
+      const graphRef = await source.resolveEpisodeGraphRef!(ref, options.signal);
+      if (graphRef !== null && parseEntityRef(graphRef).owner !== "subject")
+        throw new TypeError("Episode graph resolver must return a Subject");
+      pending.entities[index] = { ref, graphRef };
+    }));
+    return pending.entities;
   };
 
   for await (const row of rowsFor(
@@ -1664,7 +1853,6 @@ export async function executeQuery(
     options.signal,
   )) {
     options.signal?.throwIfAborted();
-    rememberGraphEntities(context, row);
     const key = distinct ? rowKey(publicRow(row)) : null;
     if (key !== null && distinct?.has(key)) continue;
     if (key !== null) distinct?.add(key);
@@ -1672,18 +1860,21 @@ export async function executeQuery(
     const currentOrdinal = ordinal++;
     const ranked = { row, key, ordinal: currentOrdinal };
     if (options.onResultEntities) {
-      const entities = resultEntities(row);
+      const pendingEntities = pendingResultEntities(row);
       if (deferredEntities) {
         insertResultEntityTop(
           deferredEntities,
           {
             ranked,
-            entities,
+            ...pendingEntities,
           },
           limit,
           orderBy,
         );
-      } else if (entities.length) options.onResultEntities(entities);
+      } else {
+        const entities = await resolveResultEntities(pendingEntities);
+        if (entities.length) options.onResultEntities(entities);
+      }
     }
     if (orderBy.length) insertTop(top, ranked, cap, orderBy);
     else if (top.length < cap) top.push(ranked);
@@ -1691,8 +1882,10 @@ export async function executeQuery(
   }
 
   if (deferredEntities)
-    for (const row of deferredEntities)
-      if (row.entities.length) options.onResultEntities?.(row.entities);
+    for (const row of deferredEntities) {
+      const entities = await resolveResultEntities(row);
+      if (entities.length) options.onResultEntities?.(entities);
+    }
 
   totalMatches = Math.min(totalMatches, limit);
   const visibleMatches = totalMatches;

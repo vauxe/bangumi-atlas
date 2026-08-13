@@ -62,7 +62,7 @@ async function boot(): Promise<void> {
   const gstream = openGeometry(manifest);
   const geo = gstream.geo;
   const names = openNames(manifest);
-  const data = new Data();
+  const data = new Data(manifest);
 
   const drawer = new Drawer(
     $("#drawer"),

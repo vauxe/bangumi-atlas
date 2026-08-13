@@ -39,6 +39,10 @@ const OWNER_KIND: Record<Exclude<Owner, "episode">, EntityKind> = {
 const TEXT_MEMBER_READ_CONCURRENCY = 6;
 const SEARCH_ENTITY_READ_CONCURRENCY = 6;
 const SEARCH_ALIAS_PREFETCH_CURSOR = 128;
+// A few scattered variant rows are cheaper than the 35 MB alias pack. Once a
+// lookup has verified this many variant candidates, repeated Range round trips
+// dominate and one bounded whole-pack read wins (measured on the formal site).
+const SEARCH_ALIAS_PREFETCH_VARIANTS = 768;
 const SEARCH_NAME_PREFETCH_CURSOR = 128;
 const SUBSTRING_QUERY_PAGE_SIZE = 64;
 const SEARCH_PAGE_CACHE_BUDGET = 4_000_000;
@@ -493,116 +497,121 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
         await this.reader.prefetchEntities(owner, signal);
         prefetchedEntities = true;
       }
-      for (
-        let start = 0;
-        start < candidates.length;
-        start += SEARCH_ENTITY_READ_CONCURRENCY
-      ) {
-        signal.throwIfAborted();
-        const batch = candidates.slice(start, start + SEARCH_ENTITY_READ_CONCURRENCY);
-        const entities: (StructuralEntity | ProjectedEntity | null)[] =
-          identityRows
-            ? batch.map(({ rank, key }) => {
-                const row = identityRows.get(rank);
-                if (!row || row[2] !== allowedKind)
-                  throw new TypeError(
-                    `search identity ${rank} does not match entity ${key}`,
-                  );
-                return {
-                  kind: owner,
-                  key,
-                  fields: {
-                    name: row[0],
-                    ...(owner === "subject"
-                      ? { nameCn: row[1] ?? "" }
-                      : {}),
-                  },
-                };
-              })
-            : await Promise.all(batch.map(({ key }) =>
-                this.reader.projectEntity
-                  ? this.reader.projectEntity(key, projectedFields, signal)
-                  : this.reader.entity(key, signal)
-              ));
-        signal.throwIfAborted();
-        const direct = entities.map((entity, index) => {
-          const candidate = batch[index];
-          if (!candidate) return null;
-          if (!entity || entity.key !== candidate.key)
-            throw new TypeError(`search entity ${candidate.key} is missing`);
-          const name = "fields" in entity ? entity.fields.name : entity.name;
-          const nameCn = entity.kind === "subject"
-            ? "fields" in entity ? entity.fields.nameCn : entity.nameCn
-            : "";
-          if (typeof name !== "string" || typeof nameCn !== "string")
+      let entities: (StructuralEntity | ProjectedEntity | null)[];
+      if (identityRows) {
+        entities = candidates.map(({ rank, key }) => {
+          const row = identityRows.get(rank);
+          if (!row || row[2] !== allowedKind)
             throw new TypeError(
-              `search entity ${candidate.key} omitted its identity fields`,
+              `search identity ${rank} does not match entity ${key}`,
             );
-          const aliases: [string, string][] = [];
-          if (allowedFields.has("nameCn") && nameCn)
-            aliases.push([fold(nameCn), nameCn]);
-          if (allowedFields.has("name") && name)
-            aliases.push([fold(name), name]);
-          const entry = matchingAliasEntry(
-            query,
-            [aliases, nameCn || name, allowedKind],
-            candidate.rank,
-          );
-          if (!entry) return null;
-          const field: LookupField = entry[1] === nameCn ? "nameCn" : "name";
-          const utf8Range = foldedUtf8Range(entry[1], query);
-          if (!utf8Range)
-            throw new TypeError("direct lookup match has no source range");
-          return { entity, field, text: entry[1], utf8Range };
+          return {
+            kind: owner,
+            key,
+            fields: {
+              name: row[0],
+              ...(owner === "subject" ? { nameCn: row[1] ?? "" } : {}),
+            },
+          };
         });
-        const fallbackRanks = batch.flatMap((candidate, index) =>
-          direct[index] || !allowedFields.has("nameVariant")
-            ? []
-            : [candidate.rank]
-        );
-        variantReads += fallbackRanks.length;
-        if (
-          !prefetchedAliases &&
-          this.dependencies.prefetchAliases &&
-          variantReads >= SEARCH_ALIAS_PREFETCH_CURSOR
+      } else {
+        entities = new Array(candidates.length).fill(null);
+        for (
+          let start = 0;
+          start < candidates.length;
+          start += SEARCH_ENTITY_READ_CONCURRENCY
         ) {
-          await this.dependencies.prefetchAliases(signal);
-          prefetchedAliases = true;
+          signal.throwIfAborted();
+          const batch = candidates.slice(
+            start,
+            start + SEARCH_ENTITY_READ_CONCURRENCY,
+          );
+          const loaded = await Promise.all(batch.map(({ key }) =>
+            this.reader.projectEntity
+              ? this.reader.projectEntity(key, projectedFields, signal)
+              : this.reader.entity(key, signal)
+          ));
+          entities.splice(start, loaded.length, ...loaded);
         }
-        const aliasRows = fallbackRanks.length
-          ? await this.dependencies.aliasRows!(fallbackRanks, signal)
-          : new Map();
-        signal.throwIfAborted();
-        for (let index = 0; index < batch.length; index++) {
-          const candidate = batch[index];
-          const entity = entities[index];
-          if (!candidate || !entity || seen.has(candidate.identity)) continue;
-          const hit = direct[index];
-          if (hit) {
-            seen.add(candidate.identity);
-            yield hit;
-            continue;
-          }
-          const row = aliasRows.get(candidate.rank);
-          if (!row) continue;
-          const entry = matchingAliasEntry(query, row, candidate.rank);
-          if (!entry) continue;
-          const name = "fields" in entity ? entity.fields.name : entity.name;
-          const nameCn = entity.kind === "subject"
-            ? "fields" in entity ? entity.fields.nameCn : entity.nameCn
-            : "";
-          const field: LookupField = entry[1] === name
-            ? "name"
-            : nameCn && entry[1] === nameCn
-              ? "nameCn"
-              : "nameVariant";
-          if (!allowedFields.has(field)) continue;
-          const utf8Range = foldedUtf8Range(entry[1], query);
-          if (!utf8Range)
-            throw new TypeError("verified lookup candidate has no source range");
+      }
+      signal.throwIfAborted();
+      const direct = entities.map((entity, index) => {
+        const candidate = candidates[index];
+        if (!candidate) return null;
+        if (!entity || entity.key !== candidate.key)
+          throw new TypeError(`search entity ${candidate.key} is missing`);
+        const name = "fields" in entity ? entity.fields.name : entity.name;
+        const nameCn = entity.kind === "subject"
+          ? "fields" in entity ? entity.fields.nameCn : entity.nameCn
+          : "";
+        if (typeof name !== "string" || typeof nameCn !== "string")
+          throw new TypeError(
+            `search entity ${candidate.key} omitted its identity fields`,
+          );
+        const aliases: [string, string][] = [];
+        if (allowedFields.has("nameCn") && nameCn)
+          aliases.push([fold(nameCn), nameCn]);
+        if (allowedFields.has("name") && name)
+          aliases.push([fold(name), name]);
+        const entry = matchingAliasEntry(
+          query,
+          [aliases, nameCn || name, allowedKind],
+          candidate.rank,
+        );
+        if (!entry) return null;
+        const field: LookupField = entry[1] === nameCn ? "nameCn" : "name";
+        const utf8Range = foldedUtf8Range(entry[1], query);
+        if (!utf8Range)
+          throw new TypeError("direct lookup match has no source range");
+        return { entity, field, text: entry[1], utf8Range };
+      });
+      const fallbackRanks = candidates.flatMap((candidate, index) =>
+        direct[index] || !allowedFields.has("nameVariant")
+          ? []
+          : [candidate.rank]
+      );
+      variantReads += fallbackRanks.length;
+      if (
+        !prefetchedAliases &&
+        this.dependencies.prefetchAliases &&
+        variantReads >= SEARCH_ALIAS_PREFETCH_VARIANTS
+      ) {
+        await this.dependencies.prefetchAliases(signal);
+        prefetchedAliases = true;
+      }
+      const aliasRows = fallbackRanks.length
+        ? await this.dependencies.aliasRows!(fallbackRanks, signal)
+        : new Map();
+      signal.throwIfAborted();
+      for (let index = 0; index < candidates.length; index++) {
+        const candidate = candidates[index];
+        const entity = entities[index];
+        if (!candidate || !entity || seen.has(candidate.identity)) continue;
+        const hit = direct[index];
+        if (hit) {
           seen.add(candidate.identity);
-          yield { entity, field, text: entry[1], utf8Range };
+          yield hit;
+          continue;
         }
+        const row = aliasRows.get(candidate.rank);
+        if (!row) continue;
+        const entry = matchingAliasEntry(query, row, candidate.rank);
+        if (!entry) continue;
+        const name = "fields" in entity ? entity.fields.name : entity.name;
+        const nameCn = entity.kind === "subject"
+          ? "fields" in entity ? entity.fields.nameCn : entity.nameCn
+          : "";
+        const field: LookupField = entry[1] === name
+          ? "name"
+          : nameCn && entry[1] === nameCn
+            ? "nameCn"
+            : "nameVariant";
+        if (!allowedFields.has(field)) continue;
+        const utf8Range = foldedUtf8Range(entry[1], query);
+        if (!utf8Range)
+          throw new TypeError("verified lookup candidate has no source range");
+        seen.add(candidate.identity);
+        yield { entity, field, text: entry[1], utf8Range };
       }
       if (page.next === null) return;
       if (page.next !== cursor + page.ranks.length || page.next <= cursor)

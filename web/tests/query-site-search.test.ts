@@ -3,7 +3,10 @@ import { test } from "node:test";
 
 import type { Manifest } from "../src/types";
 import type { TextSearchMember } from "../src/loader";
-import { SiteQuerySearchIndex } from "../src/query/site-search";
+import {
+  SiteQuerySearchIndex,
+  type SiteSearchDependencies,
+} from "../src/query/site-search";
 import type { SiteQueryReader } from "../src/query/site-source";
 
 const key = (kind: number, id: number): number => (kind << 24) | id;
@@ -448,6 +451,121 @@ test("falls back to authoritative aliases for a derived name variant", async () 
   assert.equal(aliasReads, 1);
   assert.equal(hits[0]?.field, "nameVariant");
   assert.equal(hits[0]?.text, "少女");
+});
+
+test("keeps medium alias lookups range-scoped", async () => {
+  const count = 192;
+  const keys = new Uint32Array(
+    Array.from({ length: count }, (_, index) => key(1, index + 1)),
+  );
+  let prefetchedNames = 0;
+  let prefetchedAliases = 0;
+  const aliasReadSizes: number[] = [];
+  const reader: SiteQueryReader = {
+    entities: async function* () {},
+    entity: async () => null,
+    factsFor: async () => ({ items: [], total: 0, next: null }),
+  };
+  const dependencies: SiteSearchDependencies & {
+    prefetchNames(): Promise<void>;
+    prefetchAliases(): Promise<void>;
+  } = {
+    normalize: async () => "少女",
+    page: async () => ({ entries: [], next: null, scannedThroughRank: -1 }),
+    rankPage: async (_query, cursor, limit) => ({
+      ranks: Array.from(
+        { length: Math.min(limit, count - cursor) },
+        (_, index) => cursor + index,
+      ),
+      next: cursor + limit < count ? cursor + limit : null,
+    }),
+    nameRows: async (ranks) => new Map(
+      [...ranks].map((rank) => [rank, [`Original ${rank}`, null, 1]]),
+    ),
+    aliasRows: async (ranks) => {
+      const requested = [...ranks];
+      aliasReadSizes.push(requested.length);
+      return new Map(requested.map((rank) => [
+        rank,
+        [[[`少女${rank}`, `少女${rank}`]], `Original ${rank}`, 1],
+      ]));
+    },
+    prefetchNames: async () => { prefetchedNames++; },
+    prefetchAliases: async () => { prefetchedAliases++; },
+    keys: async () => keys,
+  };
+  const search = new SiteQuerySearchIndex(
+    reader,
+    {} as Manifest,
+    dependencies,
+  );
+
+  const hits = [];
+  for await (const hit of search.lookup(
+    "少女",
+    "subject",
+    ["name", "nameVariant"],
+    undefined,
+    ["ref", "name", "nameCn"],
+  )) hits.push(hit);
+
+  assert.equal(hits.length, count);
+  assert.deepEqual(aliasReadSizes, [64, 64, 64]);
+  assert.equal(prefetchedNames, 1);
+  assert.equal(prefetchedAliases, 0);
+});
+
+test("switches an exhaustive alias lookup to one whole-pack prefetch", async () => {
+  const count = 768;
+  const keys = new Uint32Array(
+    Array.from({ length: count }, (_, index) => key(1, index + 1)),
+  );
+  let prefetchedAliases = 0;
+  const aliasReadSizes: number[] = [];
+  const reader: SiteQueryReader = {
+    entities: async function* () {},
+    entity: async () => null,
+    factsFor: async () => ({ items: [], total: 0, next: null }),
+  };
+  const search = new SiteQuerySearchIndex(reader, {} as Manifest, {
+    normalize: async () => "少女",
+    page: async () => ({ entries: [], next: null, scannedThroughRank: -1 }),
+    rankPage: async (_query, cursor, limit) => ({
+      ranks: Array.from(
+        { length: Math.min(limit, count - cursor) },
+        (_, index) => cursor + index,
+      ),
+      next: cursor + limit < count ? cursor + limit : null,
+    }),
+    nameRows: async (ranks) => new Map(
+      [...ranks].map((rank) => [rank, [`Original ${rank}`, null, 1]]),
+    ),
+    aliasRows: async (ranks) => {
+      const requested = [...ranks];
+      aliasReadSizes.push(requested.length);
+      return new Map(requested.map((rank) => [
+        rank,
+        [[[`少女${rank}`, `少女${rank}`]], `Original ${rank}`, 1],
+      ]));
+    },
+    prefetchAliases: async () => { prefetchedAliases++; },
+    keys: async () => keys,
+  });
+
+  const hits = [];
+  for await (const hit of search.lookup(
+    "少女",
+    "subject",
+    ["name", "nameVariant"],
+    undefined,
+    ["ref", "name", "nameCn"],
+  )) hits.push(hit);
+
+  assert.equal(hits.length, count);
+  assert.deepEqual(aliasReadSizes, [
+    ...new Array(12).fill(64),
+  ]);
+  assert.equal(prefetchedAliases, 1);
 });
 
 test("uses hashed text members only as candidates and verifies authoritative text", async () => {

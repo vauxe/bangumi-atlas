@@ -3,7 +3,9 @@
 设计契约见 docs/STRUCTURAL_SITE_DATA_DESIGN.md §8。本脚本不复用
 烘焙器的装配逻辑:自行读取 parquet 重推期望值,自行解码 site/data
 字节,再做重复敏感、顺序无关的对账。任何不符以非零状态退出,
-阻断发布。共享的只有 scripts/site_release.py 中的格式契约本身。
+阻断发布。只共享 scripts/site_release.py 的格式契约和
+scripts/world_scale.py 的确定性发布几何投影,不共享烘焙器的量化或
+字节装配逻辑。
 """
 
 from __future__ import annotations
@@ -12,6 +14,8 @@ import argparse
 import gzip
 import hashlib
 import heapq
+import math
+import re
 import sys
 import tempfile
 import time
@@ -40,6 +44,7 @@ from .query_contracts import (
     validate_query_contract,
 )
 from .site_contracts import require_current_release_inputs
+from .world_scale import normalize_world_scale, separate_published_nodes
 
 ROOT = Path(__file__).resolve().parent.parent
 DUMP = ROOT / "data" / "dump"
@@ -132,11 +137,24 @@ def expected_layout_projection(
     order = np.argsort(-collect, kind="stable")
     ranked_collect = collect[order]
     sizes = np.round(18 * np.log2(1 + ranked_collect))
+    coordinates = np.stack(
+        [
+            np.asarray(layout["x"])[order],
+            np.asarray(layout["y"])[order],
+            np.asarray(layout["z"])[order],
+        ],
+        axis=1,
+    )
+    normalized, _ = normalize_world_scale(coordinates)
+    positions, _ = separate_published_nodes(
+        normalized, MIN_NODE_CENTER_DISTANCE
+    )
     return {
         "key": np.asarray(layout["key"])[order].astype("<u4"),
         "year": np.asarray(layout["year"])[order].astype("<u2"),
         "size": np.minimum(255, sizes).astype(np.uint8),
         "isolated": np.asarray(layout["isolated"])[order].astype(np.uint8),
+        "position": positions,
     }
 
 
@@ -310,6 +328,78 @@ def position_encoding_is_valid(value: Any) -> bool:
         and np.isfinite(
             offset_array + scale_array * POSITION_QUANTIZED_MAX
         ).all()
+    )
+
+
+def maximum_position_displacement(
+    expected: np.ndarray, actual: np.ndarray
+) -> float:
+    """Return the largest pointwise 3-D displacement without a full copy."""
+
+    expected_array = np.asarray(expected)
+    actual_array = np.asarray(actual)
+    if (
+        expected_array.shape != actual_array.shape
+        or expected_array.ndim != 2
+        or expected_array.shape[1] != 3
+        or len(expected_array) == 0
+    ):
+        raise ValueError("position arrays must be matching nonempty (n, 3)")
+    if not (
+        np.isfinite(expected_array).all() and np.isfinite(actual_array).all()
+    ):
+        raise ValueError("position arrays must be finite")
+    maximum = 0.0
+    for start in range(0, len(expected_array), VERIFY_BATCH_ROWS):
+        end = min(start + VERIFY_BATCH_ROWS, len(expected_array))
+        delta = actual_array[start:end].astype(np.float64) - expected_array[
+            start:end
+        ].astype(np.float64)
+        maximum = max(
+            maximum,
+            float(np.linalg.norm(delta, axis=1).max(initial=0.0)),
+        )
+    return maximum
+
+
+def position_quantization_error_bound(encoding: Any) -> float:
+    """Return the affine u16 rounding bound including float32 slack."""
+
+    if not position_encoding_is_valid(encoding):
+        raise ValueError("invalid position encoding")
+    offset = np.asarray(encoding["offset"], dtype=np.float64)
+    scale = np.asarray(encoding["scale"], dtype=np.float64)
+    endpoint = offset + scale * POSITION_QUANTIZED_MAX
+    magnitude = np.maximum(np.maximum(np.abs(offset), np.abs(endpoint)), 1.0)
+    float32_rounding = np.finfo(np.float32).eps * magnitude
+    return float(np.linalg.norm(scale / 2 + float32_rounding))
+
+
+def position_quantization_report_is_valid(
+    report: Any, *, actual_max_displacement: float
+) -> bool:
+    """Reconcile the producer's report with independently decoded bytes."""
+
+    if (
+        not isinstance(report, dict)
+        or set(report) != {"encoding", "max_displacement"}
+        or report.get("encoding") != POSITION_ENCODING
+    ):
+        return False
+    declared = report.get("max_displacement")
+    return bool(
+        isinstance(declared, (int, float))
+        and not isinstance(declared, bool)
+        and math.isfinite(float(declared))
+        and float(declared) >= 0
+        and math.isfinite(actual_max_displacement)
+        and actual_max_displacement >= 0
+        and math.isclose(
+            float(declared),
+            actual_max_displacement,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        )
     )
 
 
@@ -1080,6 +1170,7 @@ def verify_release(  # noqa: PLR0915
             "atlas-query-v1",
             "fact-ref-v1",
             "full-text-v1",
+            "subject-query-columns-v1",
         ]
         and query_release.get("contractDigest") == query_schema_digest(),
     )
@@ -1163,7 +1254,8 @@ def verify_release(  # noqa: PLR0915
         bool(np.isin(key_r >> np.uint32(24), sr.KINDS).all()),
     )
     layout_table = pq.read_table(
-        LAYOUT, columns=["key", "collect", "year", "isolated"]
+        LAYOUT,
+        columns=["key", "collect", "year", "isolated", "x", "y", "z"],
     )
     expected_geometry = expected_layout_projection(
         {
@@ -1177,11 +1269,10 @@ def verify_release(  # noqa: PLR0915
         "key.bin rank 顺序 = layout",
         np.array_equal(key_r, expected_geometry["key"]),
     )
+    published_years = load_array("year.bin", "<u2")
     check(
         "year.bin = layout",
-        np.array_equal(
-            load_array("year.bin", "<u2"), expected_geometry["year"]
-        ),
+        np.array_equal(published_years, expected_geometry["year"]),
     )
     check(
         "size.bin = layout collect 编码",
@@ -1195,6 +1286,7 @@ def verify_release(  # noqa: PLR0915
         manifest["year_range"],
     )
     expected_flags = expected_geometry["isolated"] << np.uint8(1)
+    expected_positions = expected_geometry["position"]
     del expected_geometry
 
     edges = load_array("edges.bin", "<u4")
@@ -1226,6 +1318,26 @@ def verify_release(  # noqa: PLR0915
     ).astype("<f4")
     positions_finite = bool(np.isfinite(positions).all())
     check("positions.bin 解码坐标全部有限", positions_finite)
+    max_position_displacement = (
+        maximum_position_displacement(expected_positions, positions)
+        if positions_finite
+        else math.inf
+    )
+    quantization_bound = position_quantization_error_bound(position_encoding)
+    check(
+        "positions.bin = layout 发布坐标的有界逐 rank 量化",
+        max_position_displacement <= quantization_bound,
+        f"最大位移 {max_position_displacement:.9f}, "
+        f"理论上限 {quantization_bound:.9f}",
+    )
+    check(
+        "layout.position_quantization 与解码实值一致",
+        position_quantization_report_is_valid(
+            manifest["layout"].get("position_quantization"),
+            actual_max_displacement=max_position_displacement,
+        ),
+        f"实际最大位移 {max_position_displacement:.9f}",
+    )
     if positions_finite:
         actual_bbox = [
             [float(value) for value in positions.min(axis=0)],
@@ -1257,7 +1369,7 @@ def verify_release(  # noqa: PLR0915
             f"{violation[2]:.6f} < {MIN_NODE_CENTER_DISTANCE:g}"
         ),
     )
-    del positions_u16, positions
+    del positions_u16, positions, expected_positions
     raw = np.frombuffer(site_file("rank-by-key.bin").read_bytes(), np.uint8)
     rank_layout_ok = rank_index_layout_is_valid(
         manifest["rank_index"], len(raw)
@@ -1519,6 +1631,8 @@ def verify_release(  # noqa: PLR0915
 
     pq_ent_fp = RowFingerprint()
     expected_scores = np.zeros(n, dtype=np.uint8)
+    expected_query_years = np.zeros(n, dtype=np.uint16)
+    query_columns_lossless = True
     expected_tags = np.zeros(n, dtype=np.uint32)
     tag_counts: Counter[str] = Counter()
     tag_first: dict[str, tuple[int, int]] = {}
@@ -1556,8 +1670,30 @@ def verify_release(  # noqa: PLR0915
                 expected_flags[rank] |= np.uint8(
                     int(bool(sub["nsfw"][i])) | (int(sub["type"][i]) << 2)
                 )
+                date = sub["date"][i]
+                year_match = (
+                    re.match(r"^([0-9]{4})(?:-|$)", date)
+                    if isinstance(date, str)
+                    else None
+                )
+                query_year = int(year_match.group(1)) if year_match else 0
+                if year_match and query_year == 0:
+                    query_columns_lossless = False
+                expected_query_years[rank] = np.uint16(query_year)
                 score = float(sub["score"][i] or 0)
-                expected_scores[rank] = np.uint8(np.round(score * 10))
+                scaled_score = score * 10
+                encoded_score = (
+                    round(scaled_score) if math.isfinite(scaled_score) else 0
+                )
+                if (
+                    not math.isfinite(scaled_score)
+                    or encoded_score < 0
+                    or encoded_score > 255
+                    or encoded_score / 10 != score
+                ):
+                    query_columns_lossless = False
+                else:
+                    expected_scores[rank] = np.uint8(encoded_score)
                 mask = 0
                 for tag_index, tag in enumerate(sub["meta_tags"][i]):
                     first = (rank, tag_index)
@@ -1634,6 +1770,11 @@ def verify_release(  # noqa: PLR0915
         "flags.bin = parquet + layout",
         np.array_equal(load_array("flags.bin", "u1"), expected_flags),
     )
+    check("Subject 查询列可无损编码", query_columns_lossless)
+    check(
+        "year.bin = Subject 查询 year",
+        np.array_equal(published_years, expected_query_years),
+    )
     check(
         "score.bin = parquet",
         np.array_equal(load_array("score.bin", "u1"), expected_scores),
@@ -1644,8 +1785,10 @@ def verify_release(  # noqa: PLR0915
     )
     del (
         expected_flags,
+        expected_query_years,
         expected_scores,
         expected_tags,
+        published_years,
     )
     del ent_idx, ent_sizes, pq_ent_fp, site_ent_fp, vocab
 

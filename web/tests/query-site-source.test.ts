@@ -295,6 +295,64 @@ test("uses the query projection reader when scan fields are known", async () => 
   });
 });
 
+test("projects a candidate set in the reader's canonical scan order", async () => {
+  let requestedKeys: readonly number[] = [];
+  let requestedFields: readonly string[] = [];
+  const reader: SiteQueryReader = {
+    entities: async function* () {
+      throw new Error("full entity scan should not run");
+    },
+    projectEntityCandidates: async function* (_owner, keys, fields) {
+      requestedKeys = keys;
+      requestedFields = fields;
+      for (const id of [3, 5]) {
+        const candidate = key(1, id);
+        if (keys.includes(candidate)) {
+          yield {
+            kind: "subject",
+            key: candidate,
+            fields: { name: `Subject ${id}`, score: id === 3 ? 0 : 8.5 },
+          };
+        }
+      }
+    },
+    entity: async () => null,
+    factsFor: async () => ({ items: [], total: 0, next: null }),
+  };
+  const source = new SiteQueryDataSource(reader);
+  const rows = [];
+
+  for await (const entity of source.scanCandidates!(
+    "subject",
+    ["subject:5", "subject:3", "subject:5"],
+    undefined,
+    ["name", "score"],
+  )) rows.push(entity);
+
+  assert.deepEqual(requestedKeys, [key(1, 5), key(1, 3)]);
+  assert.deepEqual(requestedFields, ["name", "score"]);
+  assert.deepEqual(rows.map(({ ref, fields }) => ({ ref, fields })), [
+    { ref: "subject:3", fields: { name: "Subject 3", score: null } },
+    { ref: "subject:5", fields: { name: "Subject 5", score: 8.5 } },
+  ]);
+});
+
+test("does not scan storage for an empty candidate set", async () => {
+  const source = new SiteQueryDataSource({
+    entities: async function* () {
+      throw new Error("an empty candidate set must perform no scan");
+    },
+    entity: async () => null,
+    factsFor: async () => ({ items: [], total: 0, next: null }),
+  });
+  const rows = [];
+
+  for await (const entity of source.scanCandidates!("subject", []))
+    rows.push(entity);
+
+  assert.deepEqual(rows, []);
+});
+
 test("keeps lookup point hydration projected to downstream fields", async () => {
   let requested: readonly string[] = [];
   const reader: SiteQueryReader = {

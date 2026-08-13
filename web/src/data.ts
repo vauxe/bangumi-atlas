@@ -9,6 +9,7 @@ import type {
   FactKind,
   LongTextRef,
   LongTextResult,
+  Manifest,
   Mappings,
   Page,
   StructuralEntity,
@@ -29,8 +30,13 @@ import {
   type CacheFamily,
   type TextSearchMember,
 } from "./loader";
+import {
+  canProjectSubjectQueryColumns,
+  projectSubjectQueryEntities,
+} from "./subject-query-projection";
 
 type Loc4 = [number, number, number, number];
+const ENTITY_CANDIDATE_READ_CONCURRENCY = 6;
 
 interface EntitiesIdx {
   width: number;
@@ -100,6 +106,30 @@ export function entityVocabularyIds(
   if (kind === 2 && needs("career"))
     return { career: [...(tuple[2] as number[])] };
   return {};
+}
+
+/** @internal Collects the exact vocabulary ids referenced by selected rows. */
+export function entityVocabularyIdsForRows(
+  kind: number,
+  tuples: readonly unknown[][],
+  requested?: ReadonlySet<string>,
+): EntityVocabularyIds {
+  const collected: Record<VocabFamily, Set<number>> = {
+    career: new Set(),
+    metaTags: new Set(),
+    tags: new Set(),
+  };
+  for (const tuple of tuples) {
+    const ids = entityVocabularyIds(kind, tuple, requested);
+    for (const family of Object.keys(ids) as VocabFamily[])
+      for (const id of ids[family] ?? []) collected[family].add(id);
+  }
+  const result: EntityVocabularyIds = {};
+  for (const family of Object.keys(collected) as VocabFamily[]) {
+    const ids = [...collected[family]];
+    if (ids.length) result[family] = ids;
+  }
+  return result;
 }
 
 export interface VocabularyIndex {
@@ -350,6 +380,20 @@ export function contiguousPackSpan(
   return [start, end - start];
 }
 
+/** @internal Scattered members stop winning once they cover at least half of
+ * an owner's contiguous pack span; a whole scan then avoids a Range-request
+ * fan-out and may use a narrower verified column projection. */
+export function candidateRangesNeedWholeScan(
+  ranges: readonly Loc4[],
+  selected: readonly Loc4[],
+): boolean {
+  if (!selected.length) return false;
+  const span = contiguousPackSpan(ranges);
+  if (!span) return false;
+  const selectedBytes = selected.reduce((sum, range) => sum + range[3], 0);
+  return selectedBytes * 2 >= span[1];
+}
+
 export class Data {
   private readonly vocabFamilies = new AsyncMemo<VocabFamily, string[]>();
   private readonly tagVocabularyIndexes = new Map<
@@ -357,6 +401,8 @@ export class Data {
     VocabularyIndex
   >();
   private mappingsPromise: Promise<Mappings> | null = null;
+
+  constructor(private readonly manifest?: Manifest) {}
 
   /** rank-by-key 反向索引;未载入或不在当前发布时为 null。 */
   rankOf(key: number): number | null {
@@ -440,6 +486,27 @@ export class Data {
     signal?: AbortSignal,
   ): Promise<EntityVocab> {
     const ids = entityVocabularyIds(kind, tuple, requested);
+    const [career, metaTags, tags] = await Promise.all([
+      ids.career
+        ? this.selectedVocabulary("career", ids.career, signal)
+        : Promise.resolve(EMPTY_VOCABULARY),
+      ids.metaTags
+        ? this.selectedVocabulary("metaTags", ids.metaTags, signal)
+        : Promise.resolve(EMPTY_VOCABULARY),
+      ids.tags
+        ? this.selectedVocabulary("tags", ids.tags, signal)
+        : Promise.resolve(EMPTY_VOCABULARY),
+    ]);
+    return { career, metaTags, tags };
+  }
+
+  private async selectedRowsVocab(
+    kind: number,
+    tuples: readonly unknown[][],
+    requested?: ReadonlySet<string>,
+    signal?: AbortSignal,
+  ): Promise<EntityVocab> {
+    const ids = entityVocabularyIdsForRows(kind, tuples, requested);
     const [career, metaTags, tags] = await Promise.all([
       ids.career
         ? this.selectedVocabulary("career", ids.career, signal)
@@ -588,10 +655,14 @@ export class Data {
             break;
           }
           case "score":
-            fields.score = tuple[5] === null ? null : Number(tuple[5]);
+            fields.score = tuple[5] === null || tuple[5] === 0
+              ? null
+              : Number(tuple[5]);
             break;
           case "rank":
-            fields.rank = tuple[6] === null ? null : Number(tuple[6]);
+            fields.rank = tuple[6] === null || tuple[6] === 0
+              ? null
+              : Number(tuple[6]);
             break;
           case "nsfw": fields.nsfw = Boolean(tuple[7]); break;
           case "wish": fields.wish = Number(tuple[8]); break;
@@ -773,6 +844,18 @@ export class Data {
   ): AsyncIterable<ProjectedEntity> {
     const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
     const requested = new Set(fieldNames);
+    if (
+      this.manifest &&
+      canProjectSubjectQueryColumns(
+        this.manifest,
+        owner,
+        access,
+        fieldNames,
+      )
+    ) {
+      yield* projectSubjectQueryEntities(this.manifest, fieldNames, signal);
+      return;
+    }
     const [idx, vocab] = await Promise.all([
       loadGzJson<EntitiesIdx>("entities.idx"),
       this.fullEntityVocab(kind, requested),
@@ -798,6 +881,95 @@ export class Data {
         if (id === undefined || !tuple)
           throw new Error("entities member contains an incomplete row");
         yield this.decodeProjectedEntity(kind, id, tuple, requested, vocab);
+      }
+    }
+  }
+
+  /** Reads only requested structural entities while retaining full-scan order. */
+  async *projectEntityCandidates(
+    owner: ProjectedEntity["kind"],
+    keys: readonly number[],
+    fieldNames: readonly string[],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProjectedEntity> {
+    signal?.throwIfAborted();
+    if (!keys.length) return;
+    const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
+    const requested = new Set(fieldNames);
+    const idx = await loadGzJson<EntitiesIdx>("entities.idx");
+    const ranges = idx.k[String(kind)] ?? [];
+    const rangeCandidates = new Map<Loc4, Set<number>>();
+    const requestedKeys = new Set<number>();
+    for (const key of new Set(keys)) {
+      if (!Number.isSafeInteger(key) || key >>> 24 !== kind)
+        throw new TypeError("candidate EntityKey does not match its owner");
+      requestedKeys.add(key);
+      const id = key & 0xffffff;
+      const range = findRange(ranges, id);
+      if (!range) continue;
+      const ids = rangeCandidates.get(range) ?? new Set<number>();
+      ids.add(id);
+      rangeCandidates.set(range, ids);
+    }
+    const selectedRanges = ranges.filter((range) => rangeCandidates.has(range));
+    if (!selectedRanges.length) return;
+    if (candidateRangesNeedWholeScan(ranges, selectedRanges)) {
+      for await (const entity of this.projectEntities(
+        owner,
+        fieldNames,
+        signal,
+        "whole",
+      )) if (requestedKeys.has(entity.key)) yield entity;
+      return;
+    }
+    for (
+      let start = 0;
+      start < selectedRanges.length;
+      start += ENTITY_CANDIDATE_READ_CONCURRENCY
+    ) {
+      signal?.throwIfAborted();
+      const loaded = await Promise.all(
+        selectedRanges
+          .slice(start, start + ENTITY_CANDIDATE_READ_CONCURRENCY)
+          .map(async (range) => ({
+            range,
+            block: await member<{ i: number[]; r: unknown[][] }>(
+              "structure",
+              "entities.pack",
+              range[2],
+              range[3],
+              signal,
+            ),
+          })),
+      );
+      signal?.throwIfAborted();
+      const selectedRows = loaded.flatMap(({ range, block }) => {
+        const ids = rangeCandidates.get(range);
+        if (!ids) throw new Error("candidate range lost its requested ids");
+        return block.r.filter((_tuple, index) => {
+          const id = block.i[index];
+          return id !== undefined && ids.has(id);
+        });
+      });
+      const vocab = await this.selectedRowsVocab(
+        kind,
+        selectedRows,
+        requested,
+        signal,
+      );
+      for (const { range, block } of loaded) {
+        const ids = rangeCandidates.get(range);
+        if (!ids) throw new Error("candidate range lost its requested ids");
+        if (block.i.length !== block.r.length)
+          throw new Error("entities member ids and rows have different lengths");
+        for (let index = 0; index < block.i.length; index++) {
+          const id = block.i[index];
+          const tuple = block.r[index];
+          if (id === undefined || !tuple)
+            throw new Error("entities member contains an incomplete row");
+          if (!ids.has(id)) continue;
+          yield this.decodeProjectedEntity(kind, id, tuple, requested, vocab);
+        }
       }
     }
   }
@@ -984,6 +1156,11 @@ export class Data {
       cursor = page.next ?? undefined;
     } while (cursor !== undefined);
     return null;
+  }
+
+  /** Query highlight ownership without hydrating the Episode record. */
+  episodeSubjectId(id: number, signal?: AbortSignal): Promise<number | null> {
+    return subjectForEpisode(id, signal);
   }
 
   private async textSearchMemberLocation(

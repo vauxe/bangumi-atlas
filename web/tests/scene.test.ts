@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
+  CircleCropExtension,
   interactionHint,
   hasVisibleSortedRank,
   NodeStyleExtension,
@@ -136,6 +137,47 @@ test("clamps the final context-node radius in screen pixels", () => {
     /clamp\(screenRadius, scatterplot\.radiusMinPixels,\s*scatterplot\.radiusMaxPixels\) \/ screenRadius/,
   );
   assert.doesNotMatch(sizeFilter, /outerRadiusPixels/);
+});
+
+test("normalizes landscape and portrait covers before circular cropping", () => {
+  const shaders = new CircleCropExtension().getShaders() as {
+    inject: Record<string, string>;
+    modules?: { name: string; vs: string }[];
+  };
+  const coverModule = shaders.modules?.find(
+    (shaderModule) => shaderModule.name === "circleCrop",
+  );
+  const vertexStart = shaders.inject["vs:#main-start"] ?? "";
+  const sizeFilter = shaders.inject["vs:DECKGL_FILTER_SIZE"] ?? "";
+  const vertexEnd = shaders.inject["vs:#main-end"] ?? "";
+  const colorFilter = shaders.inject["fs:DECKGL_FILTER_COLOR"] ?? "";
+
+  assert.ok(coverModule);
+  assert.match(coverModule.vs, /vec2 circle_crop_frame_size;/);
+  assert.match(
+    vertexStart,
+    /circle_crop_frame_size = instanceIconFrames\.zw;/,
+  );
+  assert.doesNotMatch(sizeFilter, /instanceIconFrames/);
+  assert.match(
+    sizeFilter,
+    /vec2 coverFrameSize = max\(circle_crop_frame_size, vec2\(1\.0\)\);/,
+  );
+  assert.match(
+    sizeFilter,
+    /float coverConstraint = icon\.sizeBasis == 0\.0 \? coverFrameSize\.x : coverFrameSize\.y;/,
+  );
+  assert.match(sizeFilter, /size\.xy \*= coverConstraint \/ coverFrameSize;/);
+  assert.match(
+    vertexEnd,
+    /float coverSide = min\(coverFrameSize\.x, coverFrameSize\.y\);/,
+  );
+  assert.match(
+    vertexEnd,
+    /instanceIconFrames\.xy \+ \(coverFrameSize - vec2\(coverSide\)\) \* 0\.5/,
+  );
+  assert.match(vertexEnd, /vTextureCoords = mix\(/);
+  assert.match(colorFilter, /float cover_r = length\(geometry\.uv\);/);
 });
 
 test("keeps normal node color independent of zoom, size, and SDF edge alpha", () => {
