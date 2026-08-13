@@ -136,6 +136,129 @@ test("projects every result entity independently from the 500-row page", async (
   });
 });
 
+test("does not inspect Subject rows for Episode graph lineage", async () => {
+  let ownerReads = 0;
+  const measuredSubject = {
+    kind: "entity",
+    get owner() {
+      ownerReads++;
+      return "subject" as const;
+    },
+    ref: "subject:1",
+    fields: { name: "Measured" },
+  } as EntityValue;
+  const measuredSource: QueryDataSource = {
+    scan: async function* (owner) {
+      if (owner === "subject") yield measuredSubject;
+    },
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "project",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "subject", binding: "subject" },
+      project: {
+        kind: "project",
+        input: "scan",
+        columns: [{
+          name: "ref",
+          value: { kind: "field", binding: "subject", field: "ref" },
+        }],
+      },
+    },
+  };
+
+  const result = await executeQuery(query, {}, measuredSource, {
+    pageSize: 20,
+    onResultEntities: () => {},
+  });
+
+  assert.deepEqual(result.rows, [{ ref: "subject:1" }]);
+  assert.equal(ownerReads, 2);
+});
+
+test("uses optional scan batches only for whole-scan execution", async () => {
+  let rowScans = 0;
+  let batchScans = 0;
+  const batchedSource: QueryDataSource = {
+    scan: async function* (owner) {
+      rowScans++;
+      if (owner === "subject") {
+        yield {
+          kind: "entity",
+          owner: "subject",
+          ref: "subject:3",
+          fields: { score: 9 },
+        };
+      }
+    },
+    scanBatches: async function* (owner, _signal, fields) {
+      batchScans++;
+      assert.equal(owner, "subject");
+      assert.deepEqual(fields, ["score"]);
+      yield [
+        {
+          kind: "entity",
+          owner: "subject",
+          ref: "subject:1",
+          fields: { score: 8.5 },
+        },
+        {
+          kind: "entity",
+          owner: "subject",
+          ref: "subject:2",
+          fields: { score: 7.5 },
+        },
+      ];
+    },
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "project",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "subject", binding: "subject" },
+      filter: {
+        kind: "filter",
+        input: "scan",
+        predicate: {
+          kind: "compare",
+          operator: "gte",
+          left: { kind: "field", binding: "subject", field: "score" },
+          right: { kind: "literal", value: 8 },
+        },
+      },
+      project: {
+        kind: "project",
+        input: "filter",
+        columns: [{
+          name: "score",
+          value: { kind: "field", binding: "subject", field: "score" },
+        }],
+      },
+    },
+    orderBy: [{ column: "score", direction: "desc", nulls: "last" }],
+  };
+
+  const result = await executeQuery(query, {}, batchedSource, { pageSize: 20 });
+
+  assert.deepEqual(result.rows, [{ score: 8.5 }]);
+  assert.equal(batchScans, 1);
+  assert.equal(rowScans, 0);
+
+  const streamingResult = await executeQuery(
+    { ...query, orderBy: [], limit: 1 },
+    {},
+    batchedSource,
+    { pageSize: 20 },
+  );
+
+  assert.deepEqual(streamingResult.rows, [{ score: 9 }]);
+  assert.equal(batchScans, 1);
+  assert.equal(rowScans, 1);
+});
+
 test("does not scan or highlight a zero-limit result", async () => {
   let scans = 0;
   const zeroSource: QueryDataSource = {
@@ -566,6 +689,34 @@ test("validates Episode ownership even when highlights are disabled", async () =
 
   await assert.rejects(
     executeQuery(query, {}, invalidEpisodeSource, { pageSize: 20 }),
+    /subjectRef must identify a Subject/,
+  );
+
+  const valuesQuery: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "values",
+    parameters: {},
+    operators: {
+      values: {
+        kind: "values",
+        columns: ["episode"],
+        types: { episode: "entity:episode" },
+        rows: [["episode:17"]],
+      },
+    },
+  };
+  const invalidEpisodeValueSource: QueryDataSource = {
+    scan: async function* () {},
+    entity: async () => ({
+      kind: "entity",
+      owner: "episode",
+      ref: "episode:17",
+      fields: { subjectRef: "person:3" },
+    }),
+  };
+
+  await assert.rejects(
+    executeQuery(valuesQuery, {}, invalidEpisodeValueSource, { pageSize: 20 }),
     /subjectRef must identify a Subject/,
   );
 });

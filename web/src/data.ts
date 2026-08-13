@@ -11,6 +11,7 @@ import type {
   LongTextResult,
   Manifest,
   Mappings,
+  Names,
   Page,
   StructuralEntity,
   TagVocabularyField,
@@ -19,9 +20,11 @@ import { FACT_TAGS } from "./types";
 import { AsyncMemo } from "./async-memo";
 import {
   anchorForFact,
+  ensureRankIndex,
   loadGzJson,
   loadPublishedJson,
   member,
+  openNames,
   prefetchMemberRanges,
   prefetchPack,
   prefetchPackRange,
@@ -32,11 +35,12 @@ import {
 } from "./loader";
 import {
   canProjectSubjectQueryColumns,
-  projectSubjectQueryEntities,
+  projectSubjectQueryEntityBatches,
 } from "./subject-query-projection";
 
 type Loc4 = [number, number, number, number];
 const ENTITY_CANDIDATE_READ_CONCURRENCY = 6;
+const PROJECTED_ENTITY_BATCH_SIZE = 4096;
 
 interface EntitiesIdx {
   width: number;
@@ -401,8 +405,11 @@ export class Data {
     VocabularyIndex
   >();
   private mappingsPromise: Promise<Mappings> | null = null;
+  private readonly queryNames: Names | null;
 
-  constructor(private readonly manifest?: Manifest) {}
+  constructor(private readonly manifest?: Manifest) {
+    this.queryNames = manifest ? openNames(manifest) : null;
+  }
 
   /** rank-by-key 反向索引;未载入或不在当前发布时为 null。 */
   rankOf(key: number): number | null {
@@ -764,6 +771,30 @@ export class Data {
     const kind = key >>> 24;
     const id = key & 0xffffff;
     const requested = new Set(fieldNames);
+    if (
+      this.queryNames?.read &&
+      (kind === 1 || kind === 2 || kind === 3) &&
+      fieldNames.every((field) =>
+        field === "ref" || field === "id" || field === "name" || field === "nameCn"
+      )
+    ) {
+      await ensureRankIndex(signal);
+      signal?.throwIfAborted();
+      const rank = rankOfKey(key);
+      if (rank === null) return null;
+      const name = (await this.queryNames.read([rank], signal)).get(rank);
+      if (!name || name[2] !== kind)
+        throw new Error("entity identity name has the wrong kind");
+      const fields: Record<string, ProjectedEntityField> = {};
+      if (requested.has("name")) fields.name = name[0];
+      if (requested.has("nameCn") && kind === 1)
+        fields.nameCn = name[1] ?? "";
+      return {
+        kind: (["", "subject", "person", "character"] as const)[kind],
+        key,
+        fields,
+      };
+    }
     const idx = await loadGzJson<EntitiesIdx>("entities.idx");
     const row = findRange(idx.k[String(kind)] ?? [], id);
     if (!row) return null;
@@ -842,28 +873,22 @@ export class Data {
     signal?: AbortSignal,
     access: "stream" | "whole" = "whole",
   ): AsyncIterable<ProjectedEntity> {
-    const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
-    const requested = new Set(fieldNames);
-    if (
-      this.manifest &&
-      canProjectSubjectQueryColumns(
-        this.manifest,
+    if (access === "whole") {
+      for await (const batch of this.projectEntityBatches(
         owner,
-        access,
         fieldNames,
-      )
-    ) {
-      yield* projectSubjectQueryEntities(this.manifest, fieldNames, signal);
+        signal,
+        access,
+      )) yield* batch;
       return;
     }
+    const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
+    const requested = new Set(fieldNames);
     const [idx, vocab] = await Promise.all([
       loadGzJson<EntitiesIdx>("entities.idx"),
       this.fullEntityVocab(kind, requested),
     ]);
-    const ranges = idx.k[String(kind)] ?? [];
-    const span = access === "whole" ? contiguousPackSpan(ranges) : null;
-    if (span) await prefetchPackRange("entities.pack", ...span, signal);
-    for (const row of ranges) {
+    for (const row of idx.k[String(kind)] ?? []) {
       signal?.throwIfAborted();
       const block = await member<{ i: number[]; r: unknown[][] }>(
         "structure",
@@ -882,6 +907,72 @@ export class Data {
           throw new Error("entities member contains an incomplete row");
         yield this.decodeProjectedEntity(kind, id, tuple, requested, vocab);
       }
+    }
+  }
+
+  /** Bounded whole-scan batches avoid one async resume per projected entity. */
+  async *projectEntityBatches(
+    owner: ProjectedEntity["kind"],
+    fieldNames: readonly string[],
+    signal?: AbortSignal,
+    access: "stream" | "whole" = "whole",
+  ): AsyncIterable<readonly ProjectedEntity[]> {
+    if (
+      this.manifest &&
+      canProjectSubjectQueryColumns(
+        this.manifest,
+        owner,
+        access,
+        fieldNames,
+      )
+    ) {
+      yield* projectSubjectQueryEntityBatches(
+        this.manifest,
+        fieldNames,
+        signal,
+      );
+      return;
+    }
+    const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
+    const requested = new Set(fieldNames);
+    const [idx, vocab] = await Promise.all([
+      loadGzJson<EntitiesIdx>("entities.idx"),
+      this.fullEntityVocab(kind, requested),
+    ]);
+    const ranges = idx.k[String(kind)] ?? [];
+    const span = access === "whole" ? contiguousPackSpan(ranges) : null;
+    if (span) await prefetchPackRange("entities.pack", ...span, signal);
+    for (const row of ranges) {
+      signal?.throwIfAborted();
+      const block = await member<{ i: number[]; r: unknown[][] }>(
+        "structure",
+        "entities.pack",
+        row[2],
+        row[3],
+        signal,
+      );
+      if (block.i.length !== block.r.length)
+        throw new Error("entities member ids and rows have different lengths");
+      let batch: ProjectedEntity[] = [];
+      for (let index = 0; index < block.i.length; index++) {
+        signal?.throwIfAborted();
+        const id = block.i[index];
+        const tuple = block.r[index];
+        if (id === undefined || !tuple)
+          throw new Error("entities member contains an incomplete row");
+        batch.push(this.decodeProjectedEntity(
+          kind,
+          id,
+          tuple,
+          requested,
+          vocab,
+        ));
+        if (batch.length === PROJECTED_ENTITY_BATCH_SIZE) {
+          yield batch;
+          batch = [];
+        }
+      }
+      if (batch.length) yield batch;
     }
   }
 

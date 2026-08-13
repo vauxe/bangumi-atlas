@@ -295,6 +295,62 @@ test("uses the query projection reader when scan fields are known", async () => 
   });
 });
 
+test("maps projected whole-scan batches without flattening the reader stream", async () => {
+  let rowProjectionReads = 0;
+  let batchProjectionReads = 0;
+  const reader: SiteQueryReader = {
+    entities: async function* () {},
+    projectEntities: async function* () {
+      rowProjectionReads++;
+      throw new Error("row projection should not run");
+    },
+    projectEntityBatches: async function* (_owner, fields, _signal, access) {
+      batchProjectionReads++;
+      assert.deepEqual(fields, ["name", "score"]);
+      assert.equal(access, "whole");
+      yield [
+        {
+          kind: "subject",
+          key: key(1, 3),
+          fields: { name: "原名", score: 8.5 },
+        },
+        {
+          kind: "subject",
+          key: key(1, 4),
+          fields: { name: "次名", score: 8 },
+        },
+      ];
+    },
+    entity: async () => subject,
+    factsFor: async () => ({ items: [], total: 0, next: null }),
+  };
+  const source = new SiteQueryDataSource(reader);
+  const batches = [];
+
+  for await (const batch of source.scanBatches!(
+    "subject",
+    undefined,
+    ["name", "score"],
+  )) batches.push(batch);
+
+  assert.deepEqual(batches.flat(), [
+    {
+      kind: "entity",
+      owner: "subject",
+      ref: "subject:3",
+      fields: { name: "原名", score: 8.5 },
+    },
+    {
+      kind: "entity",
+      owner: "subject",
+      ref: "subject:4",
+      fields: { name: "次名", score: 8 },
+    },
+  ]);
+  assert.equal(batchProjectionReads, 1);
+  assert.equal(rowProjectionReads, 0);
+});
+
 test("projects a candidate set in the reader's canonical scan order", async () => {
   let requestedKeys: readonly number[] = [];
   let requestedFields: readonly string[] = [];

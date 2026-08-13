@@ -18,21 +18,34 @@ import { SiteQuerySearchIndex } from "../src/query/site-search";
 import { SiteQueryDataSource } from "../src/query/site-source";
 import type { Owner } from "../src/query/contract";
 
-type Scenario = "lookup" | "scan" | "aggregate" | "fulltext";
+type Scenario = "lookup" | "scan" | "scan-wide" | "aggregate" | "fulltext";
 
 interface Sample {
   elapsed: number;
   requests: number;
   bytes: number;
+  resources: {
+    path: string;
+    requests: number;
+    bytes: number;
+  }[];
   rows: number;
   totalMatches: number;
   signature: string;
 }
 
 const scenario = process.argv[2] as Scenario | undefined;
-const scenarios: readonly Scenario[] = ["lookup", "scan", "aggregate", "fulltext"];
+const scenarios: readonly Scenario[] = [
+  "lookup",
+  "scan",
+  "scan-wide",
+  "aggregate",
+  "fulltext",
+];
 if (!scenario || !scenarios.includes(scenario))
-  throw new TypeError("scenario must be lookup, scan, aggregate, or fulltext");
+  throw new TypeError(
+    "scenario must be lookup, scan, scan-wide, aggregate, or fulltext",
+  );
 
 const runCount = Number(process.env["QUERY_BENCH_RUNS"] ?? 5);
 if (!Number.isSafeInteger(runCount) || runCount < 1 || runCount > 20)
@@ -42,6 +55,7 @@ const base = process.env["SMOKE_BASE"] ?? "http://127.0.0.1:8391";
 const realFetch = globalThis.fetch;
 let requests = 0;
 let bytes = 0;
+const resources = new Map<string, { requests: number; bytes: number }>();
 globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
   const request = new Request(
     typeof input === "string" ? new URL(input, `${base}/`) : input,
@@ -49,16 +63,27 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
   );
   const response = await realFetch(request);
   requests++;
+  let responseBytes = 0;
   const contentLengthHeader = response.headers.get("Content-Length");
   const contentLength = Number(contentLengthHeader);
-  if (contentLengthHeader !== null && Number.isFinite(contentLength))
+  if (contentLengthHeader !== null && Number.isFinite(contentLength)) {
     bytes += contentLength;
+    responseBytes = contentLength;
+  }
   else {
     const range = /^bytes (\d+)-(\d+)\//.exec(
       response.headers.get("Content-Range") ?? "",
     );
-    if (range) bytes += Number(range[2]) - Number(range[1]) + 1;
+    if (range) {
+      responseBytes = Number(range[2]) - Number(range[1]) + 1;
+      bytes += responseBytes;
+    }
   }
+  const path = new URL(request.url).pathname.replace(/^.*\/data\//, "");
+  const resource = resources.get(path) ?? { requests: 0, bytes: 0 };
+  resource.requests++;
+  resource.bytes += responseBytes;
+  resources.set(path, resource);
   return response;
 }) as typeof fetch;
 
@@ -92,11 +117,14 @@ function sectionsFor(selected: Scenario): [string, QuerySection, number][] {
       (owner) => [owner, resultSection(owner, text), 500],
     );
   }
-  if (selected === "scan") {
+  if (selected === "scan" || selected === "scan-wide") {
+    const columns = selected === "scan-wide"
+      ? ["ref", "name", "nameCn", "type", "date", "score", "rank"]
+      : ["ref", "name", "nameCn", "score"];
     const section = compileExplorerQuery({
       owner: "subject",
       condition: { kind: "compare", field: "score", operator: "gte", value: 8 },
-      columns: ["ref", "name", "nameCn", "score"],
+      columns,
       orderBy: [{ column: "score", direction: "desc", nulls: "last" }],
       limit: 50,
     }).sections.results;
@@ -123,6 +151,9 @@ const sections = sectionsFor(scenario);
 const execute = async (): Promise<Sample> => {
   const beforeRequests = requests;
   const beforeBytes = bytes;
+  const beforeResources = new Map(
+    [...resources].map(([path, value]) => [path, { ...value }]),
+  );
   const started = performance.now();
   const results = await Promise.all(sections.map(async ([name, section, pageSize]) => [
     name,
@@ -137,6 +168,15 @@ const execute = async (): Promise<Sample> => {
     elapsed: Number((performance.now() - started).toFixed(2)),
     requests: requests - beforeRequests,
     bytes: bytes - beforeBytes,
+    resources: [...resources].flatMap(([path, value]) => {
+      const before = beforeResources.get(path) ?? { requests: 0, bytes: 0 };
+      const delta = {
+        path,
+        requests: value.requests - before.requests,
+        bytes: value.bytes - before.bytes,
+      };
+      return delta.requests ? [delta] : [];
+    }),
     rows: results.reduce((sum, [, result]) => sum + result.rows.length, 0),
     totalMatches: results.reduce(
       (sum, [, result]) => sum + result.totalMatches,

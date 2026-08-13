@@ -105,6 +105,12 @@ export interface QueryDataSource {
     fields?: readonly string[],
     access?: ScanAccess,
   ): AsyncIterable<EntityValue>;
+  /** Optional whole-scan transport optimization. Each batch preserves scan order. */
+  scanBatches?(
+    owner: Owner,
+    signal?: AbortSignal,
+    fields?: readonly string[],
+  ): AsyncIterable<readonly EntityValue[]>;
   /** Reads an entity subset in the same relative order as scan(owner).
    * Duplicate refs are ignored and refs absent from the source are omitted. */
   scanCandidates?(
@@ -230,7 +236,8 @@ type StoredEpisodeGraphRefs = EpisodeGraphRefs | (() => EpisodeGraphRefs);
 
 interface ExecutionContext {
   evidence: WeakMap<QueryRow, RowEvidence | (() => RowEvidence)>;
-  episodeGraphRefs: WeakMap<QueryRow, StoredEpisodeGraphRefs> | null;
+  /** Undefined when the plan cannot materialize Episodes, null for validation-only. */
+  episodeGraphRefs: WeakMap<QueryRow, StoredEpisodeGraphRefs> | null | undefined;
   scanFields: Map<string, readonly string[]>;
   scanAccess: ScanAccess;
 }
@@ -397,6 +404,62 @@ function scanFieldRequirements(
   return new Map(
     [...fields].map(([binding, names]) => [binding, [...names].sort()]),
   );
+}
+
+function queryMayMaterializeEpisodeEntities(
+  operators: Readonly<Record<string, QueryOperator>>,
+): boolean {
+  const factHasEpisodeRole = (factKind: QueryFactKind): boolean =>
+    Object.values(QUERY_CONTRACT.facts[factKind].roles).includes("episode");
+  for (const operator of Object.values(operators)) {
+    switch (operator.kind) {
+      case "scan":
+      case "lookup":
+        if (operator.owner === "episode") return true;
+        break;
+      case "fullText":
+        if (
+          operator.target === "entity"
+            ? operator.owner === "episode"
+            : factHasEpisodeRole(operator.factKind)
+        ) return true;
+        break;
+      case "factLookup":
+      case "matchFact":
+        if (factHasEpisodeRole(operator.factKind)) return true;
+        break;
+      case "followRef": {
+        const definition = fieldDefinition(operator.referenceOwner, operator.field);
+        const targetOwner = definition.type.slice("entity:".length);
+        const resultOwner = operator.direction === "forward"
+          ? targetOwner
+          : operator.referenceOwner;
+        if (resultOwner === "episode") return true;
+        break;
+      }
+      case "path":
+        if (
+          operator.traversals.some((traversal) =>
+            factHasEpisodeRole(traversal.factKind)
+          )
+        ) return true;
+        break;
+      case "values":
+        if (Object.values(operator.types ?? {}).includes("entity:episode"))
+          return true;
+        break;
+      case "filter":
+      case "project":
+      case "aggregate":
+      case "union":
+      case "intersect":
+      case "except":
+      case "exists":
+      case "notExists":
+        break;
+    }
+  }
+  return false;
 }
 
 function isEntityValue(value: RuntimeValue): value is EntityValue {
@@ -602,6 +665,7 @@ function rememberRowGraphEntities(
   sources: readonly QueryRow[] = [],
   evidence?: RowEvidence | (() => RowEvidence),
 ): QueryRow {
+  if (context.episodeGraphRefs === undefined) return row;
   const directGraphRefs = episodeGraphRefsInRow(row);
   if (!context.episodeGraphRefs) return row;
   const resolve = (): EpisodeGraphRefs => {
@@ -1028,7 +1092,27 @@ async function* rowsFor(
   const operator = operators[id];
   if (!operator) throw new TypeError(`query operator ${id} is missing`);
   switch (operator.kind) {
-    case "scan":
+    case "scan": {
+      if (context.scanAccess === "whole" && source.scanBatches) {
+        for await (const batch of source.scanBatches(
+          operator.owner,
+          signal,
+          context.scanFields.get(id) ?? [],
+        )) {
+          signal?.throwIfAborted();
+          if (!Array.isArray(batch))
+            throw new TypeError("data source returned an invalid scan batch");
+          for (const entity of batch) {
+            signal?.throwIfAborted();
+            if (entity.owner !== operator.owner)
+              throw new TypeError("data source returned the wrong entity owner");
+            yield rememberRowGraphEntities(context, {
+              [operator.binding]: entity,
+            });
+          }
+        }
+        return;
+      }
       for await (const entity of source.scan(
         operator.owner,
         signal,
@@ -1041,6 +1125,7 @@ async function* rowsFor(
         yield rememberRowGraphEntities(context, { [operator.binding]: entity });
       }
       return;
+    }
     case "lookup": {
       if (!source.lookup)
         throw new TypeError("query data source does not support lookup");
@@ -1773,9 +1858,12 @@ export async function executeQuery(
   const orderBy = query.orderBy ?? [];
   const canStopAtLimit = Number.isFinite(limit) && orderBy.length === 0;
   const top: RankedRow[] = [];
+  const mayMaterializeEpisodes = queryMayMaterializeEpisodeEntities(query.operators);
   const context: ExecutionContext = {
     evidence: new WeakMap(),
-    episodeGraphRefs: options.onResultEntities ? new WeakMap() : null,
+    episodeGraphRefs: mayMaterializeEpisodes
+      ? (options.onResultEntities ? new WeakMap() : null)
+      : undefined,
     scanFields: scanFieldRequirements(query.operators, query.root, columns),
     scanAccess: canStopAtLimit ? "stream" : "whole",
   };

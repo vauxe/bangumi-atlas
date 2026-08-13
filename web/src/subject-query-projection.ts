@@ -18,6 +18,7 @@ const SUBJECT_QUERY_COLUMN_FIELDS = new Set([
   "nsfw",
 ]);
 const SUBJECT_NAME_BLOCK_BATCH = 16;
+const SUBJECT_QUERY_ENTITY_BATCH = 4096;
 const MISSING_RANK = 0xffffff;
 const MISSING_ID = 0xffffffff;
 
@@ -132,12 +133,12 @@ async function loadSubjectNamesById(
   return { original, chinese };
 }
 
-/** Project verified fixed columns in the archive-id order of entities.pack. */
-export async function* projectSubjectQueryEntities(
+/** Project verified fixed columns in bounded archive-id ordered batches. */
+export async function* projectSubjectQueryEntityBatches(
   manifest: Manifest,
   fieldNames: readonly string[],
   signal?: AbortSignal,
-): AsyncIterable<SubjectQueryProjection> {
+): AsyncIterable<readonly SubjectQueryProjection[]> {
   const requested = new Set(fieldNames);
   const [ranksById, columns] = await Promise.all([
     loadEntityRanksById(1, signal),
@@ -148,6 +149,7 @@ export async function* projectSubjectQueryEntities(
     ? await loadSubjectNamesById(manifest, ranksById, signal)
     : null;
   try {
+    let batch: SubjectQueryProjection[] = [];
     for (let id = 0; id < ranksById.length; id++) {
       signal?.throwIfAborted();
       const rank = ranksById[id] as number;
@@ -156,16 +158,34 @@ export async function* projectSubjectQueryEntities(
       const chinese = names?.chinese[id];
       if (needsNames && (original === undefined || chinese === undefined))
         throw new TypeError("Subject query name is missing");
-      yield projectSubjectQueryEntity(
+      batch.push(projectSubjectQueryEntity(
         id,
         rank,
         requested,
         columns,
         needsNames ? [original!, chinese!, 1] : null,
-      );
+      ));
+      if (batch.length === SUBJECT_QUERY_ENTITY_BATCH) {
+        yield batch;
+        batch = [];
+      }
     }
+    if (batch.length) yield batch;
   } finally {
     names?.original.fill(undefined);
     names?.chinese.fill(undefined);
   }
+}
+
+/** Compatibility row stream over the same verified batched projection. */
+export async function* projectSubjectQueryEntities(
+  manifest: Manifest,
+  fieldNames: readonly string[],
+  signal?: AbortSignal,
+): AsyncIterable<SubjectQueryProjection> {
+  for await (const batch of projectSubjectQueryEntityBatches(
+    manifest,
+    fieldNames,
+    signal,
+  )) yield* batch;
 }

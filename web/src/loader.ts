@@ -1422,7 +1422,7 @@ export async function anchorForFact(
 let rankBytes: Uint8Array | null = null;
 let rankPromise: Promise<void> | null = null;
 
-export function ensureRankIndex(): Promise<void> {
+export function ensureRankIndex(signal?: AbortSignal): Promise<void> {
   rankPromise ??= (async () => {
     const bytes = await loadPublishedBytes(
       "rank-by-key.bin",
@@ -1434,7 +1434,7 @@ export function ensureRankIndex(): Promise<void> {
     rankPromise = null;
     throw error;
   });
-  return rankPromise;
+  return waitForSignal(rankPromise, signal);
 }
 
 /** 稳定键 -> VisualRank;索引未载入或键不在当前发布时返回 null。 */
