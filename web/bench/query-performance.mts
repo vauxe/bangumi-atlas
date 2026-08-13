@@ -63,7 +63,7 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
 }) as typeof fetch;
 
 const manifest = await loadManifest();
-const data = new Data();
+const data = new Data(manifest);
 const source = new SiteQueryDataSource(
   data,
   new SiteQuerySearchIndex(data, manifest),
