@@ -8,11 +8,34 @@ test("keeps the query workspace out of the initial ESM entry", () => {
   const page = readFileSync("../site/index.html", "utf8");
 
   assert.doesNotMatch(main, /import \{ QueryWorkbench \} from/);
-  assert.match(main, /await import\("\.\/query\/runtime"\)/);
+  assert.match(
+    main,
+    /prepare:\s*async\s*\(\)\s*=>[\s\S]*?Promise\.all\(\[[\s\S]*?import\("\.\/query\/runtime"\)[\s\S]*?prepareQueryStyles\(\)/,
+  );
   assert.match(build, /splitting:\s*true/);
   assert.match(build, /format:\s*"esm"/);
   assert.match(page, /rel="modulepreload" href="app\.js"/);
   assert.match(page, /<script type="module" src="app\.js"><\/script>/);
+});
+
+test("renders a non-blocking query launcher before the runtime is installed", () => {
+  const main = readFileSync("src/main.ts", "utf8");
+  const page = readFileSync("../site/index.html", "utf8");
+
+  assert.match(
+    page,
+    /<a id="query-loader" href="#query-dock"[^>]*aria-label="打开搜索与查询"/s,
+  );
+  assert.doesNotMatch(page, /<link[^>]+href="query\.css"/);
+  assert.match(main, /link\.href = "query\.css"/);
+  assert.match(main, /queryLoader\.addEventListener\("click", activateQueryRuntime\)/);
+  assert.match(main, /queryLoader\.replaceWith\(\$\("#query-workbench"\)\)/);
+  assert.match(main, /appliedHash === "#query-dock"/);
+  assert.match(main, /queryRuntime\.activate\(\{ focus: true \}\)/);
+  assert.match(
+    main,
+    /if \(state\.queryBundle \|\| appliedHash === "#query-dock"\)\s*activateQueryRuntime\(\)/,
+  );
 });
 
 test("waits for geometry completion before warming the reverse index", () => {

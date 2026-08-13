@@ -22,6 +22,7 @@ import {
   resolveLoadedNeighborRanks,
 } from "./neighbors";
 import { interactionHint, Scene } from "./scene";
+import { createLazyRuntime } from "./lazy-runtime";
 import { notify, state, subscribe } from "./store";
 import { TYPE_NAMES, etype } from "./types";
 import { decode, encode } from "./url";
@@ -329,6 +330,75 @@ async function boot(): Promise<void> {
     if (push) pushUrl();
   }
 
+  // ---- 统一查询：首屏只显示轻量入口；下载与 DOM 安装分离 ----
+  const queryLoader = $<HTMLAnchorElement>("#query-loader");
+  const queryLoaderLabel = $<HTMLSpanElement>("#query-loader-label");
+  let queryStyles: Promise<void> | null = null;
+  const prepareQueryStyles = (): Promise<void> => {
+    if (queryStyles) return queryStyles;
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = "query.css";
+    const pending = new Promise<void>((resolve, reject) => {
+      link.addEventListener("load", () => resolve(), { once: true });
+      link.addEventListener("error", () => {
+        reject(new TypeError("查询样式加载失败"));
+      }, { once: true });
+    });
+    document.head.append(link);
+    const tracked = pending.catch((error: unknown) => {
+      if (queryStyles === tracked) queryStyles = null;
+      link.remove();
+      throw error;
+    });
+    queryStyles = tracked;
+    return tracked;
+  };
+  const queryRuntime = createLazyRuntime({
+    prepare: async () => {
+      const [runtime] = await Promise.all([
+        import("./query/runtime"),
+        prepareQueryStyles(),
+      ]);
+      return runtime;
+    },
+    install: ({ installQueryRuntime }) => {
+      const queryWorkbench = installQueryRuntime({
+        host: $("#query-dock"),
+        manifest,
+        data,
+        geo,
+        names,
+        rankOfKey: rankOfKeyLocal,
+        select,
+        replaceUrl,
+        pushUrl,
+      });
+      // 原位替换以保持“查询 → 骰子”的视觉与键盘顺序。
+      queryLoader.replaceWith($("#query-workbench"));
+      return queryWorkbench;
+    },
+    onActivating: () => {
+      queryLoader.setAttribute("aria-busy", "true");
+      queryLoaderLabel.textContent = "正在打开查询…";
+    },
+    onError: (error) => {
+      queryLoader.setAttribute("aria-busy", "false");
+      queryLoaderLabel.textContent = "重试搜索与查询";
+      reportError("查询界面加载", error);
+    },
+  });
+  const activateQueryRuntime = (event?: Event): void => {
+    event?.preventDefault();
+    void queryRuntime.activate({ focus: true }).catch(() => undefined);
+  };
+  queryLoader.addEventListener("click", activateQueryRuntime);
+  if (!saveData()) {
+    idle(() => {
+      void queryRuntime.prepare().catch(() => undefined);
+    });
+  }
+
   subscribe(() => scene.recolor());
 
   // ---- 画布操作提示 ----
@@ -349,6 +419,8 @@ async function boot(): Promise<void> {
     historyApplications++;
     try {
       const st = decode(appliedHash);
+      if (state.queryBundle || appliedHash === "#query-dock")
+        activateQueryRuntime();
       scene.setOrtho(st.ortho);
       if (st.view) scene.setView(st.view);
       if (st.key === null && st.rank === null) {
@@ -385,21 +457,6 @@ async function boot(): Promise<void> {
     }
   };
 
-  // ---- 统一查询：名称定位与结构化答案共享 Worker 执行链 ----
-  // 几何流已启动后再解析查询工作区；Canvas 首包不携带编辑器与答案 DOM。
-  const { installQueryRuntime } = await import("./query/runtime");
-  const queryWorkbench = installQueryRuntime({
-    host: $("#query-dock"),
-    manifest,
-    data,
-    geo,
-    names,
-    rankOfKey: rankOfKeyLocal,
-    select,
-    replaceUrl,
-    pushUrl,
-  });
-
   // ---- 骰子:在当前已加载的 Canvas 节点中随机传送 ----
   const rollDice = (): void => {
     const count = geo.loaded;
@@ -426,7 +483,7 @@ async function boot(): Promise<void> {
     }
     if (k === "s") {
       ev.preventDefault();
-      queryWorkbench?.focus();
+      void queryRuntime.activate({ focus: true }).catch(() => undefined);
     }
     if (ev.key === "Escape" && state.selection !== null) deselect(true);
   });
