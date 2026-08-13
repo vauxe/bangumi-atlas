@@ -57,6 +57,20 @@ button:focus-visible, input:focus-visible, a:focus-visible {
   z-index: 6; pointer-events: none; }
 #query-dock > * { pointer-events: auto; }
 #query-dock > :not(#dice) { min-width: 0; grid-column: 1; grid-row: 1; }
+#query-loader { display: flex; align-items: center; gap: 8px; width: 100%;
+  min-height: 48px; padding: 6px 16px; overflow: hidden;
+  border: 1px solid var(--line); border-radius: 24px;
+  background: rgba(20, 38, 43, .96); color: var(--ink-2);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .28);
+  backdrop-filter: blur(12px); cursor: pointer; font: inherit;
+  text-decoration: none;
+  appearance: none; -webkit-appearance: none; }
+#query-loader:hover { border-color: var(--miku); color: var(--ink); }
+#query-loader[aria-busy="true"] { cursor: progress; }
+.query-loader-icon { width: 20px; height: 20px; flex: none; fill: none;
+  stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+#query-loader-label { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
 #dice { grid-column: 2; grid-row: 1; width: var(--floating-action-size);
   height: var(--floating-action-size); margin-top: 2px; border: 1px solid var(--line);
   background: rgba(20, 38, 43, .94); font-size: 19px;
@@ -262,13 +276,19 @@ pre.infobox { white-space: pre-wrap; word-break: break-all;
   #dice:hover { transform: none; }
 }
 </style>
-<link rel="stylesheet" href="query.css">
 </head>
 <body>
 <h1 class="sr-only">Bangumi 星图</h1>
 <div id="map"></div>
 
 <div id="query-dock">
+  <a id="query-loader" href="#query-dock" aria-label="打开搜索与查询">
+    <svg class="query-loader-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="11" cy="11" r="6"></circle>
+      <path d="m16 16 4 4"></path>
+    </svg>
+    <span id="query-loader-label">搜索与查询</span>
+  </a>
   <button id="dice" type="button" title="随机传送"
           aria-label="随机传送">🎲</button>
 </div>
