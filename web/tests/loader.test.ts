@@ -1113,6 +1113,47 @@ test("loads and caches only the requested name blocks", async () => {
   ]);
 });
 
+test("coalesces adjacent name blocks for one batch read", async () => {
+  const first = gzipSync(
+    JSON.stringify([["A", null, 1], ["B", "乙", 2]]),
+  );
+  const second = gzipSync(JSON.stringify([["C", "丙", 3]]));
+  const pack = new Uint8Array(Buffer.concat([first, second]));
+  const index = u32le([0, first.byteLength, pack.byteLength]);
+  const manifest = testManifest(
+    {
+      "names.idx": [index.byteLength, hash(index)],
+      "names.pack": [pack.byteLength, hash(pack)],
+    },
+    3,
+  );
+  const ranges: string[] = [];
+  await installFetch(manifest, async (path, init) => {
+    if (path.endsWith("names.idx")) return new Response(body(index));
+    const range = new Headers(init?.headers).get("Range");
+    assert.ok(range);
+    ranges.push(range);
+    const match = /^bytes=(\d+)-(\d+)$/.exec(range);
+    assert.ok(match);
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    return new Response(body(pack.slice(start, end + 1)), {
+      status: 206,
+      headers: {
+        "Content-Range": `bytes ${start}-${end}/${pack.byteLength}`,
+      },
+    });
+  });
+
+  const rows = await openNames(manifest).read?.([0, 2]);
+
+  assert.deepEqual(rows, new Map([
+    [0, ["A", null, 1]],
+    [2, ["C", "丙", 3]],
+  ]));
+  assert.deepEqual(ranges, [`bytes=0-${pack.byteLength - 1}`]);
+});
+
 test("loads search aliases independently from entity names", async () => {
   const rows = gzipSync(
     JSON.stringify([
