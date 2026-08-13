@@ -38,6 +38,19 @@ test("renders a non-blocking query launcher before the runtime is installed", ()
   );
 });
 
+test("keeps the detail drawer out of the initial ESM entry", () => {
+  const main = readFileSync("src/main.ts", "utf8");
+  const page = readFileSync("../site/index.html", "utf8");
+
+  assert.doesNotMatch(main, /import \{ Drawer \} from/);
+  assert.match(main, /createLazyDrawerRuntime\(async \(\) =>/);
+  assert.match(main, /import\("\.\/drawer"\)/);
+  assert.match(
+    page,
+    /<aside id="drawer"[^>]*aria-hidden="true"[^>]*inert/s,
+  );
+});
+
 test("waits for geometry completion before warming the reverse index", () => {
   const main = readFileSync("src/main.ts", "utf8");
   const streamStart = main.indexOf("const geoDone = gstream.start");

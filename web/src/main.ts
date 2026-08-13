@@ -3,9 +3,9 @@
  * 补齐;搜索目录在聚焦时读取;text.idx 在首次结构画面后空闲读取;
  * 悬停名字按需、稳定 150ms 才预取结构,不预取 Episode 或任何文本。 */
 
-import { Drawer } from "./drawer";
 import { Data } from "./data";
 import { esc } from "./html";
+import { createLazyDrawerRuntime } from "./lazy-drawer";
 import {
   ensureRankIndex,
   loadGzJson,
@@ -65,18 +65,19 @@ async function boot(): Promise<void> {
   const names = openNames(manifest);
   const data = new Data(manifest);
 
-  const drawer = new Drawer(
-    $("#drawer"),
-    $<HTMLButtonElement>("#drawer-reopen"),
-    {
+  const drawerElement = $("#drawer");
+  const drawerReopen = $<HTMLButtonElement>("#drawer-reopen");
+  const drawer = createLazyDrawerRuntime(async () => {
+    const { Drawer } = await import("./drawer");
+    return new Drawer(drawerElement, drawerReopen, {
       geo,
       names,
       manifest,
       data,
       reportError,
       walk: (rank) => runTask(select(rank, "fly"), "节点加载"),
-    },
-  );
+    });
+  });
 
   const tooltip = $("#tooltip");
   let hoveredNode: { rank: number; x: number; y: number } | null = null;
