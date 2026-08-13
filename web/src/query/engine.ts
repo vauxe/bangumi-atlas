@@ -240,6 +240,8 @@ interface ExecutionContext {
   episodeGraphRefs: WeakMap<QueryRow, StoredEpisodeGraphRefs> | null | undefined;
   scanFields: Map<string, readonly string[]>;
   scanAccess: ScanAccess;
+  lateProjection: LateProjectionPlan | null;
+  lateValues: WeakMap<QueryRow, readonly PendingLateField[]>;
 }
 
 interface ScanOrigin {
@@ -249,6 +251,28 @@ interface ScanOrigin {
 }
 
 type ScanOrigins = Map<string, ScanOrigin[]>;
+
+interface LateProjectionField {
+  binding: string;
+  field: "name" | "nameCn";
+  source: string;
+}
+
+interface LateProjectionPlan {
+  operator: string;
+  columns: Map<string, LateProjectionField>;
+}
+
+interface PendingLateField {
+  column: string;
+  field: "name" | "nameCn";
+  ref: `subject:${number}`;
+}
+
+interface ScanFieldPlan {
+  fields: Map<string, readonly string[]>;
+  lateProjection: LateProjectionPlan | null;
+}
 
 function collectExpressionFields(
   expression: Expression,
@@ -284,11 +308,14 @@ function collectExpressionFields(
   }
 }
 
-function scanFieldRequirements(
+function scanFieldPlan(
   operators: Record<string, QueryOperator>,
   root: string,
   resultColumns: Readonly<Record<string, QueryResultColumn>>,
-): Map<string, readonly string[]> {
+  allowLateProjection: boolean,
+  orderBy: NonNullable<QueryDocument["orderBy"]>,
+  distinct: boolean,
+): ScanFieldPlan {
   const fields = new Map<string, Set<string>>();
   const originCache = new Map<string, ScanOrigins>();
   const originsFor = (id: string): ScanOrigins => {
@@ -367,14 +394,59 @@ function scanFieldRequirements(
     originCache.set(id, origins);
     return origins;
   };
+  let lateProjection: LateProjectionPlan | null = null;
+  const rootOperator = operators[root];
+  if (
+    allowLateProjection &&
+    !distinct &&
+    rootOperator?.kind === "project"
+  ) {
+    const boundedCandidateSources = new Set<string>();
+    for (const operator of Object.values(operators)) {
+      if (operator.kind !== "exists" || operator.columns.length !== 1) continue;
+      const outer = operators[operator.input];
+      if (
+        outer?.kind === "scan" &&
+        operator.columns[0]?.outer === outer.binding
+      ) boundedCandidateSources.add(operator.input);
+    }
+    const orderedColumns = new Set(orderBy.map((term) => term.column));
+    const inputOrigins = originsFor(rootOperator.input);
+    const columns = new Map<string, LateProjectionField>();
+    for (const column of rootOperator.columns) {
+      const expression = column.value;
+      if (
+        !Object.hasOwn(resultColumns, column.name) ||
+        orderedColumns.has(column.name) ||
+        expression.kind !== "field" ||
+        (expression.field !== "name" && expression.field !== "nameCn")
+      ) continue;
+      const origins = inputOrigins.get(expression.binding) ?? [];
+      const unique = new Map(origins.map((origin) => [origin.source, origin]));
+      const origin = unique.size === 1 ? [...unique.values()][0] : undefined;
+      if (
+        origin?.owner !== "subject" ||
+        boundedCandidateSources.has(origin.source)
+      ) continue;
+      columns.set(column.name, {
+        binding: expression.binding,
+        field: expression.field,
+        source: origin.source,
+      });
+    }
+    if (columns.size) lateProjection = { operator: root, columns };
+  }
   for (const [id, operator] of Object.entries(operators)) {
     switch (operator.kind) {
       case "filter":
         collectExpressionFields(operator.predicate, originsFor(operator.input), fields);
         break;
       case "project":
-        for (const column of operator.columns)
+        for (const column of operator.columns) {
+          if (id === lateProjection?.operator && lateProjection.columns.has(column.name))
+            continue;
           collectExpressionFields(column.value, originsFor(operator.input), fields);
+        }
         break;
       case "aggregate":
         for (const group of operator.groupBy)
@@ -401,9 +473,18 @@ function scanFieldRequirements(
       fields.set(origin.source, required);
     }
   }
-  return new Map(
-    [...fields].map(([binding, names]) => [binding, [...names].sort()]),
-  );
+  if (lateProjection) {
+    for (const [column, deferred] of lateProjection.columns)
+      if (fields.get(deferred.source)?.has(deferred.field))
+        lateProjection.columns.delete(column);
+    if (!lateProjection.columns.size) lateProjection = null;
+  }
+  return {
+    fields: new Map(
+      [...fields].map(([binding, names]) => [binding, [...names].sort()]),
+    ),
+    lateProjection,
+  };
 }
 
 function queryMayMaterializeEpisodeEntities(
@@ -1307,8 +1388,27 @@ async function* rowsFor(
     case "project":
       for await (const row of rowsFor(operator.input, operators, source, context, signal)) {
         const projected: QueryRow = {};
-        for (const column of operator.columns)
-          projected[column.name] = evaluate(column.value, row);
+        const pending: PendingLateField[] = [];
+        const lateColumns = context.lateProjection?.operator === id
+          ? context.lateProjection.columns
+          : null;
+        for (const column of operator.columns) {
+          const late = lateColumns?.get(column.name);
+          if (!late) {
+            projected[column.name] = evaluate(column.value, row);
+            continue;
+          }
+          const binding = own(row, late.binding);
+          if (!isEntityValue(binding) || binding.owner !== "subject")
+            throw new TypeError("late Subject identity binding is invalid");
+          projected[column.name] = MISSING;
+          pending.push({
+            column: column.name,
+            field: late.field,
+            ref: binding.ref as `subject:${number}`,
+          });
+        }
+        if (pending.length) context.lateValues.set(projected, pending);
         yield rememberLazyEvidence(
           context,
           projected,
@@ -1742,6 +1842,131 @@ function compareRows(
   return left.ordinal - right.ordinal;
 }
 
+function compareOrderTerms(
+  left: RankedRow,
+  right: RankedRow,
+  orderBy: NonNullable<QueryDocument["orderBy"]>,
+): number {
+  for (const term of orderBy) {
+    const order = compareOrderedValue(
+      own(left.row, term.column),
+      own(right.row, term.column),
+      term.direction,
+      term.nulls,
+    );
+    if (order) return order;
+  }
+  return 0;
+}
+
+function compareKnownCandidateOrder(
+  left: RankedRow,
+  right: RankedRow,
+  orderBy: NonNullable<QueryDocument["orderBy"]>,
+  lateColumns: ReadonlySet<string>,
+): number {
+  const explicit = compareOrderTerms(left, right, orderBy);
+  if (explicit) return explicit;
+  const columns = Object.keys(left.row).sort();
+  for (const column of columns) {
+    if (lateColumns.has(column)) return 0;
+    const a = canonicalJson(jsonValue(own(left.row, column)));
+    const b = canonicalJson(jsonValue(own(right.row, column)));
+    if (a !== b) return a < b ? -1 : 1;
+  }
+  return 0;
+}
+
+interface OrderedCandidateGroup {
+  representative: RankedRow;
+  rows: RankedRow[];
+}
+
+/** Retain every row tied at the explicit Top-N boundary. Deferred identity
+ * fields are then restored before the canonical row tie-break is evaluated. */
+function insertOrderedCandidate(
+  groups: OrderedCandidateGroup[],
+  value: RankedRow,
+  cap: number,
+  orderBy: NonNullable<QueryDocument["orderBy"]>,
+  lateColumns: ReadonlySet<string>,
+): void {
+  if (cap === 0) return;
+  let lo = 0;
+  let hi = groups.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    const order = compareKnownCandidateOrder(
+      groups[mid]!.representative,
+      value,
+      orderBy,
+      lateColumns,
+    );
+    if (order < 0) lo = mid + 1;
+    else hi = mid;
+  }
+  const group = groups[lo];
+  if (
+    group &&
+    compareKnownCandidateOrder(
+      group.representative,
+      value,
+      orderBy,
+      lateColumns,
+    ) === 0
+  )
+    group.rows.push(value);
+  else groups.splice(lo, 0, { representative: value, rows: [value] });
+
+  let retained = 0;
+  for (let index = 0; index < groups.length; index++) {
+    retained += groups[index]!.rows.length;
+    if (retained < cap) continue;
+    groups.length = index + 1;
+    break;
+  }
+}
+
+async function hydrateLateProjection(
+  ranked: readonly RankedRow[],
+  source: QueryDataSource,
+  context: ExecutionContext,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!context.lateProjection || !source.scanCandidates) return;
+  const rows = [...new Set(ranked.map((item) => item.row))];
+  const pending = rows.flatMap((row) => context.lateValues.get(row) ?? []);
+  if (!pending.length) return;
+  const refs = [...new Set(pending.map((item) => item.ref))];
+  const requestedRefs = new Set<string>(refs);
+  const requested = new Set(pending.map((item) => item.field));
+  const fields = [...requested].sort();
+  const identities = new Map<string, EntityValue>();
+  for await (const entity of source.scanCandidates(
+    "subject",
+    refs,
+    signal,
+    fields,
+  )) {
+    signal?.throwIfAborted();
+    if (entity.owner !== "subject" || !requestedRefs.has(entity.ref))
+      throw new TypeError("late Subject identity returned an unrequested entity");
+    if (identities.has(entity.ref))
+      throw new TypeError("late Subject identity returned a duplicate entity");
+    for (const field of fields)
+      if (typeof entity.fields[field] !== "string")
+        throw new TypeError(`late Subject identity omitted ${field}`);
+    identities.set(entity.ref, entity);
+  }
+  if (identities.size !== refs.length)
+    throw new TypeError("late Subject identity omitted an entity");
+  for (const row of rows) {
+    for (const item of context.lateValues.get(row) ?? [])
+      row[item.column] = identities.get(item.ref)!.fields[item.field] as string;
+    context.lateValues.delete(row);
+  }
+}
+
 /** @internal Exported for deterministic performance-contract coverage. */
 export function insertTop(
   rows: RankedRow[],
@@ -1857,6 +2082,22 @@ export async function executeQuery(
   const cap = Math.min(limit, offset + options.pageSize);
   const orderBy = query.orderBy ?? [];
   const canStopAtLimit = Number.isFinite(limit) && orderBy.length === 0;
+  const orderedCandidateCap = options.onResultEntities && Number.isFinite(limit)
+    ? limit
+    : cap;
+  const allowLateProjection = Boolean(source.scanCandidates) &&
+    (
+      orderBy.length === 0 ||
+      orderedCandidateCap <= QUERY_SECURITY_PROFILE.execution.maxPageSize
+    );
+  const plan = scanFieldPlan(
+    query.operators,
+    query.root,
+    columns,
+    allowLateProjection,
+    orderBy,
+    Boolean(query.distinct),
+  );
   const top: RankedRow[] = [];
   const mayMaterializeEpisodes = queryMayMaterializeEpisodeEntities(query.operators);
   const context: ExecutionContext = {
@@ -1864,8 +2105,10 @@ export async function executeQuery(
     episodeGraphRefs: mayMaterializeEpisodes
       ? (options.onResultEntities ? new WeakMap() : null)
       : undefined,
-    scanFields: scanFieldRequirements(query.operators, query.root, columns),
+    scanFields: plan.fields,
     scanAccess: canStopAtLimit ? "stream" : "whole",
+    lateProjection: plan.lateProjection,
+    lateValues: new WeakMap(),
   };
   const metadata = Promise.all([queryDigest(query), coverageFor(query)]);
   if (limit === 0) {
@@ -1885,8 +2128,15 @@ export async function executeQuery(
     };
   }
   const distinct = query.distinct ? new Set<string>() : null;
+  const orderedCandidates = context.lateProjection && orderBy.length > 0
+    ? [] as OrderedCandidateGroup[]
+    : null;
+  const lateColumns = new Set(context.lateProjection?.columns.keys() ?? []);
+  const lateOrderedEntities = Boolean(
+    orderedCandidates && options.onResultEntities && Number.isFinite(limit),
+  );
   const deferredEntities = options.onResultEntities &&
-      orderBy.length > 0 && Number.isFinite(limit)
+      orderBy.length > 0 && Number.isFinite(limit) && !orderedCandidates
     ? [] as RankedResultEntities[]
     : null;
   let totalMatches = 0;
@@ -1947,7 +2197,7 @@ export async function executeQuery(
     totalMatches++;
     const currentOrdinal = ordinal++;
     const ranked = { row, key, ordinal: currentOrdinal };
-    if (options.onResultEntities) {
+    if (options.onResultEntities && !lateOrderedEntities) {
       const pendingEntities = pendingResultEntities(row);
       if (deferredEntities) {
         insertResultEntityTop(
@@ -1964,7 +2214,15 @@ export async function executeQuery(
         if (entities.length) options.onResultEntities(entities);
       }
     }
-    if (orderBy.length) insertTop(top, ranked, cap, orderBy);
+    if (orderedCandidates)
+      insertOrderedCandidate(
+        orderedCandidates,
+        ranked,
+        orderedCandidateCap,
+        orderBy,
+        lateColumns,
+      );
+    else if (orderBy.length) insertTop(top, ranked, cap, orderBy);
     else if (top.length < cap) top.push(ranked);
     if (canStopAtLimit && totalMatches >= limit) break;
   }
@@ -1975,9 +2233,23 @@ export async function executeQuery(
       if (entities.length) options.onResultEntities?.(entities);
     }
 
+  if (orderedCandidates) {
+    const candidates = orderedCandidates.flatMap((group) => group.rows);
+    await hydrateLateProjection(candidates, source, context, options.signal);
+    candidates.sort((left, right) => compareRows(left, right, orderBy));
+    const selected = candidates.slice(0, orderedCandidateCap);
+    top.push(...selected.slice(0, cap));
+    if (lateOrderedEntities)
+      for (const ranked of selected) {
+        const entities = await resolveResultEntities(pendingResultEntities(ranked.row));
+        if (entities.length) options.onResultEntities?.(entities);
+      }
+  }
+
   totalMatches = Math.min(totalMatches, limit);
   const visibleMatches = totalMatches;
   const page = top.slice(offset, Math.min(offset + options.pageSize, visibleMatches));
+  await hydrateLateProjection(page, source, context, options.signal);
   const [digest, coverage] = await metadata;
   return {
     rows: page.map((ranked) => publicRow(ranked.row)),

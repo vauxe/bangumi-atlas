@@ -1840,6 +1840,68 @@ test("projects identity-only point reads without entities.pack", async () => {
   );
 });
 
+test("projects identity-only candidate batches from targeted name blocks", async () => {
+  const rankBytes = Uint8Array.of(
+    2, 0, 0,
+    0, 0, 0,
+    1, 0, 0,
+  );
+  const firstNames = gzipSync(JSON.stringify([
+    ["Zero", "零", 1],
+    ["One", "一", 1],
+  ]));
+  const secondNames = gzipSync(JSON.stringify([["Two", "二", 1]]));
+  const namesPack = new Uint8Array(Buffer.concat([firstNames, secondNames]));
+  const namesIndex = u32le([
+    0,
+    firstNames.byteLength,
+    firstNames.byteLength + secondNames.byteLength,
+  ]);
+  const artifacts = new Map<string, Uint8Array>([
+    ["rank-by-key.bin", rankBytes],
+    ["names.idx", namesIndex],
+    ["names.pack", namesPack],
+  ]);
+  const manifest = testManifest(Object.fromEntries(
+    [...artifacts].map(([name, bytes]) => [
+      name,
+      [bytes.byteLength, hash(bytes)],
+    ]),
+  ), 3);
+  manifest.counts.entities.subject = 3;
+  const requested = new Set<string>();
+  await installFetch(manifest, async (path) => {
+    const artifact = [...artifacts].find(([name]) => path.endsWith(`-${name}`));
+    assert.ok(artifact, `unexpected request ${path}`);
+    requested.add(artifact[0]);
+    return new Response(body(artifact[1]));
+  });
+  const projected = [];
+
+  for await (const entity of new Data(manifest).projectEntityCandidates(
+    "subject",
+    [(1 << 24) | 2, 1 << 24],
+    ["ref", "name", "nameCn"],
+  )) projected.push(entity);
+
+  assert.deepEqual(projected, [
+    {
+      kind: "subject",
+      key: 1 << 24,
+      fields: { name: "Two", nameCn: "二" },
+    },
+    {
+      kind: "subject",
+      key: (1 << 24) | 2,
+      fields: { name: "One", nameCn: "一" },
+    },
+  ]);
+  assert.deepEqual(
+    requested,
+    new Set(["rank-by-key.bin", "names.idx", "names.pack"]),
+  );
+});
+
 test("cancels an identity-only point read while the shared rank index loads", async () => {
   const rankBytes = Uint8Array.of(0, 0, 0);
   const namesMember = gzipSync(JSON.stringify([["Original", null, 1]]));
