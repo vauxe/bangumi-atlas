@@ -723,6 +723,7 @@ export function openGeometry(manifest: Manifest): GeometryStream {
     sparse: new Map(),
   };
   let lastEmit = 0;
+  let lastEmitted = 0;
 
   const start = (onChunk: (loaded: number) => void): Promise<void> => {
     const update = (): void => {
@@ -737,8 +738,13 @@ export function openGeometry(manifest: Manifest): GeometryStream {
       );
       geo.loaded = loaded;
       const now = performance.now();
-      if (now - lastEmit > 250 || loaded === n) {
+      // 首个完整 SoA 行立即可画；空进度和重复进度只会浪费一轮节流。
+      if (
+        loaded > lastEmitted &&
+        (lastEmitted === 0 || now - lastEmit > 250 || loaded === n)
+      ) {
         lastEmit = now;
+        lastEmitted = loaded;
         onChunk(loaded);
       }
     };
