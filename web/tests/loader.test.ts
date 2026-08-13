@@ -4,8 +4,11 @@ import { afterEach, test } from "node:test";
 import { gzipSync, gunzipSync } from "node:zlib";
 
 import siteContract from "../../scripts/site-contract.json";
+import { Data } from "../src/data";
 import {
+  loadEntityRanksById,
   loadManifest,
+  loadSubjectQueryColumns,
   intersectSortedPostings,
   member,
   openNames,
@@ -1534,6 +1537,224 @@ test("does not reuse rank-ordered entity keys across SiteReleases", async () => 
   await installFetch(second, async () => new Response(body(secondKeys)));
 
   assert.equal(loadedEntityKeys(), null);
+});
+
+test("loads verified Subject query columns in archive-id order", async () => {
+  const rankBytes = Uint8Array.of(1, 0, 0, 0xff, 0xff, 0xff, 0, 0, 0);
+  const years = u16le([2024, 0]);
+  const scores = Uint8Array.of(85, 0);
+  const flags = Uint8Array.of((2 << 2) | 1, 6 << 2);
+  const manifest = {
+    ...testManifest({
+      "rank-by-key.bin": [rankBytes.byteLength, hash(rankBytes)],
+      "year.bin": [years.byteLength, hash(years)],
+      "score.bin": [scores.byteLength, hash(scores)],
+      "flags.bin": [flags.byteLength, hash(flags)],
+    }, 2),
+    counts: {
+      ...testManifest({}, 2).counts,
+      entities: { subject: 2, person: 0, character: 0 },
+    },
+    rank_index: {
+      encoding: "u24le",
+      sentinel: 0xffffff,
+      segments: {
+        "1": { offset: 0, count: 3 },
+        "2": { offset: 9, count: 0 },
+        "3": { offset: 9, count: 0 },
+      },
+    },
+  };
+  const artifacts = new Map([
+    ["rank-by-key.bin", rankBytes],
+    ["year.bin", years],
+    ["score.bin", scores],
+    ["flags.bin", flags],
+  ]);
+  await installFetch(manifest, async (path) => {
+    const artifact = [...artifacts].find(([name]) => path.endsWith(`-${name}`));
+    assert.ok(artifact, `unexpected request ${path}`);
+    return new Response(body(artifact[1]));
+  });
+
+  assert.deepEqual(
+    [...await loadEntityRanksById(1)],
+    [1, 0xffffff, 0],
+  );
+  const columns = await loadSubjectQueryColumns(["score"]);
+  assert.equal(columns.nodeCount, 2);
+  assert.equal(columns.year, undefined);
+  assert.deepEqual([...(columns.score ?? [])], [85, 0]);
+  assert.equal(columns.flags, undefined);
+});
+
+test("projects verified Subject columns through Data in archive-id order", async () => {
+  const rankBytes = Uint8Array.of(
+    2, 0, 0,
+    0xff, 0xff, 0xff,
+    0, 0, 0,
+    1, 0, 0,
+  );
+  const years = u16le([0, 2025, 2020]);
+  const scores = Uint8Array.of(0, 91, 85);
+  const flags = Uint8Array.of(2 << 2, (6 << 2) | 1, (1 << 2) | 1);
+  const firstNames = gzipSync(JSON.stringify([
+    ["Two", "二", 1],
+    ["Three", null, 1],
+  ]));
+  const secondNames = gzipSync(JSON.stringify([["Zero", "零", 1]]));
+  const namesPack = new Uint8Array(Buffer.concat([firstNames, secondNames]));
+  const namesIndex = u32le([
+    0,
+    firstNames.byteLength,
+    namesPack.byteLength,
+  ]);
+  const artifacts = new Map<string, Uint8Array>([
+    ["rank-by-key.bin", rankBytes],
+    ["year.bin", years],
+    ["score.bin", scores],
+    ["flags.bin", flags],
+    ["names.idx", namesIndex],
+    ["names.pack", namesPack],
+  ]);
+  const base = testManifest(
+    Object.fromEntries(
+      [...artifacts].map(([name, bytes]) => [
+        name,
+        [bytes.byteLength, hash(bytes)],
+      ]),
+    ),
+    3,
+  );
+  const manifest: Manifest = {
+    ...base,
+    counts: {
+      ...base.counts,
+      entities: { subject: 3, person: 0, character: 0 },
+    },
+    rank_index: {
+      encoding: "u24le",
+      sentinel: 0xffffff,
+      segments: {
+        "1": { offset: 0, count: 4 },
+        "2": { offset: 12, count: 0 },
+        "3": { offset: 12, count: 0 },
+      },
+    },
+    query: {
+      schema: "atlas-release-query-v1",
+      capabilities: ["subject-query-columns-v1"],
+      contractDigest: "0".repeat(64),
+    },
+  };
+  const requested = new Set<string>();
+  await installFetch(manifest, async (path) => {
+    const artifact = [...artifacts].find(([name]) => path.endsWith(`-${name}`));
+    assert.ok(artifact, `unexpected request ${path}`);
+    requested.add(artifact[0]);
+    return new Response(body(artifact[1]));
+  });
+
+  const projected = [];
+  for await (const entity of new Data(manifest).projectEntities(
+    "subject",
+    ["name", "nameCn", "type", "year", "score", "nsfw"],
+    undefined,
+    "whole",
+  )) projected.push(entity);
+
+  assert.deepEqual(projected, [
+    {
+      kind: "subject",
+      key: (1 << 24) | 0,
+      fields: {
+        name: "Zero",
+        nameCn: "零",
+        type: 1,
+        year: 2020,
+        score: 8.5,
+        nsfw: true,
+      },
+    },
+    {
+      kind: "subject",
+      key: (1 << 24) | 2,
+      fields: {
+        name: "Two",
+        nameCn: "二",
+        type: 2,
+        year: null,
+        score: null,
+        nsfw: false,
+      },
+    },
+    {
+      kind: "subject",
+      key: (1 << 24) | 3,
+      fields: {
+        name: "Three",
+        nameCn: "",
+        type: 6,
+        year: 2025,
+        score: 9.1,
+        nsfw: true,
+      },
+    },
+  ]);
+  assert.equal(requested.has("entities.pack"), false);
+});
+
+test("falls back to entities.pack when a release lacks Subject columns", async () => {
+  const entityMember = gzipSync(JSON.stringify({
+    i: [7, 8],
+    r: [
+      ["Fallback", null, 2, null, "2024-01-01", 8.6],
+      ["No score", null, 2, null, "", 0],
+    ],
+  }));
+  const entityIndex = gzipSync(JSON.stringify({
+    width: 256,
+    k: { "1": [[7, 8, 0, entityMember.byteLength]] },
+  }));
+  const artifacts = new Map<string, Uint8Array>([
+    ["entities.idx", entityIndex],
+    ["entities.pack", entityMember],
+  ]);
+  const manifest = testManifest(Object.fromEntries(
+    [...artifacts].map(([name, bytes]) => [
+      name,
+      [bytes.byteLength, hash(bytes)],
+    ]),
+  ));
+  const requested = new Set<string>();
+  await installFetch(manifest, async (path) => {
+    const artifact = [...artifacts].find(([name]) => path.endsWith(`-${name}`));
+    assert.ok(artifact, `unexpected request ${path}`);
+    requested.add(artifact[0]);
+    return new Response(body(artifact[1]));
+  });
+
+  const projected = [];
+  for await (const entity of new Data(manifest).projectEntities(
+    "subject",
+    ["score"],
+    undefined,
+    "whole",
+  )) projected.push(entity);
+
+  assert.deepEqual(projected, [
+    {
+      kind: "subject",
+      key: (1 << 24) | 7,
+      fields: { score: 8.6 },
+    },
+    {
+      kind: "subject",
+      key: (1 << 24) | 8,
+      fields: { score: null },
+    },
+  ]);
+  assert.deepEqual(requested, new Set(["entities.idx", "entities.pack"]));
 });
 
 test("resolves and caches an Episode owning Subject from fixed-width lookups", async () => {

@@ -269,16 +269,20 @@ test("uses the result row tie-breaker for ordered semantic highlights", async ()
   }]);
 });
 
-test("maps projected Episode fields to their owning Subject without another lookup", async () => {
+test("maps ordered Episode fields to their owning Subject without retaining every scan", async () => {
   const episodeSource: QueryDataSource = {
     scan: async function* (owner) {
       if (owner !== "episode") return;
-      yield {
-        kind: "entity",
-        owner: "episode",
-        ref: "episode:17",
-        fields: { name: "Episode 17", subjectRef: "subject:3" },
-      };
+      for (const [episode, subject] of [[17, 3], [18, 4]] as const)
+        yield {
+          kind: "entity",
+          owner: "episode",
+          ref: `episode:${episode}`,
+          fields: {
+            name: `Episode ${episode}`,
+            subjectRef: `subject:${subject}`,
+          },
+        };
     },
   };
   const query: QueryDocument = {
@@ -296,6 +300,8 @@ test("maps projected Episode fields to their owning Subject without another look
         }],
       },
     },
+    orderBy: [{ column: "name", direction: "desc", nulls: "last" }],
+    limit: 1,
   };
   const entities: QueryResultEntity[] = [];
 
@@ -304,11 +310,264 @@ test("maps projected Episode fields to their owning Subject without another look
     onResultEntities: (rowEntities) => entities.push(...rowEntities),
   });
 
-  assert.deepEqual(result.rows, [{ name: "Episode 17" }]);
+  assert.deepEqual(result.rows, [{ name: "Episode 18" }]);
+  assert.deepEqual(entities, [{
+    ref: "episode:18",
+    graphRef: "subject:4",
+  }]);
+});
+
+test("retains Episode ownership when a set operator merges duplicate rows", async () => {
+  const episodeSource: QueryDataSource = {
+    scan: async function* (owner) {
+      if (owner !== "episode") return;
+      yield {
+        kind: "entity",
+        owner: "episode",
+        ref: "episode:17",
+        fields: { name: "Episode 17", subjectRef: "subject:3" },
+      };
+    },
+  };
+  const project = (input: string) => ({
+    kind: "project" as const,
+    input,
+    columns: [{
+      name: "name",
+      value: { kind: "field" as const, binding: "episode", field: "name" },
+    }],
+  });
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "union",
+    parameters: {},
+    operators: {
+      scanA: { kind: "scan", owner: "episode", binding: "episode" },
+      projectA: project("scanA"),
+      scanB: { kind: "scan", owner: "episode", binding: "episode" },
+      projectB: project("scanB"),
+      union: {
+        kind: "union",
+        branches: [
+          {
+            input: "projectA",
+            columns: [
+              { output: "name", input: "name" },
+            ],
+          },
+          {
+            input: "projectB",
+            columns: [
+              { output: "name", input: "name" },
+            ],
+          },
+        ],
+      },
+    },
+  };
+  const entities: QueryResultEntity[] = [];
+
+  await executeQuery(query, {}, episodeSource, {
+    pageSize: 20,
+    onResultEntities: (rowEntities) => entities.push(...rowEntities),
+  });
+
+  assert.deepEqual(entities, [
+    { ref: "episode:17", graphRef: "subject:3" },
+  ]);
+});
+
+test("resolves an Episode literal after its scanned row left an ordered Top-N", async () => {
+  const episodeSource = {
+    scan: async function* (owner: Parameters<QueryDataSource["scan"]>[0]) {
+      if (owner !== "episode") return;
+      for (const [episode, subject] of [[17, 3], [18, 4]] as const)
+        yield {
+          kind: "entity" as const,
+          owner: "episode" as const,
+          ref: `episode:${episode}` as const,
+          fields: { subjectRef: `subject:${subject}` },
+        };
+    },
+    resolveEpisodeGraphRef: async (ref: `episode:${number}`) =>
+      ref === "episode:17" ? "subject:3" as const
+        : ref === "episode:18" ? "subject:4" as const
+        : null,
+  } as QueryDataSource & {
+    resolveEpisodeGraphRef(
+      ref: `episode:${number}`,
+    ): Promise<`subject:${number}` | null>;
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "project",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "episode", binding: "episode" },
+      project: {
+        kind: "project",
+        input: "scan",
+        columns: [
+          {
+            name: "literal",
+            value: { kind: "literal", value: "episode:17" },
+          },
+          {
+            name: "sort",
+            value: { kind: "field", binding: "episode", field: "id" },
+          },
+        ],
+      },
+    },
+    orderBy: [{ column: "sort", direction: "desc", nulls: "last" }],
+    limit: 1,
+  };
+  const entities: QueryResultEntity[] = [];
+
+  const result = await executeQuery(query, {}, episodeSource, {
+    pageSize: 20,
+    onResultEntities: (rowEntities) => entities.push(...rowEntities),
+  });
+
+  assert.deepEqual(result.rows, [{ literal: "episode:17", sort: 18 }]);
+  assert.deepEqual(entities, [
+    { ref: "episode:17", graphRef: "subject:3" },
+    { ref: "episode:18", graphRef: "subject:4" },
+  ]);
+});
+
+test("does not resolve Episode refs from rows discarded by ordered Top-N", async () => {
+  const episodeSource: QueryDataSource = {
+    scan: async function* () {},
+    resolveEpisodeGraphRef: async (ref) => {
+      if (ref === "episode:17")
+        throw new Error("discarded Episode must not be resolved");
+      return ref === "episode:18" ? "subject:4" : null;
+    },
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "values",
+    parameters: {},
+    operators: {
+      values: {
+        kind: "values",
+        columns: ["episode", "sort"],
+        rows: [["episode:17", 17], ["episode:18", 18]],
+      },
+    },
+    orderBy: [{ column: "sort", direction: "desc", nulls: "last" }],
+    limit: 1,
+  };
+  const entities: QueryResultEntity[] = [];
+
+  const result = await executeQuery(query, {}, episodeSource, {
+    pageSize: 20,
+    onResultEntities: (rowEntities) => entities.push(...rowEntities),
+  });
+
+  assert.deepEqual(result.rows, [{ episode: "episode:18", sort: 18 }]);
+  assert.deepEqual(entities, [{
+    ref: "episode:18",
+    graphRef: "subject:4",
+  }]);
+});
+
+test("does not retain Episode ownership from rows discarded by an intermediate operator", async () => {
+  const resolved: string[] = [];
+  const episodeSource: QueryDataSource = {
+    scan: async function* (owner) {
+      if (owner !== "episode") return;
+      yield {
+        kind: "entity",
+        owner: "episode",
+        ref: "episode:17",
+        fields: { subjectRef: "subject:3" },
+      };
+    },
+    resolveEpisodeGraphRef: async (ref) => {
+      resolved.push(ref);
+      return "subject:4";
+    },
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "union",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "episode", binding: "episode" },
+      discarded: {
+        kind: "filter",
+        input: "scan",
+        predicate: { kind: "literal", value: false },
+      },
+      discardedProjection: {
+        kind: "project",
+        input: "discarded",
+        columns: [{
+          name: "episode",
+          value: { kind: "literal", value: "episode:17" },
+        }],
+      },
+      literal: {
+        kind: "values",
+        columns: ["episode"],
+        rows: [["episode:17"]],
+      },
+      union: {
+        kind: "union",
+        branches: [
+          {
+            input: "discardedProjection",
+            columns: [{ output: "episode", input: "episode" }],
+          },
+          {
+            input: "literal",
+            columns: [{ output: "episode", input: "episode" }],
+          },
+        ],
+      },
+    },
+  };
+  const entities: QueryResultEntity[] = [];
+
+  const result = await executeQuery(query, {}, episodeSource, {
+    pageSize: 20,
+    onResultEntities: (rowEntities) => entities.push(...rowEntities),
+  });
+
+  assert.deepEqual(result.rows, [{ episode: "episode:17" }]);
+  assert.deepEqual(resolved, ["episode:17"]);
   assert.deepEqual(entities, [{
     ref: "episode:17",
-    graphRef: "subject:3",
+    graphRef: "subject:4",
   }]);
+});
+
+test("validates Episode ownership even when highlights are disabled", async () => {
+  const invalidEpisodeSource: QueryDataSource = {
+    scan: async function* () {
+      yield {
+        kind: "entity",
+        owner: "episode",
+        ref: "episode:17",
+        fields: { subjectRef: "person:3" },
+      };
+    },
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "scan",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "episode", binding: "episode" },
+    },
+  };
+
+  await assert.rejects(
+    executeQuery(query, {}, invalidEpisodeSource, { pageSize: 20 }),
+    /subjectRef must identify a Subject/,
+  );
 });
 
 test("looks up one release-local fact by its typed FactRef", async () => {

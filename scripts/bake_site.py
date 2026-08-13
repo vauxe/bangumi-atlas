@@ -14,7 +14,9 @@ import argparse
 import gzip
 import hashlib
 import heapq
+import math
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -209,6 +211,41 @@ def validate_media_flag_values(values: np.ndarray) -> None:
         )
     if len(media) and (int(media.min()) < 0 or int(media.max()) >= 8):
         raise ValueError("media exceeds the three published flags bits")
+
+
+def subject_query_year(value: Any) -> int:
+    """Encode Subject.date with the browser query's exact year semantics."""
+
+    if not isinstance(value, str):
+        return 0
+    match = re.match(r"^([0-9]{4})(?:-|$)", value)
+    if match is None:
+        return 0
+    year = int(match.group(1))
+    if year == 0:
+        raise ValueError(
+            "Subject query year 0000 conflicts with the null sentinel"
+        )
+    return year
+
+
+def subject_query_score(value: Any) -> int:
+    """Encode only scores that the u8 query column can reproduce exactly."""
+
+    if value is None or value == 0:
+        return 0
+    score = float(value)
+    scaled = score * 10
+    if not math.isfinite(scaled):
+        raise ValueError(
+            f"Subject score {value!r} cannot be represented losslessly as u8"
+        )
+    encoded = round(scaled)
+    if encoded < 0 or encoded > 255 or encoded / 10 != score:
+        raise ValueError(
+            f"Subject score {value!r} cannot be represented losslessly as u8"
+        )
+    return encoded
 
 
 def quantiles(sizes: list[int]) -> dict[str, int]:
@@ -1404,6 +1441,7 @@ def bake_release(  # noqa: PLR0915
             "type",
             "name",
             "name_cn",
+            "date",
             "score",
             "nsfw",
             "meta_tags",
@@ -1430,7 +1468,7 @@ def bake_release(  # noqa: PLR0915
     present_r = np.zeros(n, dtype=bool)
     nsfw_arr = np.zeros(n, dtype=bool)
     media_vals = np.zeros(n, dtype=np.int64)
-    score_values = np.zeros(n, dtype=np.float64)
+    score_u8 = np.zeros(n, dtype=np.uint8)
     meta_tags_r: list[list[str] | None] = [None] * n
 
     sub_ranks = ranks_for_source_ids(
@@ -1445,7 +1483,14 @@ def bake_release(  # noqa: PLR0915
         cn_names_r[rank] = sub_index["name_cn"][i]
         nsfw_arr[rank] = bool(sub_index["nsfw"][i])
         media_vals[rank] = int(sub_index["type"][i])
-        score_values[rank] = float(sub_index["score"][i] or 0)
+        query_year = subject_query_year(sub_index["date"][i])
+        if int(year_r[rank]) != query_year:
+            raise ValueError(
+                "Subject year query column differs from Subject.date: "
+                f"id={sub_index['id'][i]}, layout={int(year_r[rank])}, "
+                f"query={query_year}"
+            )
+        score_u8[rank] = subject_query_score(sub_index["score"][i])
         meta_tags_r[rank] = sub_index["meta_tags"][i]
     per_ranks = ranks_for_source_ids(
         rank_lookup, sr.KIND_PERSON, per_names["id"]
@@ -1521,11 +1566,6 @@ def bake_release(  # noqa: PLR0915
     validate_media_flag_values(media_vals)
     flags |= (media_vals.astype(np.uint8)) << 2
     (SITE / "flags.bin").write_bytes(flags.tobytes())
-    score_u8 = np.zeros(n, dtype=np.uint8)
-    has_score = score_values != 0
-    score_u8[has_score] = np.round(score_values[has_score] * 10).astype(
-        np.uint8
-    )
     (SITE / "score.bin").write_bytes(score_u8.tobytes())
     tag_counts: Counter[str] = Counter()
     for meta_tags in meta_tags_r:
@@ -1562,7 +1602,6 @@ def bake_release(  # noqa: PLR0915
         meta_tags_r,
         nsfw_arr,
         media_vals,
-        score_values,
         iso_r,
         coords_f32,
         positions_u16,
@@ -1570,7 +1609,6 @@ def bake_release(  # noqa: PLR0915
         size_u8,
         flags,
         score_u8,
-        has_score,
         tag_counts,
         tag_bit,
         tag_mask,
@@ -2596,6 +2634,7 @@ def bake_release(  # noqa: PLR0915
                 "atlas-query-v1",
                 "fact-ref-v1",
                 "full-text-v1",
+                "subject-query-columns-v1",
             ],
             "contractDigest": query_schema_digest(),
         },

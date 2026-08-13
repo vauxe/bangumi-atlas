@@ -1490,6 +1490,12 @@ export class QueryBar {
         return;
       }
     }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      this.closePanel();
+      this.activateSubmit();
+      return;
+    }
     if (
       (event.key === "Backspace" || event.key === "ArrowLeft") &&
       this.text.selectionStart === 0 &&

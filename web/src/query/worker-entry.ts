@@ -49,7 +49,7 @@ const runtimeSource = loadManifest().then(async (manifest) => {
       "UNSUPPORTED_QUERY",
       "当前 AtlasRelease 与查询客户端不兼容",
     );
-  const data = new Data();
+  const data = new Data(manifest);
   return {
     manifest,
     source: new SiteQueryDataSource(
