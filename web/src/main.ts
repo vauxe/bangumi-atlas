@@ -187,7 +187,6 @@ async function boot(): Promise<void> {
   // ---- 几何流:场景已就绪,首块回调即可渲染 ----
   let geometryComplete = false;
   let pendingUrlHash: string | null = null;
-  let backgroundStarted = false;
   const idle =
     "requestIdleCallback" in window
       ? (fn: () => void) => requestIdleCallback(fn, { timeout: 4000 })
@@ -198,12 +197,6 @@ async function boot(): Promise<void> {
         ? ""
         : `渲染 ${loaded.toLocaleString()} / ${manifest.n_nodes.toLocaleString()} 节点`;
     scene.geometryGrew();
-    // 第一批节点绘制后,低优先级补齐反向索引
-    // (骨架边与标签表不再预载:边和名字都只在选中态由工作集呈现)
-    if (!backgroundStarted && loaded > 0) {
-      backgroundStarted = true;
-      runTask(ensureRankIndex(), "反向索引加载");
-    }
   });
 
   runTask(
@@ -216,6 +209,10 @@ async function boot(): Promise<void> {
       pendingUrlHash = null;
       if (hash !== null && location.hash === hash)
         runTask(applyUrl(false), "深链恢复");
+      // 反向索引不参与首屏；仅在关键几何传输完成后空闲预热。
+      // 深链、选中和查询仍会通过 ensureRankIndex 按需立即加载。
+      if (!saveData())
+        idle(() => runTask(ensureRankIndex(), "反向索引加载"));
     }),
     "几何数据加载",
   );
