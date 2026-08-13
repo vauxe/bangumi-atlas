@@ -1527,7 +1527,7 @@ test("reads an affine u16 xyz position by rank", async () => {
   });
 });
 
-test("streams and decodes complete affine u16 xyz geometry", async () => {
+test("streams affine geometry without empty or duplicate progress", async () => {
   const artifacts: Record<string, Uint8Array> = {
     "positions.bin": u16le([0, 0, 0, 65_535, 65_535, 65_535]),
     "year.bin": new Uint8Array(new Uint16Array([1999, 2000]).buffer),
@@ -1566,13 +1566,35 @@ test("streams and decodes complete affine u16 xyz geometry", async () => {
     const bytes = logicalName ? artifacts[logicalName] : undefined;
     assert.ok(bytes);
     fetched.add(logicalName as string);
-    return new Response(bytes.buffer as ArrayBuffer);
+    const middle = bytes.byteLength / 2;
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.subarray(0, middle));
+        queueMicrotask(() => {
+          controller.enqueue(bytes.subarray(middle));
+          controller.close();
+        });
+      },
+    }));
   });
 
+  const nowDescriptor = Object.getOwnPropertyDescriptor(performance, "now");
+  Object.defineProperty(performance, "now", {
+    configurable: true,
+    value: () => 100,
+  });
   const stream = openGeometry(manifest);
-  await stream.start(() => undefined);
+  const loadedCounts: number[] = [];
+  try {
+    await stream.start((loaded) => loadedCounts.push(loaded));
+  } finally {
+    if (nowDescriptor)
+      Object.defineProperty(performance, "now", nowDescriptor);
+    else Reflect.deleteProperty(performance, "now");
+  }
 
   assert.equal(stream.geo.loaded, 2);
+  assert.deepEqual(loadedCounts, [1, 2]);
   assert.deepEqual(Array.from(stream.geo.positions), [1, -2, 3, 2.5, -1, 13]);
   assert.deepEqual([...fetched].sort(), [
     "flags.bin",
