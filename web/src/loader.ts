@@ -1691,6 +1691,33 @@ function openRankRows<T>(
     );
   };
 
+  const loadBlocks = async (
+    blocks: readonly number[],
+    signal?: AbortSignal,
+  ): Promise<readonly (readonly [number, T[]])[]> => {
+    if (!blocks.length) return [];
+    const idx = await index(signal);
+    const release = await prefetchMemberRanges(
+      family,
+      packPath,
+      blocks.map((block) => {
+        const off = idx[block] ?? 0;
+        return [off, (idx[block + 1] ?? off) - off] as const;
+      }),
+      signal,
+    );
+    try {
+      return await Promise.all(
+        blocks.map(async (block) => [
+          block,
+          await loadBlock(block, signal),
+        ] as const),
+      );
+    } finally {
+      release();
+    }
+  };
+
   return {
     row(rank): T | null {
       if (
@@ -1713,7 +1740,7 @@ function openRankRows<T>(
       for (const rank of ranks)
         if (Number.isInteger(rank) && rank >= 0 && rank < manifest.n_nodes)
           needed.add(Math.floor(rank / blockSize));
-      await Promise.all([...needed].map((block) => loadBlock(block, signal)));
+      await loadBlocks([...needed], signal);
     },
     async read(ranks, signal): Promise<Map<number, T>> {
       const requested = [...new Set(ranks)].filter(
@@ -1723,14 +1750,7 @@ function openRankRows<T>(
       const needed = new Set(
         requested.map((rank) => Math.floor(rank / blockSize)),
       );
-      const blocks = new Map(
-        await Promise.all(
-          [...needed].map(async (block) => [
-            block,
-            await loadBlock(block, signal),
-          ] as const),
-        ),
-      );
+      const blocks = new Map(await loadBlocks([...needed], signal));
       const result = new Map<number, T>();
       for (const rank of requested) {
         const block = Math.floor(rank / blockSize);
