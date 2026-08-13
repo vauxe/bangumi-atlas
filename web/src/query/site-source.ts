@@ -18,6 +18,7 @@ import type {
 import type { FullTextField, LookupField } from "./document";
 
 type StructuralOwner = Exclude<Owner, "episode">;
+const QUERY_SCAN_BATCH_SIZE = 4096;
 
 export interface SiteQueryReader {
   entities(
@@ -31,6 +32,12 @@ export interface SiteQueryReader {
     signal?: AbortSignal,
     access?: ScanAccess,
   ): AsyncIterable<ProjectedEntity>;
+  projectEntityBatches?(
+    owner: StructuralOwner,
+    fields: readonly string[],
+    signal?: AbortSignal,
+    access?: ScanAccess,
+  ): AsyncIterable<readonly ProjectedEntity[]>;
   /** Candidate projection preserves projectEntities(owner) relative order. */
   projectEntityCandidates?(
     owner: StructuralOwner,
@@ -403,6 +410,7 @@ function factValue(fact: Fact): FactValue {
 
 export class SiteQueryDataSource implements QueryDataSource {
   private mappingsPromise: Promise<Mappings | null> | null = null;
+  readonly scanBatches?: NonNullable<QueryDataSource["scanBatches"]>;
   readonly resolveEpisodeGraphRef?: NonNullable<
     QueryDataSource["resolveEpisodeGraphRef"]
   >;
@@ -412,6 +420,9 @@ export class SiteQueryDataSource implements QueryDataSource {
     private searchIndex?: SiteQuerySearch,
     readonly releaseId?: string,
   ) {
+    if (reader.projectEntityBatches)
+      this.scanBatches = (owner, signal, fields) =>
+        this.projectedScanBatches(owner, signal, fields);
     if (reader.episodeSubjectId)
       this.resolveEpisodeGraphRef = async (ref, signal) => {
         const parsed = parseEntityRef(ref);
@@ -434,6 +445,48 @@ export class SiteQueryDataSource implements QueryDataSource {
   private mappings(): Promise<Mappings | null> {
     this.mappingsPromise ??= this.reader.mappings?.() ?? Promise.resolve(null);
     return this.mappingsPromise;
+  }
+
+  private async *projectedScanBatches(
+    owner: Owner,
+    signal?: AbortSignal,
+    fields: readonly string[] = [],
+  ): AsyncIterable<readonly EntityValue[]> {
+    if (owner !== "episode") {
+      const requested = new Set(fields);
+      const physicalFields = physicalProjectionFields(owner, fields);
+      const mappings = owner === "subject" && requested.has("platform")
+        ? await this.mappings()
+        : null;
+      for await (const batch of this.reader.projectEntityBatches!(
+        owner,
+        physicalFields,
+        signal,
+        "whole",
+      )) {
+        signal?.throwIfAborted();
+        if (!Array.isArray(batch))
+          throw new TypeError("SiteRelease returned an invalid entity batch");
+        const projected: EntityValue[] = [];
+        for (const entity of batch) {
+          signal?.throwIfAborted();
+          if (entity.kind !== owner)
+            throw new TypeError(`SiteRelease returned ${entity.kind} for ${owner} scan`);
+          projected.push(projectedEntityValue(entity, requested, mappings));
+        }
+        if (projected.length) yield projected;
+      }
+      return;
+    }
+    let batch: EntityValue[] = [];
+    for await (const entity of this.scan(owner, signal, fields, "whole")) {
+      batch.push(entity);
+      if (batch.length === QUERY_SCAN_BATCH_SIZE) {
+        yield batch;
+        batch = [];
+      }
+    }
+    if (batch.length) yield batch;
   }
 
   async *scan(

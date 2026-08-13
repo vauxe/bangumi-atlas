@@ -1655,8 +1655,9 @@ test("projects verified Subject columns through Data in archive-id order", async
     return new Response(body(artifact[1]));
   });
 
+  const data = new Data(manifest);
   const projected = [];
-  for await (const entity of new Data(manifest).projectEntities(
+  for await (const entity of data.projectEntities(
     "subject",
     ["name", "nameCn", "type", "year", "score", "nsfw"],
     undefined,
@@ -1701,7 +1702,109 @@ test("projects verified Subject columns through Data in archive-id order", async
       },
     },
   ]);
+  const projectedBatches = [];
+  for await (const batch of data.projectEntityBatches(
+    "subject",
+    ["name", "nameCn", "type", "year", "score", "nsfw"],
+    undefined,
+    "whole",
+  )) projectedBatches.push(batch);
+  assert.deepEqual(projectedBatches.flat(), projected);
   assert.equal(requested.has("entities.pack"), false);
+});
+
+test("projects identity-only point reads without entities.pack", async () => {
+  const rankBytes = Uint8Array.of(0, 0, 0);
+  const namesMember = gzipSync(JSON.stringify([["Original", "中文名", 1]]));
+  const namesIndex = u32le([0, namesMember.byteLength]);
+  const artifacts = new Map<string, Uint8Array>([
+    ["rank-by-key.bin", rankBytes],
+    ["names.idx", namesIndex],
+    ["names.pack", namesMember],
+  ]);
+  const manifest = testManifest(Object.fromEntries(
+    [...artifacts].map(([name, bytes]) => [
+      name,
+      [bytes.byteLength, hash(bytes)],
+    ]),
+  ));
+  const requested = new Set<string>();
+  await installFetch(manifest, async (path) => {
+    const artifact = [...artifacts].find(([name]) => path.endsWith(`-${name}`));
+    assert.ok(artifact, `unexpected request ${path}`);
+    requested.add(artifact[0]);
+    return new Response(body(artifact[1]));
+  });
+
+  const projected = await new Data(manifest).projectEntity(
+    1 << 24,
+    ["ref", "name", "nameCn"],
+  );
+
+  assert.deepEqual(projected, {
+    kind: "subject",
+    key: 1 << 24,
+    fields: { name: "Original", nameCn: "中文名" },
+  });
+  assert.deepEqual(
+    requested,
+    new Set(["rank-by-key.bin", "names.idx", "names.pack"]),
+  );
+});
+
+test("cancels an identity-only point read while the shared rank index loads", async () => {
+  const rankBytes = Uint8Array.of(0, 0, 0);
+  const namesMember = gzipSync(JSON.stringify([["Original", null, 1]]));
+  const namesIndex = u32le([0, namesMember.byteLength]);
+  const artifacts = new Map<string, Uint8Array>([
+    ["rank-by-key.bin", rankBytes],
+    ["names.idx", namesIndex],
+    ["names.pack", namesMember],
+  ]);
+  const manifest = testManifest(Object.fromEntries(
+    [...artifacts].map(([name, bytes]) => [
+      name,
+      [bytes.byteLength, hash(bytes)],
+    ]),
+  ));
+  let rankStarted = false;
+  let finishRank: (() => void) | undefined;
+  await installFetch(manifest, async (path) => {
+    if (path.endsWith("rank-by-key.bin")) {
+      rankStarted = true;
+      await new Promise<void>((resolve) => {
+        finishRank = resolve;
+      });
+      return new Response(body(rankBytes));
+    }
+    const artifact = [...artifacts].find(([name]) => path.endsWith(`-${name}`));
+    assert.ok(artifact, `unexpected request ${path}`);
+    return new Response(body(artifact[1]));
+  });
+  const controller = new AbortController();
+  const pending = new Data(manifest).projectEntity(
+    1 << 24,
+    ["ref", "name"],
+    controller.signal,
+  );
+  while (!rankStarted)
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  controller.abort();
+
+  try {
+    await assert.rejects(
+      Promise.race([
+        pending,
+        new Promise((_resolve, reject) =>
+          setTimeout(() => reject(new Error("point read did not cancel")), 50)
+        ),
+      ]),
+      (error: unknown) =>
+        error instanceof DOMException && error.name === "AbortError",
+    );
+  } finally {
+    finishRank?.();
+  }
 });
 
 test("falls back to entities.pack when a release lacks Subject columns", async () => {
@@ -1755,6 +1858,52 @@ test("falls back to entities.pack when a release lacks Subject columns", async (
     },
   ]);
   assert.deepEqual(requested, new Set(["entities.idx", "entities.pack"]));
+});
+
+test("stops a streaming projection within its current storage member", async () => {
+  const entityMember = gzipSync(JSON.stringify({
+    i: [7, 8],
+    r: [
+      ["First", null, 2, null, "", 8.6],
+      null,
+    ],
+  }));
+  const entityIndex = gzipSync(JSON.stringify({
+    width: 256,
+    k: { "1": [[7, 8, 0, entityMember.byteLength]] },
+  }));
+  const artifacts = new Map<string, Uint8Array>([
+    ["entities.idx", entityIndex],
+    ["entities.pack", entityMember],
+  ]);
+  const manifest = testManifest(Object.fromEntries(
+    [...artifacts].map(([name, bytes]) => [
+      name,
+      [bytes.byteLength, hash(bytes)],
+    ]),
+  ));
+  await installFetch(manifest, async (path) => {
+    const artifact = [...artifacts].find(([name]) => path.endsWith(`-${name}`));
+    assert.ok(artifact, `unexpected request ${path}`);
+    return new Response(body(artifact[1]));
+  });
+  const projected = [];
+
+  for await (const entity of new Data(manifest).projectEntities(
+    "subject",
+    ["score"],
+    undefined,
+    "stream",
+  )) {
+    projected.push(entity);
+    break;
+  }
+
+  assert.deepEqual(projected, [{
+    kind: "subject",
+    key: (1 << 24) | 7,
+    fields: { score: 8.6 },
+  }]);
 });
 
 test("resolves and caches an Episode owning Subject from fixed-width lookups", async () => {
