@@ -1054,6 +1054,217 @@ test("requests display identity when a scanned entity is returned as a value", a
   );
 });
 
+test("hydrates only the ordered Subject boundary before the canonical tie-break", async () => {
+  const identities = new Map([
+    ["subject:1", { name: "Z", nameCn: "乙", score: 9 }],
+    ["subject:2", { name: "A", nameCn: "甲", score: 9 }],
+    ["subject:3", { name: "M", nameCn: "中", score: 8 }],
+  ] as const);
+  let scanFields: readonly string[] = [];
+  let hydratedRefs: readonly string[] = [];
+  let hydrationFields: readonly string[] = [];
+  const projectedSource: QueryDataSource = {
+    scan: async function* (owner, _signal, fields) {
+      assert.equal(owner, "subject");
+      scanFields = fields ?? [];
+      for (const [ref, identity] of identities) {
+        const projected: EntityValue["fields"] = { score: identity.score };
+        if (scanFields.includes("name")) projected.name = identity.name;
+        if (scanFields.includes("nameCn")) projected.nameCn = identity.nameCn;
+        yield { kind: "entity", owner: "subject", ref, fields: projected };
+      }
+    },
+    scanCandidates: async function* (owner, refs, _signal, fields) {
+      assert.equal(owner, "subject");
+      hydratedRefs = refs;
+      hydrationFields = fields ?? [];
+      for (const [ref, identity] of identities) {
+        if (!refs.includes(ref)) continue;
+        yield {
+          kind: "entity",
+          owner: "subject",
+          ref,
+          fields: { name: identity.name, nameCn: identity.nameCn },
+        };
+      }
+    },
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "project",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "subject", binding: "subject" },
+      filter: {
+        kind: "filter",
+        input: "scan",
+        predicate: {
+          kind: "compare",
+          operator: "gte",
+          left: { kind: "field", binding: "subject", field: "score" },
+          right: { kind: "literal", value: 8 },
+        },
+      },
+      project: {
+        kind: "project",
+        input: "filter",
+        columns: [
+          { name: "ref", value: { kind: "field", binding: "subject", field: "ref" } },
+          { name: "name", value: { kind: "field", binding: "subject", field: "name" } },
+          {
+            name: "nameCn",
+            value: { kind: "field", binding: "subject", field: "nameCn" },
+          },
+          {
+            name: "score",
+            value: { kind: "field", binding: "subject", field: "score" },
+          },
+        ],
+      },
+    },
+    orderBy: [{ column: "score", direction: "desc", nulls: "last" }],
+    limit: 1,
+  };
+  const resultEntities: QueryResultEntity[] = [];
+
+  const result = await executeQuery(query, {}, projectedSource, {
+    pageSize: 1,
+    onResultEntities: (entities) => resultEntities.push(...entities),
+  });
+
+  assert.deepEqual(scanFields, ["ref", "score"]);
+  assert.deepEqual(hydrationFields, ["name", "nameCn"]);
+  assert.deepEqual(new Set(hydratedRefs), new Set(["subject:1", "subject:2"]));
+  assert.deepEqual(result.rows, [{
+    ref: "subject:2",
+    name: "A",
+    nameCn: "甲",
+    score: 9,
+  }]);
+  assert.deepEqual(result.evidence[0]?.name, [{
+    kind: "entity-field",
+    ref: "subject:2",
+    field: "name",
+  }]);
+  assert.deepEqual(resultEntities, [{
+    ref: "subject:2",
+    graphRef: "subject:2",
+  }]);
+});
+
+test("uses known canonical row prefixes to narrow late identity candidates", async () => {
+  const rows = [
+    { ref: "subject:1" as const, date: "2020-01-01", name: "Z", score: 9 },
+    { ref: "subject:2" as const, date: "2021-01-01", name: "A", score: 9 },
+    { ref: "subject:3" as const, date: "2022-01-01", name: "M", score: 8 },
+  ];
+  let hydratedRefs: readonly string[] = [];
+  const projectedSource: QueryDataSource = {
+    scan: async function* (_owner, _signal, fields) {
+      for (const item of rows) {
+        const projected: EntityValue["fields"] = {
+          date: item.date,
+          score: item.score,
+        };
+        if (fields?.includes("name")) projected.name = item.name;
+        yield {
+          kind: "entity",
+          owner: "subject",
+          ref: item.ref,
+          fields: projected,
+        };
+      }
+    },
+    scanCandidates: async function* (_owner, refs) {
+      hydratedRefs = refs;
+      for (const item of rows) {
+        if (!refs.includes(item.ref)) continue;
+        yield {
+          kind: "entity",
+          owner: "subject",
+          ref: item.ref,
+          fields: { name: item.name },
+        };
+      }
+    },
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "project",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "subject", binding: "subject" },
+      project: {
+        kind: "project",
+        input: "scan",
+        columns: [
+          { name: "ref", value: { kind: "field", binding: "subject", field: "ref" } },
+          { name: "name", value: { kind: "field", binding: "subject", field: "name" } },
+          { name: "date", value: { kind: "field", binding: "subject", field: "date" } },
+          {
+            name: "score",
+            value: { kind: "field", binding: "subject", field: "score" },
+          },
+        ],
+      },
+    },
+    orderBy: [{ column: "score", direction: "desc", nulls: "last" }],
+    limit: 1,
+  };
+
+  const result = await executeQuery(query, {}, projectedSource, { pageSize: 1 });
+
+  assert.deepEqual(hydratedRefs, ["subject:1"]);
+  assert.deepEqual(result.rows, [{
+    ref: "subject:1",
+    name: "Z",
+    date: "2020-01-01",
+    score: 9,
+  }]);
+});
+
+test("keeps Subject names in the scan when ordering depends on them", async () => {
+  let requested: readonly string[] = [];
+  let candidateReads = 0;
+  const projectedSource: QueryDataSource = {
+    scan: async function* (_owner, _signal, fields) {
+      requested = fields ?? [];
+      yield {
+        kind: "entity",
+        owner: "subject",
+        ref: "subject:1",
+        fields: { name: "A" },
+      };
+    },
+    scanCandidates: async function* () {
+      candidateReads++;
+    },
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "project",
+    parameters: {},
+    operators: {
+      scan: { kind: "scan", owner: "subject", binding: "subject" },
+      project: {
+        kind: "project",
+        input: "scan",
+        columns: [
+          { name: "name", value: { kind: "field", binding: "subject", field: "name" } },
+        ],
+      },
+    },
+    orderBy: [{ column: "name", direction: "asc", nulls: "last" }],
+    limit: 1,
+  };
+
+  const result = await executeQuery(query, {}, projectedSource, { pageSize: 1 });
+
+  assert.deepEqual(requested, ["name"]);
+  assert.equal(candidateReads, 0);
+  assert.deepEqual(result.rows, [{ name: "A" }]);
+});
+
 test("pushes fields through projected entity aliases", async () => {
   let requested: readonly string[] = [];
   const projectedSource: QueryDataSource = {

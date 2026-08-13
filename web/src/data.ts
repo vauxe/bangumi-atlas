@@ -987,6 +987,38 @@ export class Data {
     if (!keys.length) return;
     const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
     const requested = new Set(fieldNames);
+    if (
+      this.queryNames?.read &&
+      fieldNames.every((field) =>
+        field === "ref" || field === "id" || field === "name" || field === "nameCn"
+      )
+    ) {
+      const candidates = [...new Set(keys)].sort((left, right) => left - right);
+      for (const key of candidates)
+        if (!Number.isSafeInteger(key) || key >>> 24 !== kind)
+          throw new TypeError("candidate EntityKey does not match its owner");
+      await ensureRankIndex(signal);
+      signal?.throwIfAborted();
+      const ranked = candidates.flatMap((key) => {
+        const rank = rankOfKey(key);
+        return rank === null ? [] : [{ key, rank }];
+      });
+      const names = await this.queryNames.read(
+        ranked.map(({ rank }) => rank),
+        signal,
+      );
+      for (const { key, rank } of ranked) {
+        const name = names.get(rank);
+        if (!name || name[2] !== kind)
+          throw new Error("entity identity name has the wrong kind");
+        const fields: Record<string, ProjectedEntityField> = {};
+        if (requested.has("name")) fields.name = name[0];
+        if (requested.has("nameCn") && kind === 1)
+          fields.nameCn = name[1] ?? "";
+        yield { kind: owner, key, fields };
+      }
+      return;
+    }
     const idx = await loadGzJson<EntitiesIdx>("entities.idx");
     const ranges = idx.k[String(kind)] ?? [];
     const rangeCandidates = new Map<Loc4, Set<number>>();
