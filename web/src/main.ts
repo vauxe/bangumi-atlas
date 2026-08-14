@@ -378,7 +378,8 @@ async function boot(): Promise<void> {
     state.neighbors = nb.ranks;
     state.neighborLabels = nb.labels;
     runTask(
-      drawer.show(rank, key, episodeId ?? undefined).then(warmTextIndex),
+      drawer.show(rank, key, neighborRanks, episodeId ?? undefined)
+        .then(warmTextIndex),
       "详情加载",
     );
     notify();

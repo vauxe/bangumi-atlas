@@ -587,62 +587,51 @@ test("renders named infobox list items without flattening their meaning", () => 
   assert.match(element.innerHTML, /查看原始 Wiki 源码/);
 });
 
-test("separates typed connections from the overview scroll", () => {
+test("shows resolved relations only on their tab while the rank cache is cold", async () => {
+  const previousSelection = state.selection;
   const element = new FakeDrawerElement();
+  const selfKey = (1 << 24) | 1;
   const otherRank = 7;
   const otherKey = (1 << 24) | 2;
+  const facts = [{
+    kind: "RELATES_TO" as const,
+    ref: 1,
+    multiplicity: 1,
+    source: selfKey,
+    target: otherKey,
+    relationType: 1,
+    sortOrder: 0,
+  }];
   const drawer = makeDrawer(element, {
     data: {
-      rankOf: (key: number) => key === otherKey ? otherRank : null,
+      rankOf: () => null,
+      entity: async () => null,
+      factsFor: async () => ({ items: facts, total: 1, next: null }),
+      mappings: async () => ({
+        fact_labels: { RELATES_TO: { "1": "续集" } },
+        subject_type: {},
+        platform: {},
+        person_type: {},
+        character_role: {},
+        episode_type: {},
+      }),
     },
-  } as Partial<DrawerDeps>);
-  Reflect.set(drawer, "cur", {
-    rank: 0,
-    key: (1 << 24) | 1,
-    entity: null,
-    mappings: {
-      fact_labels: { RELATES_TO: { "1": "续集" } },
-      subject_type: {},
-      platform: {},
-      person_type: {},
-      character_role: {},
-      episode_type: {},
-    },
-    facts: [{
-      kind: "RELATES_TO",
-      ref: 1,
-      multiplicity: 1,
-      source: (1 << 24) | 1,
-      target: otherKey,
-      relationType: 1,
-      sortOrder: 0,
-    }],
-    factsTotal: 1,
-    factsNext: null,
-    tab: "overview",
-    relationsLoading: false,
-    expanded: false,
-    loading: false,
-    eps: null,
-    epsTotal: 0,
-    epsNext: null,
-    epsExpanded: false,
-    summary: { s: "idle" },
-    summaryOpen: false,
-    infobox: { s: "idle" },
-    descs: new Map(),
-  });
-  const rerender = Reflect.get(drawer, "rerender") as () => void;
+  } as unknown as Partial<DrawerDeps>);
 
-  rerender.call(drawer);
-  assert.doesNotMatch(element.innerHTML, /作品谱系/);
-  assert.doesNotMatch(element.innerHTML, /节点 7/);
+  try {
+    state.selection = 0;
+    await drawer.show(0, selfKey, new Map([[otherKey, otherRank]]));
+    assert.doesNotMatch(element.innerHTML, /作品谱系/);
+    assert.doesNotMatch(element.innerHTML, /节点 7/);
 
-  Reflect.get(drawer, "cur").tab = "relations";
-  rerender.call(drawer);
-  assert.match(element.innerHTML, /作品谱系/);
-  assert.match(element.innerHTML, /续集/);
-  assert.match(element.innerHTML, /节点 7/);
+    element.clickTarget({ tab: "relations" });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    assert.match(element.innerHTML, /作品谱系/);
+    assert.match(element.innerHTML, /续集/);
+    assert.match(element.innerHTML, /节点 7/);
+  } finally {
+    state.selection = previousSelection;
+  }
 });
 
 test("loads summary eagerly but defers episodes and reference by tab", async () => {
@@ -690,7 +679,7 @@ test("loads summary eagerly but defers episodes and reference by tab", async () 
 
   try {
     state.selection = 0;
-    await drawer.show(0, key);
+    await drawer.show(0, key, new Map());
     await new Promise<void>((resolve) => queueMicrotask(resolve));
     assert.deepEqual(reads, ["entity-summary"]);
 
@@ -741,7 +730,7 @@ test("opens the owning subject directly on a requested episode", async () => {
 
   try {
     state.selection = 0;
-    await drawer.show(0, key, 42);
+    await drawer.show(0, key, new Map(), 42);
     await new Promise<void>((resolve) => queueMicrotask(resolve));
 
     assert.match(element.innerHTML, /dossier-tab-episodes/);

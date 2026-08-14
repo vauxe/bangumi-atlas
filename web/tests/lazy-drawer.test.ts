@@ -19,8 +19,11 @@ function deferred<T>(): {
 
 function fakeDrawer(events: string[]): DrawerRuntime {
   return {
-    show: async (rank, key, episodeId) => {
-      events.push(`show:${rank}:${key}:${episodeId ?? ""}`);
+    show: async (rank, key, relationRanks, episodeId) => {
+      const resolved = [...relationRanks]
+        .map(([relationKey, relationRank]) => `${relationKey}=${relationRank}`)
+        .join(",");
+      events.push(`show:${rank}:${key}:${resolved}:${episodeId ?? ""}`);
     },
     hide: () => events.push("hide"),
     syncState: () => events.push("sync-state"),
@@ -36,14 +39,14 @@ test("coalesces drawer preparation and only shows the latest selection", async (
     return loaded.promise;
   });
 
-  const first = drawer.show(1, 101);
-  const second = drawer.show(2, 202, 9);
+  const first = drawer.show(1, 101, new Map([[1001, 11]]));
+  const second = drawer.show(2, 202, new Map([[2002, 22]]), 9);
   assert.equal(loadCount, 1);
 
   loaded.resolve(fakeDrawer(events));
   await Promise.all([first, second]);
 
-  assert.deepEqual(events, ["show:2:202:9"]);
+  assert.deepEqual(events, ["show:2:202:2002=22:9"]);
 });
 
 test("does not open a drawer after the selection was hidden during loading", async () => {
@@ -51,7 +54,7 @@ test("does not open a drawer after the selection was hidden during loading", asy
   const events: string[] = [];
   const drawer = createLazyDrawerRuntime(() => loaded.promise);
 
-  const showing = drawer.show(3, 303);
+  const showing = drawer.show(3, 303, new Map());
   drawer.hide();
   loaded.resolve(fakeDrawer(events));
   await showing;
@@ -68,12 +71,12 @@ test("retries a failed drawer module load", async () => {
     return fakeDrawer(events);
   });
 
-  await assert.rejects(drawer.show(4, 404), /chunk unavailable/);
-  await drawer.show(5, 505);
+  await assert.rejects(drawer.show(4, 404, new Map()), /chunk unavailable/);
+  await drawer.show(5, 505, new Map());
   drawer.hide();
 
   assert.equal(attempt, 2);
-  assert.deepEqual(events, ["show:5:505:", "hide"]);
+  assert.deepEqual(events, ["show:5:505::", "hide"]);
 });
 
 test("syncs a loaded drawer without pulling its chunk into the initial path", async () => {
@@ -86,9 +89,9 @@ test("syncs a loaded drawer without pulling its chunk into the initial path", as
 
   drawer.syncState();
   assert.equal(loadCount, 0);
-  await drawer.show(6, 606);
+  await drawer.show(6, 606, new Map());
   drawer.syncState();
 
   assert.equal(loadCount, 1);
-  assert.deepEqual(events, ["show:6:606:", "sync-state"]);
+  assert.deepEqual(events, ["show:6:606::", "sync-state"]);
 });

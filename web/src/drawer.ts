@@ -16,6 +16,7 @@ import type {
   RelationshipSection,
 } from "./entity-presentation";
 import { esc, html, raw } from "./html";
+import type { ResolvedRelationRanks } from "./lazy-drawer";
 import { factLabel, factPrimaryOther } from "./neighbors";
 import { state, togglePinnedSelection } from "./store";
 import { bgmUrl, TYPE_NAMES, eid, etype } from "./types";
@@ -58,6 +59,7 @@ interface Current {
   entity: StructuralEntity | null;
   mappings: Mappings;
   facts: Fact[];
+  relationRanks: ResolvedRelationRanks;
   factsTotal: number;
   factsNext: string | null;
   tab: DrawerTab;
@@ -296,7 +298,12 @@ export class Drawer {
 
   /** key 由调用方解析传入:深链/行走落点未流式覆盖时
    * geo.key[rank] 还是 0,直接读会查错分片(main 已 Range 点查)。 */
-  async show(rank: number, key: number, episodeId?: number): Promise<void> {
+  async show(
+    rank: number,
+    key: number,
+    relationRanks: ResolvedRelationRanks,
+    episodeId?: number,
+  ): Promise<void> {
     const viewEpoch = ++this.viewEpoch;
     this.cur = null;
     this.open();
@@ -314,6 +321,7 @@ export class Drawer {
       entity,
       mappings,
       facts: factsPage.items,
+      relationRanks,
       factsTotal: factsPage.total,
       factsNext: factsPage.next,
       tab: "overview",
@@ -409,7 +417,9 @@ export class Drawer {
       const label = factLabel(fact, cur.key, cur.mappings);
       const groupKey = `${section.id}\0${label}`;
       const other = factPrimaryOther(fact, cur.key);
-      const rank = this.deps.data.rankOf(other);
+      const rank = other === cur.key
+        ? cur.rank
+        : cur.relationRanks.get(other) ?? null;
       if (rank === null) continue; // 未解析引用不产生可行走 chip
       const inGroup = seen.get(groupKey) ?? new Set<number>();
       if (inGroup.has(rank)) continue;
