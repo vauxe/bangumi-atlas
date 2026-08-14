@@ -601,6 +601,98 @@ def decode_delta_posting(
     return result
 
 
+def text_search_postings_are_valid(
+    stem: str,
+    expected_counts: np.ndarray,
+    expected_hashes: list[Any | None],
+    upper_bound: int,
+    *,
+    bucket_count: int = sr.SEARCH_NGRAM_BUCKETS,
+) -> bool:
+    """Independently verify one hashed member-posting index and its pack."""
+
+    if (
+        len(expected_counts) != bucket_count
+        or len(expected_hashes) != bucket_count
+        or upper_bound < 0
+    ):
+        return False
+    raw = np.frombuffer(site_file(f"{stem}.idx").read_bytes(), dtype="<u4")
+    minimum = bucket_count + 1
+    if len(raw) < minimum:
+        return False
+    bucket_members = raw[:minimum]
+    member_count = int(bucket_members[-1])
+    if len(raw) != bucket_count * 2 + member_count * 3 + 2:
+        return False
+
+    offsets_start = minimum
+    first_start = offsets_start + member_count + 1
+    last_start = first_start + member_count
+    counts_start = last_start + member_count
+    offsets = raw[offsets_start:first_start]
+    first = raw[first_start:last_start]
+    last = raw[last_start:counts_start]
+    counts = raw[counts_start:]
+    spans = np.diff(offsets.astype(np.int64))
+    if not bool(
+        bucket_members[0] == 0
+        and np.all(bucket_members[1:] >= bucket_members[:-1])
+        and offsets[0] == 0
+        and offsets[-1] == site_file(f"{stem}.pack").stat().st_size
+        and np.all(spans > 0)
+        and np.all(spans <= sr.MEMBER_CAP)
+        and np.array_equal(counts, expected_counts)
+    ):
+        return False
+
+    try:
+        for bucket in range(bucket_count):
+            start = int(bucket_members[bucket])
+            end = int(bucket_members[bucket + 1])
+            expected_count = int(expected_counts[bucket])
+            if (
+                end - start
+                != (expected_count + sr.SEARCH_NGRAM_MEMBER_RANKS - 1)
+                // sr.SEARCH_NGRAM_MEMBER_RANKS
+            ):
+                return False
+            actual_digest = hashlib.sha256()
+            decoded_count = 0
+            for posting_member in range(start, end):
+                posting = load_binary_member(
+                    f"{stem}.pack",
+                    int(offsets[posting_member]),
+                    int(spans[posting_member]),
+                )
+                posting_count = min(
+                    sr.SEARCH_NGRAM_MEMBER_RANKS,
+                    expected_count - decoded_count,
+                )
+                identities = decode_delta_posting(
+                    posting, posting_count, upper_bound
+                )
+                for identity in identities:
+                    actual_digest.update(identity.to_bytes(3, "little"))
+                if (
+                    not identities
+                    or identities[0] != first[posting_member]
+                    or identities[-1] != last[posting_member]
+                ):
+                    return False
+                decoded_count += len(identities)
+            expected_digest = expected_hashes[bucket]
+            if decoded_count != expected_count or actual_digest.digest() != (
+                expected_digest.digest()
+                if expected_digest is not None
+                else hashlib.sha256().digest()
+            ):
+                return False
+    except ValueError:
+        return False
+    return True
+
+
 def load_idx(name: str) -> Any:
     cap = sr.TEXT_INDEX_CAP if name == "text.idx" else sr.MEMBER_CAP
     return orjson.loads(
@@ -1082,14 +1174,14 @@ def expected_search_aliases(
     return aliases
 
 
-def expected_search_gram_bucket(gram: str) -> int:
+def expected_search_gram_bucket(
+    gram: str, *, width: int = sr.SEARCH_NGRAM_WIDTH
+) -> int:
     """Independently apply the declared FNV-1a codepoint bucket contract."""
 
-    if len(gram) != sr.SEARCH_NGRAM_WIDTH:
-        raise ValueError(
-            f"search gram must contain {sr.SEARCH_NGRAM_WIDTH} code points"
-        )
-    value = (2166136261 ^ sr.SEARCH_NGRAM_WIDTH) & 0xFFFFFFFF
+    if len(gram) != width:
+        raise ValueError(f"search gram must contain {width} code points")
+    value = (2166136261 ^ width) & 0xFFFFFFFF
     for char in gram:
         value ^= ord(char)
         value = (value * 16777619) & 0xFFFFFFFF
@@ -2122,6 +2214,12 @@ def verify_release(  # noqa: PLR0915
     expected_members: list[list[Any]] = []
     expected_counts = np.zeros(sr.SEARCH_NGRAM_BUCKETS, dtype=np.uint32)
     expected_hashes: list[Any | None] = [None] * sr.SEARCH_NGRAM_BUCKETS
+    expected_trigram_counts = np.zeros(
+        sr.SEARCH_NGRAM_BUCKETS, dtype=np.uint32
+    )
+    expected_trigram_hashes: list[Any | None] = [None] * (
+        sr.SEARCH_NGRAM_BUCKETS
+    )
 
     def add_expected_search_member(
         family: str,
@@ -2130,17 +2228,28 @@ def verify_release(  # noqa: PLR0915
         off: int,
         length: int,
         texts: Iterable[str],
+        *,
+        full_text: bool = False,
     ) -> None:
         member_id = len(expected_members)
         expected_members.append([family, entity_kind, file_index, off, length])
-        buckets = {
-            expected_search_gram_bucket(
-                folded[start : start + sr.SEARCH_NGRAM_WIDTH]
+        buckets: set[int] = set()
+        trigram_buckets: set[int] = set()
+        for text in texts:
+            folded = sr.search_fold(text)
+            width = sr.SEARCH_NGRAM_WIDTH
+            buckets.update(
+                expected_search_gram_bucket(folded[start : start + width])
+                for start in range(len(folded) - width + 1)
             )
-            for text in texts
-            for folded in [sr.search_fold(text)]
-            for start in range(len(folded) - sr.SEARCH_NGRAM_WIDTH + 1)
-        }
+            if full_text:
+                width = sr.TEXT_SEARCH_TRIGRAM_WIDTH
+                trigram_buckets.update(
+                    expected_search_gram_bucket(
+                        folded[start : start + width], width=width
+                    )
+                    for start in range(len(folded) - width + 1)
+                )
         encoded = member_id.to_bytes(3, "little")
         for bucket in buckets:
             expected_counts[bucket] += 1
@@ -2148,6 +2257,13 @@ def verify_release(  # noqa: PLR0915
             if digest is None:
                 digest = hashlib.sha256()
                 expected_hashes[bucket] = digest
+            digest.update(encoded)
+        for bucket in trigram_buckets:
+            expected_trigram_counts[bucket] += 1
+            digest = expected_trigram_hashes[bucket]
+            if digest is None:
+                digest = hashlib.sha256()
+                expected_trigram_hashes[bucket] = digest
             digest.update(encoded)
 
     for _start, _end, off, length in load_idx("episodes.idx")["ranges"]:
@@ -2204,6 +2320,7 @@ def verify_release(  # noqa: PLR0915
                 off,
                 length,
                 texts,
+                full_text=True,
             )
     check(
         "文本候选目录逐成员覆盖全部可搜索原文",
@@ -2211,82 +2328,40 @@ def verify_release(  # noqa: PLR0915
         and text_search_dir.get("members") == expected_members,
     )
 
-    raw = np.frombuffer(
-        site_file("text.search.ngram.idx").read_bytes(), dtype="<u4"
+    check(
+        "文本散列候选与全部原文成员等价",
+        all(
+            text_search_postings_are_valid(
+                f"text.search.ngram-{shard}",
+                expected_counts[shard :: sr.TEXT_SEARCH_POSTING_SHARDS],
+                expected_hashes[shard :: sr.TEXT_SEARCH_POSTING_SHARDS],
+                len(expected_members),
+                bucket_count=(
+                    sr.SEARCH_NGRAM_BUCKETS // sr.TEXT_SEARCH_POSTING_SHARDS
+                ),
+            )
+            for shard in range(sr.TEXT_SEARCH_POSTING_SHARDS)
+        ),
     )
-    minimum = sr.SEARCH_NGRAM_BUCKETS + 1
-    text_ngram_ok = len(raw) >= minimum
-    if text_ngram_ok:
-        bucket_members = raw[:minimum]
-        member_count = int(bucket_members[-1])
-        text_ngram_ok = (
-            len(raw) == sr.SEARCH_NGRAM_BUCKETS * 2 + member_count * 3 + 2
-        )
-    if text_ngram_ok:
-        offsets_start = minimum
-        first_start = offsets_start + member_count + 1
-        last_start = first_start + member_count
-        counts_start = last_start + member_count
-        offsets = raw[offsets_start:first_start]
-        text_first = raw[first_start:last_start]
-        text_last = raw[last_start:counts_start]
-        text_counts = raw[counts_start:]
-        spans = np.diff(offsets.astype(np.int64))
-        text_ngram_ok = bool(
-            bucket_members[0] == 0
-            and np.all(bucket_members[1:] >= bucket_members[:-1])
-            and offsets[0] == 0
-            and offsets[-1]
-            == site_file("text.search.ngram.pack").stat().st_size
-            and np.all(spans > 0)
-            and np.all(spans <= sr.MEMBER_CAP)
-            and np.array_equal(text_counts, expected_counts)
-        )
-    if text_ngram_ok:
-        for bucket in range(sr.SEARCH_NGRAM_BUCKETS):
-            start = int(bucket_members[bucket])
-            end = int(bucket_members[bucket + 1])
-            expected_count = int(expected_counts[bucket])
-            if (
-                end - start
-                != (expected_count + sr.SEARCH_NGRAM_MEMBER_RANKS - 1)
-                // sr.SEARCH_NGRAM_MEMBER_RANKS
-            ):
-                text_ngram_ok = False
-                break
-            actual_digest = hashlib.sha256()
-            decoded_count = 0
-            for posting_member in range(start, end):
-                posting = load_binary_member(
-                    "text.search.ngram.pack",
-                    int(offsets[posting_member]),
-                    int(spans[posting_member]),
-                )
-                posting_count = min(
-                    sr.SEARCH_NGRAM_MEMBER_RANKS,
-                    expected_count - decoded_count,
-                )
-                ids = decode_delta_posting(
-                    posting, posting_count, len(expected_members)
-                )
-                for identity in ids:
-                    actual_digest.update(identity.to_bytes(3, "little"))
-                if (
-                    not len(ids)
-                    or ids[0] != text_first[posting_member]
-                    or ids[-1] != text_last[posting_member]
-                ):
-                    text_ngram_ok = False
-                decoded_count += len(ids)
-            expected_digest = expected_hashes[bucket]
-            if decoded_count != expected_count or actual_digest.digest() != (
-                expected_digest.digest()
-                if expected_digest is not None
-                else hashlib.sha256().digest()
-            ):
-                text_ngram_ok = False
-                break
-    check("文本散列候选与全部原文成员等价", text_ngram_ok)
+    check(
+        "全文三元候选仅覆盖合同允许的原文成员",
+        all(
+            text_search_postings_are_valid(
+                f"text.search.trigram-{shard}",
+                expected_trigram_counts[
+                    shard :: sr.TEXT_SEARCH_POSTING_SHARDS
+                ],
+                expected_trigram_hashes[
+                    shard :: sr.TEXT_SEARCH_POSTING_SHARDS
+                ],
+                len(expected_members),
+                bucket_count=(
+                    sr.SEARCH_NGRAM_BUCKETS // sr.TEXT_SEARCH_POSTING_SHARDS
+                ),
+            )
+            for shard in range(sr.TEXT_SEARCH_POSTING_SHARDS)
+        ),
+    )
 
     # ---- 分集结构 ----
     log("[6] 分集结构")

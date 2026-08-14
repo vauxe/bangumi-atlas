@@ -66,6 +66,8 @@ SEARCH_NGRAM_WIDTH = int(SITE_LIMITS["search_ngram_width"])
 SEARCH_NGRAM_BUCKETS = int(SITE_LIMITS["search_ngram_buckets"])
 SEARCH_NGRAM_SHARDS = int(SITE_LIMITS["search_ngram_shards"])
 SEARCH_NGRAM_MEMBER_RANKS = int(SITE_LIMITS["search_ngram_member_ranks"])
+TEXT_SEARCH_TRIGRAM_WIDTH = 3
+TEXT_SEARCH_POSTING_SHARDS = SEARCH_NGRAM_SHARDS
 SEARCH_PREFIX_SHARDS = int(SITE_LIMITS["search_prefix_shards"])
 # 发布可确定性缩小该值，客户端将它视为编译期上限。
 SEARCH_ALIAS_BLOCK_RANKS_MAX = int(SITE_LIMITS["search_alias_block_ranks_max"])
@@ -378,13 +380,11 @@ def published_object_name(logical_name: str, digest: str) -> str:
     return f"{digest}-{logical_name}"
 
 
-def search_gram_bucket(gram: str) -> int:
-    """Map one Unicode-codepoint bigram to its deterministic posting bucket."""
-    if len(gram) != SEARCH_NGRAM_WIDTH:
-        raise ValueError(
-            f"search gram must contain {SEARCH_NGRAM_WIDTH} code points"
-        )
-    value = (2166136261 ^ SEARCH_NGRAM_WIDTH) & 0xFFFFFFFF
+def search_gram_bucket(gram: str, *, width: int = SEARCH_NGRAM_WIDTH) -> int:
+    """Map one fixed-width Unicode gram to a deterministic posting bucket."""
+    if len(gram) != width:
+        raise ValueError(f"search gram must contain {width} code points")
+    value = (2166136261 ^ width) & 0xFFFFFFFF
     for char in gram:
         value ^= ord(char)
         value = (value * 16777619) & 0xFFFFFFFF

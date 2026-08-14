@@ -424,8 +424,11 @@ function scanFieldPlan(
       const origins = inputOrigins.get(expression.binding) ?? [];
       const unique = new Map(origins.map((origin) => [origin.source, origin]));
       const origin = unique.size === 1 ? [...unique.values()][0] : undefined;
+      const originOperator = origin ? operators[origin.source] : undefined;
       if (
         origin?.owner !== "subject" ||
+        // Lookup already reads identity names to verify candidates; delaying them repeats I/O.
+        originOperator?.kind === "lookup" ||
         boundedCandidateSources.has(origin.source)
       ) continue;
       columns.set(column.name, {
