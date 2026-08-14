@@ -107,6 +107,10 @@ test("builds the selected-node working set from every fact page", () => {
   const completeFacts = main.indexOf("allRelationFacts(data, key");
   const sparseRankLookup = main.indexOf("loadRanksByKey(", completeFacts);
   const buildWorkingSet = main.indexOf("relationNeighbors(", completeFacts);
+  const showDrawer = main.indexOf(
+    "drawer.show(rank, key, neighborRanks",
+    buildWorkingSet,
+  );
 
   assert.ok(completeFacts >= 0, "selection must request every fact page");
   assert.ok(
@@ -114,6 +118,10 @@ test("builds the selected-node working set from every fact page", () => {
     "all neighbor keys must resolve before the working set is built",
   );
   assert.ok(buildWorkingSet > completeFacts);
+  assert.ok(
+    showDrawer > buildWorkingSet,
+    "drawer must reuse the complete selected-node rank resolution",
+  );
   assert.doesNotMatch(
     main.slice(buildWorkingSet, buildWorkingSet + 500),
     /,\s*50\s*,?\s*\)/,

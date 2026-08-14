@@ -1,5 +1,13 @@
+/** Complete selected-fan EntityKey -> VisualRank resolution from main. */
+export type ResolvedRelationRanks = ReadonlyMap<number, number>;
+
 export interface DrawerRuntime {
-  show(rank: number, key: number, episodeId?: number): Promise<void>;
+  show(
+    rank: number,
+    key: number,
+    relationRanks: ResolvedRelationRanks,
+    episodeId?: number,
+  ): Promise<void>;
   hide(): void;
   syncState(): void;
 }
@@ -43,12 +51,13 @@ export function createLazyDrawerRuntime(
   const show = async (
     rank: number,
     key: number,
+    relationRanks: ResolvedRelationRanks,
     episodeId?: number,
   ): Promise<void> => {
     const epoch = ++viewEpoch;
     const loaded = await prepare();
     if (epoch !== viewEpoch) return;
-    await loaded.show(rank, key, episodeId);
+    await loaded.show(rank, key, relationRanks, episodeId);
   };
 
   const hide = (): void => {
