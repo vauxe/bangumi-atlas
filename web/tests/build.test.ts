@@ -38,6 +38,10 @@ test("preloads exactly the initial static ESM graph", () => {
       encoding: "utf8",
     });
     assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
+    assert.match(
+      build.stdout,
+      /app initial [\d,]+ bytes \/ [\d,]+ gzip; all chunks [\d,]+ gzip;/,
+    );
 
     const page = readFileSync(join(staging, "index.html"), "utf8");
     const preloads = [...page.matchAll(
