@@ -13,7 +13,7 @@ import type {
 } from "../types";
 import {
   ambiguousNameSuggestionRanks,
-  entitySuggestionContext,
+  projectedEntitySuggestionContext,
 } from "../value-labels";
 import { parseEntityRef, QUERY_CONTRACT, type Owner } from "./contract";
 import { compileExplorerQuery } from "./explorer";
@@ -27,6 +27,14 @@ import { QUERY_SECURITY_PROFILE } from "./security";
 import { QueryWorkbench } from "./workbench";
 import { OWNER_LABEL } from "./workbench-model";
 import { QueryWorkerClient } from "./worker-client";
+
+const SUGGESTION_CONTEXT_FIELDS = [
+  "type",
+  "platformCode",
+  "date",
+  "career",
+  "role",
+];
 
 type SelectNode = (
   rank: number,
@@ -288,9 +296,13 @@ export function installQueryRuntime(
         const mappings = await data.mappings();
         const contexts = await Promise.allSettled(contextTargets.map(
           async ({ rank, key }) => {
-            const entity = await data.entity(key, signal);
+            const entity = await data.projectEntity(
+              key,
+              SUGGESTION_CONTEXT_FIELDS,
+              signal,
+            );
             return entity
-              ? [rank, entitySuggestionContext(entity, mappings)] as const
+              ? [rank, projectedEntitySuggestionContext(entity, mappings)] as const
               : null;
           },
         ));

@@ -15,6 +15,7 @@
   "limits": {
     "member_cap": 256000,
     "member_raw_cap": 2000000,
+    "text_index_cap": 512000,
     "pack_cap": 80000000,
     "search_leaf_cap": 64000,
     "search_top": 12,

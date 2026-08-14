@@ -142,6 +142,14 @@ class SiteReleaseContractTests(unittest.TestCase):
             512,
         )
 
+    def test_release_limits_bound_the_standalone_text_directory(self) -> None:
+        self.assertEqual(
+            sr.release_limits()["text_index_cap"],
+            sr.TEXT_INDEX_CAP,
+        )
+        self.assertGreater(sr.TEXT_INDEX_CAP, sr.MEMBER_CAP)
+        self.assertLessEqual(sr.TEXT_INDEX_CAP, sr.MEMBER_RAW_CAP)
+
     def test_published_object_name_contains_the_complete_file_digest(
         self,
     ) -> None:

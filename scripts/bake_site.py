@@ -129,9 +129,15 @@ def jdump(obj: Any) -> bytes:
     return sr.canonical_json(obj)
 
 
-def write_gzip_json(name: str, obj: Any, level: int) -> None:
+def write_gzip_json(
+    name: str,
+    obj: Any,
+    level: int,
+    *,
+    cap: int = sr.MEMBER_CAP,
+) -> None:
     member = sr.gzip_member(obj, level)
-    sr.require_member_size(member, name)
+    sr.require_member_size(member, name, cap=cap)
     (SITE / name).write_bytes(member)
 
 
@@ -2644,7 +2650,12 @@ def bake_release(  # noqa: PLR0915
     text_dir[family] = fact_summary_dir
     text_stats[family] = fact_summary_stats
     text_quantile_gate(family, fact_summary_sizes)
-    write_gzip_json("text.idx", {"families": text_dir}, 6)
+    write_gzip_json(
+        "text.idx",
+        {"families": text_dir},
+        6,
+        cap=sr.TEXT_INDEX_CAP,
+    )
     del fs_items
     text_search.write()
 

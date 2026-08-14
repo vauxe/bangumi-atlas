@@ -70,6 +70,8 @@ export interface Manifest {
   limits: {
     member_cap: number;
     member_raw_cap: number;
+    /** 整文件加载的 text.idx 压缩上限。 */
+    text_index_cap: number;
     pack_cap: number;
     fact_buckets: number;
     fact_inline: number;
