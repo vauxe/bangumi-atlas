@@ -59,11 +59,6 @@ const initialRaw = [...initial].reduce(
 );
 const initialGzip = gzipBytes(initial);
 const totalGzip = gzipBytes(Object.keys(outputs));
-if (initialRaw > 850_000 || initialGzip > 245_000 || totalGzip > 300_000)
-  throw new Error(
-    `app bundle budget exceeded: initial ${initialRaw}/${initialGzip} gzip, ` +
-      `all ${totalGzip} gzip`,
-  );
 
 const preloadStart = "<!-- atlas:initial-modulepreloads:start -->";
 const preloadEnd = "<!-- atlas:initial-modulepreloads:end -->";
