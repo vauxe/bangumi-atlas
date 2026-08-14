@@ -523,13 +523,16 @@ def read_member_bytes(logical_name: str, off: int, length: int) -> bytes:
     return raw
 
 
-def decompress_member(member: bytes, label: str) -> bytes:
+def decompress_member(
+    member: bytes,
+    label: str,
+    cap: int = sr.MEMBER_CAP,
+) -> bytes:
     """Decode one gzip member without ever retaining more than the raw cap."""
 
-    if len(member) > sr.MEMBER_CAP:
+    if len(member) > cap:
         raise ValueError(
-            f"{label}: gzip member {len(member):,} exceeds "
-            f"member cap {sr.MEMBER_CAP:,}"
+            f"{label}: gzip member {len(member):,} exceeds member cap {cap:,}"
         )
     decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
     output = bytearray()
@@ -599,7 +602,10 @@ def decode_delta_posting(
 
 
 def load_idx(name: str) -> Any:
-    return orjson.loads(decompress_member(site_file(name).read_bytes(), name))
+    cap = sr.TEXT_INDEX_CAP if name == "text.idx" else sr.MEMBER_CAP
+    return orjson.loads(
+        decompress_member(site_file(name).read_bytes(), name, cap)
+    )
 
 
 def _range_index(ranges: list[list[int]], identity: int) -> int | None:

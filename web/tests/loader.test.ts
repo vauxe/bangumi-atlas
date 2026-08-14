@@ -7,6 +7,7 @@ import siteContract from "../../scripts/site-contract.json";
 import { Data } from "../src/data";
 import {
   loadEntityRanksById,
+  loadGzJson,
   loadManifest,
   loadSubjectQueryColumns,
   intersectSortedPostings,
@@ -239,6 +240,7 @@ function testManifest(
     limits: {
       member_cap: 256_000,
       member_raw_cap: 2_000_000,
+      text_index_cap: siteContract.limits.text_index_cap,
       pack_cap: 80_000_000,
       fact_buckets: 8192,
       fact_inline: 200,
@@ -450,6 +452,68 @@ test("rejects a manifest-defined rank decoder", async () => {
 test("rejects an expanded decoded member cap", async () => {
   const malformed = testManifest({});
   malformed.limits.member_raw_cap++;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(malformed))) as typeof fetch;
+
+  await assert.rejects(loadManifest(), /limits|资源上限/);
+});
+
+test("bounds the standalone text directory independently from Range members", async () => {
+  const directory = {
+    families: {
+      fixture: Array.from({ length: 12_000 }, (_, index) =>
+        createHash("sha256").update(String(index)).digest("hex")
+      ),
+    },
+  };
+  const compressed = gzipSync(JSON.stringify(directory));
+  assert.ok(compressed.byteLength > siteContract.limits.member_cap);
+  assert.ok(compressed.byteLength <= siteContract.limits.text_index_cap);
+
+  const manifest = testManifest({
+    "text.idx": [compressed.byteLength, hash(compressed)],
+  });
+  await installFetch(manifest, async (path) => {
+    assert.match(path, /text\.idx$/);
+    return new Response(body(compressed));
+  });
+
+  assert.deepEqual(await loadGzJson("text.idx"), directory);
+
+  const generic = testManifest({
+    "vocab.idx": [compressed.byteLength, hash(compressed)],
+  });
+  await installFetch(generic, async (path) => {
+    assert.match(path, /vocab\.idx$/);
+    return new Response(body(compressed));
+  });
+
+  await assert.rejects(loadGzJson("vocab.idx"), /member cap/);
+});
+
+test("rejects expansion of the dedicated text directory cap", async () => {
+  const malformed = testManifest({});
+  Object.assign(malformed.limits, {
+    text_index_cap: siteContract.limits.text_index_cap + 1,
+  });
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(malformed))) as typeof fetch;
+
+  await assert.rejects(loadManifest(), /limits|资源上限/);
+
+  const oversized = testManifest({
+    "text.idx": [2, hash(new Uint8Array(2))],
+  });
+  Object.assign(oversized.limits, { text_index_cap: 1 });
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(oversized))) as typeof fetch;
+
+  await assert.rejects(loadManifest(), /limits|资源上限/);
+});
+
+test("requires the dedicated text directory cap", async () => {
+  const malformed = testManifest({});
+  delete (malformed.limits as Partial<Manifest["limits"]>).text_index_cap;
   globalThis.fetch = (async () =>
     new Response(JSON.stringify(malformed))) as typeof fetch;
 

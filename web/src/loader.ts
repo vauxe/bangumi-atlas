@@ -27,6 +27,7 @@ const BASE = "data";
 const {
   member_cap: MEMBER_CAP,
   member_raw_cap: MEMBER_RAW_CAP,
+  text_index_cap: TEXT_INDEX_CAP,
   pack_cap: PACK_CAP,
   search_leaf_cap: SEARCH_LEAF_CAP,
   search_top: SEARCH_TOP,
@@ -410,9 +411,11 @@ export async function loadManifest(): Promise<Manifest> {
       );
   }
   const limits = m.limits;
+  const textIndexCap = limits.text_index_cap;
   const positiveLimits = [
     limits.member_cap,
     limits.member_raw_cap,
+    textIndexCap,
     limits.pack_cap,
     limits.search_leaf_cap,
   ];
@@ -427,10 +430,12 @@ export async function loadManifest(): Promise<Manifest> {
     positiveLimits.some((value) => !Number.isInteger(value) || value <= 0) ||
     limits.member_cap > MEMBER_CAP ||
     limits.member_raw_cap > MEMBER_RAW_CAP ||
+    textIndexCap > TEXT_INDEX_CAP ||
     limits.pack_cap > PACK_CAP ||
     limits.search_leaf_cap > SEARCH_LEAF_CAP ||
     limits.member_cap > limits.pack_cap ||
     limits.search_leaf_cap > limits.member_cap ||
+    (m.files["text.idx"]?.[0] ?? 0) > textIndexCap ||
     !budget ||
     !Number.isInteger(budget.total) ||
     budget.total <= 0 ||
@@ -1157,8 +1162,10 @@ async function packSlice(
 }
 
 /** gzip 成员解压;CRC32 或长度校验失败判定发布已被替换。 */
-async function gunzipBytes(buf: ArrayBuffer): Promise<Uint8Array> {
-  const compressedCap = manifestRef?.limits.member_cap ?? 0;
+async function gunzipBytes(
+  buf: ArrayBuffer,
+  compressedCap = manifestRef?.limits.member_cap ?? 0,
+): Promise<Uint8Array> {
   if (buf.byteLength > compressedCap)
     throw new SiteDataContractError(
       `gzip member exceeds member cap ${compressedCap}`,
@@ -1295,7 +1302,10 @@ const pinned = new AsyncMemo<string, unknown>();
 export function loadGzJson<T>(path: string): Promise<T> {
   return pinned.get(path, async () => {
     const bytes = await loadPublishedBytes(path);
-    const out = await gunzipBytes(bytes.buffer as ArrayBuffer);
+    const compressedCap = path === "text.idx"
+      ? manifestRef?.limits.text_index_cap ?? 0
+      : manifestRef?.limits.member_cap ?? 0;
+    const out = await gunzipBytes(bytes.buffer as ArrayBuffer, compressedCap);
     return JSON.parse(new TextDecoder().decode(out)) as unknown;
   }) as Promise<T>;
 }

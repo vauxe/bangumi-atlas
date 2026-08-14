@@ -32,6 +32,7 @@ interface Sample {
   rows: number;
   totalMatches: number;
   signature: string;
+  semanticSignature: string;
 }
 
 const scenario = process.argv[2] as Scenario | undefined;
@@ -177,6 +178,10 @@ const execute = async (): Promise<Sample> => {
       { pageSize },
     ),
   ] as const));
+  const semanticResults = results.map(([name, result]) => {
+    const { releaseId: _releaseId, ...semantic } = result;
+    return [name, semantic] as const;
+  });
   return {
     elapsed: Number((performance.now() - started).toFixed(2)),
     requests: requests - beforeRequests,
@@ -198,6 +203,9 @@ const execute = async (): Promise<Sample> => {
     signature: createHash("sha256")
       .update(JSON.stringify(results))
       .digest("hex"),
+    semanticSignature: createHash("sha256")
+      .update(JSON.stringify(semanticResults))
+      .digest("hex"),
   };
 };
 
@@ -207,6 +215,11 @@ for (let index = 0; index < runCount; index++) {
   globalThis.gc?.();
   const sample = await execute();
   assert.equal(sample.signature, cold.signature, "query result changed between runs");
+  assert.equal(
+    sample.semanticSignature,
+    cold.semanticSignature,
+    "query semantics changed between runs",
+  );
   warm.push(sample);
 }
 const elapsed = warm

@@ -4,6 +4,7 @@ import {
   type Mappings,
   type StructuralEntity,
 } from "./types";
+import type { ProjectedEntity } from "./data";
 
 export const CAREER_VALUES: Readonly<Record<string, string>> = {
   actor: "演员",
@@ -46,6 +47,33 @@ export function entitySuggestionContext(
     ]).join(" · ");
   }
   return mappings.character_role[String(entity.role)] ?? "";
+}
+
+/** Format the same label from a query projection without hydrating full entities. */
+export function projectedEntitySuggestionContext(
+  entity: ProjectedEntity,
+  mappings: Mappings,
+): string {
+  const { fields } = entity;
+  if (entity.kind === "subject") {
+    const type = fields.type as number;
+    const platformCode = fields.platformCode as number | null;
+    return compactUnique([
+      mappings.subject_type[String(type)] ?? MEDIA_NAMES[type],
+      platformCode === null
+        ? null
+        : mappings.platform[`${type}:${platformCode}`],
+      /^\d{4}/.exec(fields.date as string)?.[0],
+    ]).join(" · ");
+  }
+  if (entity.kind === "person") {
+    return compactUnique([
+      mappings.person_type[String(fields.type)],
+      ...(fields.career as string[]).map((value) => CAREER_VALUES[value])
+        .filter(Boolean).slice(0, 2),
+    ]).join(" · ");
+  }
+  return mappings.character_role[String(fields.role)] ?? "";
 }
 
 export function ambiguousNameSuggestionRanks(

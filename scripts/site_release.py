@@ -47,6 +47,7 @@ RANK_ENCODING = str(SITE_CONTRACT["rank"]["encoding"])
 # ---- 成员与 pack 门禁(压缩字节约束传输,解压字节约束内存)----
 MEMBER_CAP = int(SITE_LIMITS["member_cap"])
 MEMBER_RAW_CAP = int(SITE_LIMITS["member_raw_cap"])
+TEXT_INDEX_CAP = int(SITE_LIMITS["text_index_cap"])
 PACK_CAP = int(SITE_LIMITS["pack_cap"])
 SEARCH_LEAF_CAP = int(SITE_LIMITS["search_leaf_cap"])
 SEARCH_TOP = int(SITE_LIMITS["search_top"])
@@ -80,7 +81,7 @@ FACT_INLINE = 200
 EPISODE_INLINE = 200
 PAGE_SIZE = 500
 TEXT_BLOCK_IDS = {
-    "entity-summary": 128,
+    "entity-summary": 64,
     "entity-infobox": 256,
     "episode-description": 128,
     "fact-summary": 256,
@@ -114,6 +115,7 @@ def release_limits(
     return {
         "member_cap": MEMBER_CAP,
         "member_raw_cap": MEMBER_RAW_CAP,
+        "text_index_cap": TEXT_INDEX_CAP,
         "pack_cap": PACK_CAP,
         "fact_buckets": FACT_BUCKETS,
         "fact_inline": FACT_INLINE,
@@ -326,7 +328,7 @@ def require_member_size(
     cap: int = MEMBER_CAP,
     raw_cap: int = MEMBER_RAW_CAP,
 ) -> None:
-    """所有 gzip 成员共用压缩与解压硬门禁。"""
+    """校验 gzip 压缩与解压硬门禁。"""
     if len(member) > cap:
         raise ValueError(
             f"{label}: gzip member {len(member):,} exceeds member cap {cap:,}"
