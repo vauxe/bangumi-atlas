@@ -1,15 +1,15 @@
 /** 启动序列与交互接线;整体契约见 docs/STRUCTURAL_SITE_DATA_DESIGN.md。
- * 加载优先级:manifest 后立即启动几何流,首块即渲;反向索引低优先级
- * 补齐;搜索目录在聚焦时读取;text.idx 在首次结构画面后空闲读取;
+ * 加载优先级:manifest 后立即启动几何流,首块即渲;反向索引按稳定键
+ * 分块点查;搜索目录在聚焦时读取;text.idx 在首次结构画面后空闲读取;
  * 悬停名字按需、稳定 150ms 才预取结构,不预取 Episode 或任何文本。 */
 
-import { Data } from "./data";
+import type { Data } from "./data";
 import { esc } from "./html";
 import { createLazyDrawerRuntime } from "./lazy-drawer";
 import {
-  ensureRankIndex,
   loadGzJson,
   loadManifest,
+  loadRanksByKey,
   openNames,
   openGeometry,
   pointByRank,
@@ -18,15 +18,18 @@ import {
   SiteDataContractError,
 } from "./loader";
 import {
+  allRelationFacts,
+  relationNeighborKeys,
   relationNeighbors,
   resolveLoadedNeighborRanks,
 } from "./neighbors";
+import { PinnedManager } from "./pinned-manager";
 import { interactionHint, Scene } from "./scene";
 import { createLazyRuntime } from "./lazy-runtime";
-import { notify, state, subscribe } from "./store";
+import { beginSelection, notify, state, subscribe } from "./store";
 import { TYPE_NAMES, etype } from "./types";
-import { decode, encode } from "./url";
 import { locateStableTarget, resolveUrlSelection } from "./url-restore";
+import { decodeViewUrl, encodeViewUrl } from "./view-url";
 
 const HOVER_PREFETCH_MS = 150;
 
@@ -58,17 +61,30 @@ async function boot(): Promise<void> {
   });
   hud.textContent = "加载清单…";
   const manifest = await loadManifest();
+  let dataPreparation: Promise<Data> | null = null;
+  const prepareData = (): Promise<Data> => {
+    if (dataPreparation) return dataPreparation;
+    const pending = import("./data").then(({ Data }) => new Data(manifest));
+    const tracked = pending.catch((error: unknown) => {
+      if (dataPreparation === tracked) dataPreparation = null;
+      throw error;
+    });
+    dataPreparation = tracked;
+    return tracked;
+  };
 
   // ---- 数据流:先分配缓冲拿到 geo,流在场景建成后才启动 ----
   const gstream = openGeometry(manifest);
   const geo = gstream.geo;
   const names = openNames(manifest);
-  const data = new Data(manifest);
 
   const drawerElement = $("#drawer");
   const drawerReopen = $<HTMLButtonElement>("#drawer-reopen");
   const drawer = createLazyDrawerRuntime(async () => {
-    const { Drawer } = await import("./drawer");
+    const [{ Drawer }, data] = await Promise.all([
+      import("./drawer"),
+      prepareData(),
+    ]);
     return new Drawer(drawerElement, drawerReopen, {
       geo,
       names,
@@ -77,6 +93,23 @@ async function boot(): Promise<void> {
       reportError,
       walk: (rank) => runTask(select(rank, "fly"), "节点加载"),
     });
+  });
+  const pinnedManager = new PinnedManager($("#pinned-manager"), {
+    nameOf: (rank) => names.get(rank),
+    typeOf: (rank) =>
+      TYPE_NAMES[etype(geo.key[rank] ?? 0)] ?? "节点",
+    loadNames: (ranks) => names.load(ranks),
+    focus: (rank) => runTask(select(rank, "center"), "节点加载"),
+    restoreFocus: () => {
+      const pin = drawerElement.classList.contains("open")
+        ? drawerElement.querySelector<HTMLButtonElement>("#drawer-pin")
+        : null;
+      const fallback = drawerReopen.hidden
+        ? document.querySelector<HTMLCanvasElement>("#map canvas")
+        : drawerReopen;
+      (pin ?? fallback)?.focus();
+    },
+    reportError,
   });
 
   const tooltip = $("#tooltip");
@@ -93,17 +126,25 @@ async function boot(): Promise<void> {
     tooltip.style.top = `${y + 12}px`;
     tooltip.innerHTML = `${esc(text)} <span class="tt">${esc(sub)}</span>`;
   };
+  const nodeContext = (rank: number): string => [
+    TYPE_NAMES[etype(geo.key[rank] ?? 0)] ?? "节点",
+    state.selection === rank ? "查看中" : "",
+    state.pinnedSelections.has(rank) ? "已保留" : "",
+  ].filter(Boolean).join(" · ");
 
   // ---- URL 历史:离散导航入栈,相机/查询表单原地替换 ----
   let historyApplications = 0;
+  let urlApplicationEpoch = 0;
   let replaceTimer = 0;
+  let queryUrlPayload: string | null = null;
   const currentUrl = (): string | null => {
     try {
-      return encode(
+      return encodeViewUrl(
         scene.getViewState(),
         state.selectionKey,
         state.selection,
         scene.camera.ortho,
+        queryUrlPayload,
       );
     } catch (error) {
       console.error("分享链接生成失败", error);
@@ -147,14 +188,17 @@ async function boot(): Promise<void> {
       if (!saveData()) {
         const key = geo.key[rank] ?? 0;
         hoverTimer = window.setTimeout(() => {
-          if (hoveredNode?.rank === rank && key)
-            data.prefetchStructure(key);
+          if (hoveredNode?.rank !== rank || !key) return;
+          void prepareData().then((data) => {
+            if (hoveredNode?.rank === rank)
+              data.prefetchStructure(key);
+          }).catch(() => undefined);
         }, HOVER_PREFETCH_MS);
       }
       const name = names.get(rank);
       showTooltip(
         name ?? "…",
-        TYPE_NAMES[etype(geo.key[rank] ?? 0)] ?? "",
+        nodeContext(rank),
         x,
         y,
       );
@@ -165,7 +209,7 @@ async function boot(): Promise<void> {
             if (!hovered || hovered.rank !== rank) return;
             showTooltip(
               names.get(rank) ?? `#${rank}`,
-              TYPE_NAMES[etype(geo.key[rank] ?? 0)] ?? "",
+              nodeContext(rank),
               hovered.x,
               hovered.y,
             );
@@ -211,10 +255,6 @@ async function boot(): Promise<void> {
       pendingUrlHash = null;
       if (hash !== null && location.hash === hash)
         runTask(applyUrl(false), "深链恢复");
-      // 反向索引不参与首屏；仅在关键几何传输完成后空闲预热。
-      // 深链、选中和查询仍会通过 ensureRankIndex 按需立即加载。
-      if (!saveData())
-        idle(() => runTask(ensureRankIndex(), "反向索引加载"));
     }),
     "几何数据加载",
   );
@@ -233,6 +273,7 @@ async function boot(): Promise<void> {
     return null;
   };
   let navigationEpoch = 0;
+  let relationLoad: AbortController | null = null;
   let firstStructuralPaint = false;
 
   /** 首次结构画面完成后空闲读取 text.idx,消除冷文本展开的
@@ -269,8 +310,10 @@ async function boot(): Promise<void> {
     episodeId: number | null = null,
   ): Promise<void> {
     const epoch = ++navigationEpoch;
-    state.selection = rank;
-    state.selectionKey = keyHint;
+    relationLoad?.abort();
+    const relationController = new AbortController();
+    relationLoad = relationController;
+    beginSelection(rank, keyHint);
     // 落点未流式覆盖时,一次 Range 点查同时解析坐标与 key。
     let key = keyHint ?? geo.key[rank] ?? 0;
     if (rank >= geo.loaded && (!geo.sparse.has(rank) || !key)) {
@@ -288,29 +331,49 @@ async function boot(): Promise<void> {
       return;
     }
     state.selectionKey = key;
-    // 模块请求与事实/映射读取并行；真正展示仍在邻居状态就绪后进行。
+    // 模块请求与完整事实/映射读取并行；真正展示仍在关系状态就绪后进行。
+    const dataPromise = prepareData();
     void drawer.prepare().catch(() => undefined);
     if (cam === "fly") scene.flyTo(rank);
     else if (cam === "center")
       scene.centerSelection(rank);
-    const [factsPage, mappings] = await Promise.all([
-      data.factsFor(key),
-      data.mappings(),
-    ]);
+    const relationData = await (async () => {
+      try {
+        const data = await dataPromise;
+        const [facts, mappings] = await Promise.all([
+          allRelationFacts(data, key, relationController.signal),
+          data.mappings(),
+        ]);
+        const neighborRanks = new Map(resolveLoadedNeighborRanks(
+          facts,
+          key,
+          geo.key,
+          geo.loaded,
+          knownRankOfKey,
+        ));
+        const unresolved = relationNeighborKeys(facts, key).filter(
+          (neighborKey) => !neighborRanks.has(neighborKey),
+        );
+        for (const [neighborKey, neighborRank] of await loadRanksByKey(
+          unresolved,
+          relationController.signal,
+        )) neighborRanks.set(neighborKey, neighborRank);
+        return [facts, mappings, neighborRanks] as const;
+      } catch (error) {
+        if (relationController.signal.aborted) return null;
+        throw error;
+      } finally {
+        if (relationLoad === relationController) relationLoad = null;
+      }
+    })();
+    if (relationData === null) return;
+    const [facts, mappings, neighborRanks] = relationData;
     if (epoch !== navigationEpoch || state.selection !== rank) return;
-    const neighborRanks = resolveLoadedNeighborRanks(
-      factsPage.items,
-      key,
-      geo.key,
-      geo.loaded,
-      knownRankOfKey,
-    );
     const nb = relationNeighbors(
-      factsPage.items,
+      facts,
       key,
       mappings,
       (k) => neighborRanks.get(k) ?? null,
-      50,
     );
     state.neighbors = nb.ranks;
     state.neighborLabels = nb.labels;
@@ -323,6 +386,8 @@ async function boot(): Promise<void> {
   }
 
   function deselect(push: boolean): void {
+    relationLoad?.abort();
+    relationLoad = null;
     navigationEpoch++;
     state.selection = null;
     state.selectionKey = null;
@@ -357,16 +422,20 @@ async function boot(): Promise<void> {
     queryStyles = tracked;
     return tracked;
   };
+  let installedQueryRuntime: {
+    restoreQuery(query: string | null): string | null;
+  } | null = null;
   const queryRuntime = createLazyRuntime({
     prepare: async () => {
-      const [runtime] = await Promise.all([
+      const [runtime, , data] = await Promise.all([
         import("./query/runtime"),
         prepareQueryStyles(),
+        prepareData(),
       ]);
-      return runtime;
+      return { runtime, data };
     },
-    install: ({ installQueryRuntime }) => {
-      const queryWorkbench = installQueryRuntime({
+    install: ({ runtime: { installQueryRuntime }, data }) => {
+      const installed = installQueryRuntime({
         host: $("#query-dock"),
         manifest,
         data,
@@ -374,12 +443,15 @@ async function boot(): Promise<void> {
         names,
         rankOfKey: rankOfKeyLocal,
         select,
-        replaceUrl,
-        pushUrl,
+        updateQueryUrl: (query, push) => {
+          queryUrlPayload = query;
+          if (push) pushUrl();
+          else replaceUrl();
+        },
       });
       // 原位替换以保持“查询 → 骰子”的视觉与键盘顺序。
       queryLoader.replaceWith($("#query-workbench"));
-      return queryWorkbench;
+      return installed;
     },
     onActivating: () => {
       queryLoader.setAttribute("aria-busy", "true");
@@ -389,6 +461,9 @@ async function boot(): Promise<void> {
       queryLoader.setAttribute("aria-busy", "false");
       queryLoaderLabel.textContent = "重试搜索与查询";
       reportError("查询界面加载", error);
+    },
+    onReady: (runtime) => {
+      installedQueryRuntime = runtime;
     },
   });
   const activateQueryRuntime = (event?: Event): void => {
@@ -402,37 +477,57 @@ async function boot(): Promise<void> {
     });
   }
 
-  subscribe(() => scene.recolor());
+  subscribe(() => {
+    scene.recolor();
+    pinnedManager.sync();
+    drawer.syncState();
+  });
+  pinnedManager.sync();
 
   // ---- 画布操作提示 ----
   const hint = $("#hint");
-  let hintSelected = state.selection !== null;
-  hint.textContent = interactionHint(hintSelected);
-  subscribe(() => {
+  let hintState = "";
+  const updateHint = (): void => {
     const selected = state.selection !== null;
-    if (selected === hintSelected) return;
-    hintSelected = selected;
-    hint.textContent = interactionHint(selected);
-  });
+    const pinned = state.pinnedSelections.size;
+    const next = `${selected}:${pinned}`;
+    if (next === hintState) return;
+    hintState = next;
+    hint.textContent = interactionHint(selected, pinned);
+  };
+  updateHint();
+  subscribe(updateHint);
 
   // ---- URL 恢复(深链)与 popstate(浏览器后退 = 回上一视图)----
   const applyUrl = async (initial: boolean): Promise<void> => {
     const epoch = ++navigationEpoch;
+    const urlEpoch = ++urlApplicationEpoch;
     const appliedHash = location.hash;
     historyApplications++;
     try {
-      const st = decode(appliedHash);
-      if (state.queryBundle || appliedHash === "#query-dock")
-        activateQueryRuntime();
+      const st = decodeViewUrl(appliedHash);
+      queryUrlPayload = st.query;
+      if (st.query !== null || appliedHash === "#query-dock") {
+        runTask(
+          queryRuntime.activate({ focus: true }).then((runtime) => {
+            if (urlEpoch !== urlApplicationEpoch) return;
+            queryUrlPayload = runtime.restoreQuery(st.query);
+            replaceUrl();
+          }),
+          "查询链接恢复",
+        );
+      } else if (installedQueryRuntime) {
+        queryUrlPayload = installedQueryRuntime.restoreQuery(null);
+      }
       scene.setOrtho(st.ortho);
       if (st.view) scene.setView(st.view);
       if (st.key === null && st.rank === null) {
         pendingUrlHash = null;
         if (state.selection !== null || initial) deselect(false);
       } else {
-        // 稳定键优先经 rank-by-key 反向索引解析
+        // 稳定键优先经 rank-by-key 定长块解析，不下载完整反向索引。
         if (st.key !== null)
-          await ensureRankIndex().catch(() => undefined);
+          await loadRanksByKey([st.key]).catch(() => undefined);
         const resolved = await resolveUrlSelection(st, locateUrlTarget);
         if (epoch !== navigationEpoch) return;
         if (resolved) {

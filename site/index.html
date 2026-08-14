@@ -7,10 +7,11 @@
 <meta name="description" content="探索 Bangumi 作品、人物与角色之间的关系。">
 <!-- atlas:initial-modulepreloads:start -->
 <link rel="modulepreload" href="app.js">
-<link rel="modulepreload" href="chunks/chunk-U6UUEJQK.js">
-<link rel="modulepreload" href="chunks/chunk-HBZHUY6G.js">
-<link rel="modulepreload" href="chunks/chunk-XXVML5HX.js">
-<link rel="modulepreload" href="chunks/chunk-KM6AM754.js">
+<link rel="modulepreload" href="chunks/chunk-QL7NOHTH.js">
+<link rel="modulepreload" href="chunks/chunk-BL4VSXHP.js">
+<link rel="modulepreload" href="chunks/chunk-IVLY7DLN.js">
+<link rel="modulepreload" href="chunks/chunk-MPSVVPUN.js">
+<link rel="modulepreload" href="chunks/chunk-N2NTOGKJ.js">
 <link rel="modulepreload" href="chunks/chunk-VC46IEJQ.js">
 <!-- atlas:initial-modulepreloads:end -->
 <link rel="icon" href="data:,">
@@ -137,7 +138,61 @@ button:focus-visible, input:focus-visible, a:focus-visible {
 .drawer-external svg { width: 17px; height: 17px; fill: none;
   stroke: currentColor; stroke-width: 2; stroke-linecap: round;
   stroke-linejoin: round; }
+.drawer-pin svg { width: 17px; height: 17px; fill: none;
+  stroke: currentColor; stroke-width: 1.8; stroke-linecap: round;
+  stroke-linejoin: round; }
+.drawer-pin[aria-pressed="true"] { color: var(--pink);
+  background: rgba(242, 91, 166, .16); }
 #drawer-close { font-family: inherit; font-size: 20px; line-height: 1; }
+#pinned-manager { position: fixed;
+  right: calc(var(--occupied-right) + var(--page-inset)); bottom: 56px;
+  z-index: 6; display: grid; justify-items: end;
+  width: min(
+    320px,
+    calc(100dvw - var(--occupied-right) - var(--page-inset) - var(--page-inset))
+  ); transition: right .25s; }
+#pinned-manager[hidden], .pinned-panel[hidden] { display: none; }
+.pinned-toggle { display: flex; align-items: center; gap: 8px;
+  grid-row: 2;
+  min-height: 40px; padding: 7px 12px; border: 1px solid var(--pink);
+  border-radius: 20px; background: rgba(20, 38, 43, .96); color: var(--ink);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .28); cursor: pointer; font: inherit; }
+.pinned-toggle:hover { background: rgba(242, 91, 166, .16); }
+.pinned-toggle svg { width: 17px; height: 17px; fill: none;
+  stroke: var(--pink); stroke-width: 1.8; stroke-linecap: round;
+  stroke-linejoin: round; }
+.pinned-toggle strong { display: inline-grid; min-width: 20px; height: 20px;
+  place-items: center; border-radius: 10px; background: var(--pink);
+  color: #3a0b22; font-size: 12px; }
+.pinned-panel { grid-row: 1; width: 100%; max-height: 42dvh;
+  margin-bottom: 8px; overflow: hidden; border: 1px solid var(--line);
+  border-radius: 10px; background: rgba(20, 38, 43, .98);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .38); }
+.pinned-panel header { display: flex; align-items: center;
+  justify-content: space-between; min-height: 42px; padding: 6px 10px;
+  border-bottom: 1px solid var(--line); }
+.pinned-clear { min-height: 32px; padding: 4px 8px; border: 0;
+  background: none; color: var(--ink-2); cursor: pointer; font: inherit;
+  font-size: 12px; }
+.pinned-clear:hover { color: var(--pink); }
+.pinned-panel ul { max-height: calc(42dvh - 43px); margin: 0; padding: 5px;
+  overflow-y: auto; list-style: none; }
+.pinned-item { display: grid; grid-template-columns: minmax(0, 1fr) 38px;
+  align-items: stretch; border-radius: 7px; }
+.pinned-item:hover { background: rgba(57, 197, 187, .08); }
+.pinned-focus { display: grid; min-width: 0; min-height: 44px;
+  justify-items: start; align-content: center; padding: 5px 8px;
+  border: 1px solid transparent; border-radius: 7px; background: none;
+  color: var(--ink); cursor: pointer; font: inherit; text-align: left; }
+.pinned-focus[aria-current="true"] { border-color: var(--miku);
+  background: rgba(57, 197, 187, .1); }
+.pinned-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.pinned-focus small { color: var(--ink-2); font-size: 11px; }
+.pinned-remove { min-width: 38px; min-height: 38px; border: 0;
+  border-radius: 7px; background: none; color: var(--ink-2); cursor: pointer;
+  font: inherit; font-size: 18px; line-height: 1; }
+.pinned-remove:hover { color: var(--pink); background: rgba(242, 91, 166, .12); }
 .dossier-tabs { position: sticky; top: -20px; z-index: 1; clear: both;
   display: flex; gap: 2px; margin: 4px -20px 0; padding: 12px 20px 0;
   background: rgba(20, 38, 43, .97); border-bottom: 1px solid var(--line); }
@@ -302,6 +357,7 @@ pre.infobox { white-space: pre-wrap; word-break: break-all;
 <aside id="drawer" aria-label="节点详情" aria-hidden="true" tabindex="-1" inert></aside>
 <button id="drawer-reopen" type="button" aria-controls="drawer"
         aria-label="重新打开当前节点详情" hidden>‹ 详情</button>
+<aside id="pinned-manager" aria-label="保留节点及其关系" hidden></aside>
 
 <div id="legend">
   <i style="background:var(--c-subject)"></i>作品

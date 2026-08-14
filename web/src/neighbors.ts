@@ -2,7 +2,32 @@
  * 工作集邻居。反向文案("← 关系名")、固定语义标签和颜色都在这里,
  * 不写入数据事实;未知原始码带领域名称显示,不丢弃记录。 */
 
-import type { Fact, Mappings } from "./types";
+import type { Fact, Mappings, Page } from "./types";
+
+interface FactPageReader {
+  factsFor(
+    key: number,
+    cursor?: string,
+    signal?: AbortSignal,
+  ): Promise<Page<Fact>>;
+}
+
+/** 当前节点的关系线只在游标到达 null 后才是完整集合。 */
+export async function allRelationFacts(
+  reader: FactPageReader,
+  key: number,
+  signal?: AbortSignal,
+): Promise<Fact[]> {
+  const facts: Fact[] = [];
+  let cursor: string | undefined;
+  do {
+    signal?.throwIfAborted();
+    const page = await reader.factsFor(key, cursor, signal);
+    facts.push(...page.items);
+    cursor = page.next ?? undefined;
+  } while (cursor !== undefined);
+  return facts;
+}
 
 export function factOthers(fact: Fact, selfKey: number): number[] {
   const parts = factParticipants(fact);
@@ -105,6 +130,18 @@ export interface WorkingSet {
 
 const NEIGHBOR_LOOKUP_BITMAP_CAP = 2_000_000;
 
+/** Stable relationship participants needed to materialize one complete fan. */
+export function relationNeighborKeys(
+  facts: readonly Fact[],
+  selfKey: number,
+): number[] {
+  const requested = new Set<number>();
+  for (const fact of facts)
+    for (const other of factOthers(fact, selfKey))
+      if (other !== selfKey) requested.add(other);
+  return [...requested];
+}
+
 /** 反向索引尚未就绪时，把一个工作集的未解析键合并为一次流式前缀扫描。
  * knownRankOf 只负责已缓存的稀疏点或已完成的反向索引。 */
 export function resolveLoadedNeighborRanks(
@@ -114,10 +151,7 @@ export function resolveLoadedNeighborRanks(
   loaded: number,
   knownRankOf: (key: number) => number | null,
 ): ReadonlyMap<number, number> {
-  const requested = new Set<number>();
-  for (const fact of facts)
-    for (const other of factOthers(fact, selfKey))
-      if (other !== selfKey) requested.add(other);
+  const requested = relationNeighborKeys(facts, selfKey);
 
   const resolved = new Map<number, number>();
   const unresolved = new Set<number>();
@@ -180,13 +214,14 @@ export function resolveLoadedNeighborRanks(
 }
 
 /** 工作集邻居:同一邻居的多种关系分别保留边和标签,按全局收藏度
- * (VisualRank 升序)取前 cap 条;未解析引用(无 rank)不进入画布。 */
+ * (VisualRank 升序)排列。调用方可显式限制投影数量;未传上限时保留
+ * 所有可解析关系,未解析引用(无 rank)不进入画布。 */
 export function relationNeighbors(
   facts: Fact[],
   selfKey: number,
   mappings: Mappings,
   rankOf: (key: number) => number | null,
-  cap = 50,
+  cap?: number,
 ): WorkingSet {
   const rel: [number, string][] = [];
   for (const fact of facts)
@@ -195,9 +230,9 @@ export function relationNeighbors(
       const rank = rankOf(other);
       if (rank !== null)
         rel.push([rank, factLabel(fact, selfKey, mappings)]);
-    }
+  }
   rel.sort(([a], [b]) => a - b);
-  const selected = rel.slice(0, cap);
+  const selected = cap === undefined ? rel : rel.slice(0, cap);
   return {
     ranks: selected.map(([rank]) => rank),
     labels: selected.map(([, label]) => label),

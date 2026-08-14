@@ -2,7 +2,7 @@
  * 让编辑器、答案渲染与 Worker 客户端不阻塞星图首包解析。 */
 
 import type { Data } from "../data";
-import { ensureRankIndex, openSearchAliases } from "../loader";
+import { loadRanksByKey, openSearchAliases } from "../loader";
 import { searchNameSuggestions } from "../search";
 import { notify, state, subscribe } from "../store";
 import type {
@@ -16,6 +16,7 @@ import {
   projectedEntitySuggestionContext,
 } from "../value-labels";
 import { parseEntityRef, QUERY_CONTRACT, type Owner } from "./contract";
+import { decodeBundle, encodeShareableBundle } from "./bundle-url";
 import { compileExplorerQuery } from "./explorer";
 import { mergeQueryHighlights } from "./highlights";
 import {
@@ -52,13 +53,18 @@ export interface QueryRuntimeDependencies {
   names: Names;
   rankOfKey(key: number): number | null;
   select: SelectNode;
-  replaceUrl(): void;
-  pushUrl(): void;
+  updateQueryUrl(query: string | null, push: boolean): void;
+}
+
+export interface InstalledQueryRuntime {
+  focus(): void;
+  /** Restore one opaque URL payload and return its canonical spelling. */
+  restoreQuery(query: string | null): string | null;
 }
 
 export function installQueryRuntime(
   dependencies: QueryRuntimeDependencies,
-): QueryWorkbench {
+): InstalledQueryRuntime {
   const {
     host,
     manifest,
@@ -67,8 +73,7 @@ export function installQueryRuntime(
     names,
     rankOfKey,
     select,
-    replaceUrl,
-    pushUrl,
+    updateQueryUrl,
   } = dependencies;
   const searchAliases = openSearchAliases(manifest);
   let queryClient: QueryWorkerClient | null = null;
@@ -195,8 +200,8 @@ export function installQueryRuntime(
     if (parsed.owner === "episode") {
       const episode = await data.episode(parsed.archiveId);
       if (!episode) throw new TypeError(`${ref} 不在当前数据版本中`);
-      await ensureRankIndex();
-      const rank = rankOfKey(episode.subject);
+      const rank = rankOfKey(episode.subject) ??
+        (await loadRanksByKey([episode.subject])).get(episode.subject) ?? null;
       if (rank === null) throw new TypeError(`${ref} 所属作品不在当前星图中`);
       await select(rank, "fly", true, episode.subject, episode.id);
       return;
@@ -209,8 +214,8 @@ export function installQueryRuntime(
     if (parsed.archiveId > 0xffffff)
       throw new TypeError(`${ref} 不能在当前星图中定位`);
     const key = (kind << 24) | parsed.archiveId;
-    await ensureRankIndex();
-    const rank = rankOfKey(key);
+    const rank = rankOfKey(key) ??
+      (await loadRanksByKey([key])).get(key) ?? null;
     if (rank === null) throw new TypeError(`${ref} 不在当前数据版本中`);
     await select(rank, "fly", true, key);
   };
@@ -223,6 +228,10 @@ export function installQueryRuntime(
     notify();
     return ranks.length;
   };
+
+  const currentQueryUrl = (): string | null => state.queryBundle
+    ? encodeShareableBundle(state.queryBundle)
+    : null;
 
   const queryWorkbench = new QueryWorkbench({
     host,
@@ -356,10 +365,17 @@ export function installQueryRuntime(
     mappings: () => data.mappings(),
     onEntity: navigateEntity,
     onResultHighlights: highlightQueryResults,
-    updateUrl: replaceUrl,
-    pushUrl,
+    updateUrl: () => updateQueryUrl(currentQueryUrl(), false),
+    pushUrl: () => updateQueryUrl(currentQueryUrl(), true),
   });
   subscribe(() => queryWorkbench.sync(state.queryBundle));
   queryWorkbench.sync(state.queryBundle);
-  return queryWorkbench;
+  return {
+    focus: () => queryWorkbench.focus(),
+    restoreQuery: (query) => {
+      state.queryBundle = decodeBundle(query ?? "");
+      notify();
+      return currentQueryUrl();
+    },
+  };
 }
