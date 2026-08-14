@@ -113,8 +113,9 @@ npm --prefix web run build
 ```
 
 产出压缩后的 `site/app.js`、`site/chunks/*.js`、`site/query-worker.js` 和
-`site/query.css`。Canvas 启动入口与查询运行时分块构建；构建脚本分别门禁首屏入口和
-全部主线程 chunk 的原始/gzip 体积，防止延迟加载掩盖总包体回归。
+`site/query.css`。Canvas 启动入口、共享 `Data`、Drawer 与查询运行时分块构建；首屏 URL
+只保留相机、节点和不透明查询负载的轻量 codec。构建脚本分别报告首屏入口和全部主线程
+chunk 的原始/gzip 体积，但不以固定前端包体阈值阻断构建。
 
 ## 5. 发布前验证
 
