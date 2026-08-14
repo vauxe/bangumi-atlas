@@ -13,7 +13,7 @@ import {
 import { FOCUS_ZOOM } from "../src/camera";
 import { NEARBY_LABEL_ZOOM } from "../src/labels";
 import type { OrbitState } from "../src/camera";
-import { state } from "../src/store";
+import { removePinnedSelection, state } from "../src/store";
 
 const projectedCommonPixels = (
   value: number,
@@ -42,12 +42,20 @@ test("keeps one desktop graph interaction model and documents its controls", () 
   assert.doesNotMatch(mainSource, /coarsePointer|\(pointer:\s*coarse\)/);
   assert.doesNotMatch(pageSource, /@media\s*\(max-width:/);
   assert.equal(
-    interactionHint(true),
-    "拖动平移 · 右键拖动旋转 · 滚轮缩放 · 单击查看 · S 搜索 · T 俯视 · R 复位 · 单击空白或 Esc 取消选择",
+    interactionHint(true, 0),
+    "拖动平移 · 右键拖动旋转 · 滚轮缩放 · 单击查看 · S 搜索 · T 俯视 · R 复位 · 图钉逐步保留节点和边 · Esc 关闭当前查看",
   );
   assert.equal(
-    interactionHint(false),
+    interactionHint(false, 0),
     "拖动平移 · 右键拖动旋转 · 滚轮缩放 · 单击查看 · S 搜索 · T 俯视 · R 复位",
+  );
+  assert.equal(
+    interactionHint(false, 2),
+    "拖动平移 · 右键拖动旋转 · 滚轮缩放 · 单击查看 · S 搜索 · T 俯视 · R 复位 · 已保留 2 个节点及其关系",
+  );
+  assert.equal(
+    interactionHint(true, 2),
+    "拖动平移 · 右键拖动旋转 · 滚轮缩放 · 单击查看 · S 搜索 · T 俯视 · R 复位 · Esc 关闭当前查看 · 已保留 2 个节点及其关系",
   );
 });
 
@@ -281,6 +289,36 @@ test("dims context only when a query result exists in the context layer", () => 
   }
 });
 
+test("keeps the context spotlight while pinned nodes remain selected", () => {
+  const previous = {
+    selection: state.selection,
+    queryResultRanks: state.queryResultRanks,
+    pinnedSelections: new Set(state.pinnedSelections),
+  };
+  try {
+    state.selection = null;
+    state.queryResultRanks = new Uint32Array();
+    state.pinnedSelections.clear();
+    state.pinnedSelections.add(2);
+    const scene = Object.assign(Object.create(Scene.prototype), {
+      styled: 5,
+    }) as Scene;
+    const uniforms = Reflect.get(scene, "atlasUniforms") as () => {
+      spotlight: number;
+    };
+
+    assert.equal(uniforms.call(scene).spotlight, 1);
+    state.pinnedSelections.clear();
+    assert.equal(uniforms.call(scene).spotlight, 0);
+  } finally {
+    state.selection = previous.selection;
+    state.queryResultRanks = previous.queryResultRanks;
+    state.pinnedSelections.clear();
+    for (const rank of previous.pinnedSelections)
+      state.pinnedSelections.add(rank);
+  }
+});
+
 test("checks sorted query-result visibility from its first rank", () => {
   assert.equal(hasVisibleSortedRank(new Uint32Array(), 100), false);
   assert.equal(hasVisibleSortedRank(Uint32Array.of(4, 900_000), 4), false);
@@ -325,9 +363,11 @@ test("keeps query results in the base layer without color or outline overlays", 
 
 test("loads and draws nearby names only while no working set is selected", async () => {
   const previousSelection = state.selection;
+  const previousPinned = new Set(state.pinnedSelections);
   const loaded: number[][] = [];
   try {
     state.selection = null;
+    state.pinnedSelections.clear();
     const viewport = {
       width: 1_000,
       height: 600,
@@ -343,7 +383,7 @@ test("loads and draws nearby names only while no working set is selected", async
         position[1] * 100 + 200,
       ],
     };
-    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
+    const scene = Object.assign(Object.create(Scene.prototype), {
       geo: {
         positions: new Float32Array([0, 0, 0, 1, 0, 0, -3, 0, 0]),
         loaded: 3,
@@ -366,7 +406,7 @@ test("loads and draws nearby names only while no working set is selected", async
       nearbyRanks: [],
       labelNamesPending: false,
       render: () => undefined,
-    });
+    }) as Scene;
     const refresh = Reflect.get(scene, "refreshNearbyLabels") as () => void;
     refresh.call(scene);
     // rank 2 在三维近邻半径内，但投影到视口左侧；它不应占用候选预算
@@ -385,8 +425,13 @@ test("loads and draws nearby names only while no working set is selected", async
 
     state.selection = 0;
     assert.deepEqual(buildLayers.call(scene), []);
+    state.selection = null;
+    state.pinnedSelections.add(0);
+    assert.deepEqual(buildLayers.call(scene), []);
   } finally {
     state.selection = previousSelection;
+    state.pinnedSelections.clear();
+    for (const rank of previousPinned) state.pinnedSelections.add(rank);
   }
 });
 
@@ -546,6 +591,488 @@ test("lets working-set nodes grow when zooming in", () => {
       covers.props.getSize as number,
       covers.props.sizeMinPixels as number,
       covers.props.sizeMaxPixels as number,
+    );
+  } finally {
+    Object.assign(state, previousState);
+    if (originalWindow === undefined)
+      Reflect.deleteProperty(globalThis, "window");
+    else
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: originalWindow,
+      });
+  }
+});
+
+test("reveals every relationship edge by the final animation frame", () => {
+  const previousState = {
+    selection: state.selection,
+    neighbors: state.neighbors,
+    neighborLabels: state.neighborLabels,
+  };
+  const originalWindow = globalThis.window;
+
+  try {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { matchMedia: () => ({ matches: false }) },
+    });
+    state.selection = 0;
+    state.neighbors = Array.from({ length: 75 }, (_, index) => index + 1);
+    state.neighborLabels = state.neighbors.map(() => "关联");
+
+    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
+      geo: { key: new Uint32Array(76) },
+      wsAnimStart: performance.now() - 2_200,
+      posOf: (rank: number): [number, number, number] => [rank, 0, 0],
+      cb: {
+        onHover: () => undefined,
+        onHoverEdge: () => undefined,
+        onPick: () => undefined,
+      },
+    });
+    const buildLayers = Reflect.get(scene, "workingSetLayers") as () => {
+      id: string;
+      props: {
+        data?: {
+          length: number;
+          attributes: { getColor: { value: Uint8Array } };
+        };
+      };
+    }[];
+
+    const edges = buildLayers.call(scene).find(({ id }) => id === "ws-edges");
+    assert.ok(edges?.props.data);
+    assert.equal(edges.props.data.length, 150);
+    const colors = edges.props.data.attributes.getColor.value;
+    for (let offset = 3; offset < colors.length; offset += 4)
+      assert.ok((colors[offset] ?? 0) > 0, `transparent segment at ${offset}`);
+  } finally {
+    Object.assign(state, previousState);
+    if (originalWindow === undefined)
+      Reflect.deleteProperty(globalThis, "window");
+    else
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: originalWindow,
+      });
+  }
+});
+
+test("starts the cascade when an asynchronously loaded relation fan arrives", () => {
+  const previous = {
+    selection: state.selection,
+    neighbors: state.neighbors,
+    pinnedWorkingSets: new Map(state.pinnedWorkingSets),
+  };
+  let animations = 0;
+  let renders = 0;
+  try {
+    state.selection = 7;
+    state.neighbors = [];
+    state.pinnedWorkingSets.clear();
+    const scene = Object.assign(Object.create(Scene.prototype), {
+      lastSelection: 7,
+      lastWorkingNeighbors: state.neighbors,
+      startWorkingSetAnim: () => animations++,
+      scheduleNearbyLabels: () => undefined,
+      render: () => renders++,
+    }) as Scene;
+
+    state.neighbors = [8, 9];
+    scene.recolor();
+    scene.recolor();
+
+    assert.equal(animations, 1);
+    assert.equal(renders, 2);
+  } finally {
+    state.selection = previous.selection;
+    state.neighbors = previous.neighbors;
+    state.pinnedWorkingSets.clear();
+    for (const [rank, workingSet] of previous.pinnedWorkingSets)
+      state.pinnedWorkingSets.set(rank, workingSet);
+  }
+});
+
+test("keeps pinned nodes selected while the current selection changes", () => {
+  const previousState = {
+    selection: state.selection,
+    neighbors: state.neighbors,
+    neighborLabels: state.neighborLabels,
+    pinnedSelections: new Set(state.pinnedSelections),
+    pinnedWorkingSets: new Map(state.pinnedWorkingSets),
+  };
+  const originalWindow = globalThis.window;
+
+  try {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { matchMedia: () => ({ matches: true }) },
+    });
+    state.selection = null;
+    state.neighbors = [];
+    state.neighborLabels = [];
+    state.pinnedSelections.clear();
+    state.pinnedWorkingSets.clear();
+    state.pinnedSelections.add(1);
+    state.pinnedSelections.add(2);
+
+    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
+      geo: { key: new Uint32Array(4) },
+      wsAnimStart: performance.now(),
+      posOf: (rank: number): [number, number, number] => [rank, 0, 0],
+      cb: {
+        onHover: () => undefined,
+        onHoverEdge: () => undefined,
+        onPick: () => undefined,
+      },
+    });
+    const buildLayers = Reflect.get(scene, "workingSetLayers") as () => {
+      id: string;
+      props: { data?: { length: number } };
+    }[];
+    const layerLength = (
+      layers: ReturnType<typeof buildLayers>,
+      id: string,
+    ): number => {
+      const layer = layers.find((candidate) => candidate.id === id);
+      assert.ok(layer?.props.data);
+      return layer.props.data.length;
+    };
+
+    const pinnedOnly = buildLayers.call(scene);
+    assert.equal(layerLength(pinnedOnly, "ws-pins"), 2);
+    assert.equal(layerLength(pinnedOnly, "ws-lit"), 2);
+
+    state.selection = 1;
+    const selectedPinned = buildLayers.call(scene);
+    assert.equal(layerLength(selectedPinned, "ws-pins"), 2);
+    assert.equal(
+      layerLength(selectedPinned, "ws-lit"),
+      2,
+      "the current pinned node must not be drawn twice",
+    );
+
+    state.selection = 3;
+    const exploring = buildLayers.call(scene);
+    assert.equal(layerLength(exploring, "ws-pins"), 2);
+    assert.equal(layerLength(exploring, "ws-lit"), 3);
+  } finally {
+    state.selection = previousState.selection;
+    state.neighbors = previousState.neighbors;
+    state.neighborLabels = previousState.neighborLabels;
+    state.pinnedSelections.clear();
+    for (const rank of previousState.pinnedSelections)
+      state.pinnedSelections.add(rank);
+    state.pinnedWorkingSets.clear();
+    for (const [rank, workingSet] of previousState.pinnedWorkingSets)
+      state.pinnedWorkingSets.set(rank, workingSet);
+    if (originalWindow === undefined)
+      Reflect.deleteProperty(globalThis, "window");
+    else
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: originalWindow,
+      });
+  }
+});
+
+test("retains each pinned node's complete relation fan for cumulative expansion", () => {
+  const previousState = {
+    selection: state.selection,
+    neighbors: state.neighbors,
+    neighborLabels: state.neighborLabels,
+    pinnedSelections: new Set(state.pinnedSelections),
+    pinnedWorkingSets: new Map(state.pinnedWorkingSets),
+  };
+  const originalWindow = globalThis.window;
+
+  try {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { matchMedia: () => ({ matches: true }) },
+    });
+    state.selection = null;
+    state.neighbors = [];
+    state.neighborLabels = [];
+    state.pinnedSelections.clear();
+    state.pinnedWorkingSets.clear();
+    state.pinnedSelections.add(1);
+    state.pinnedSelections.add(3);
+    state.pinnedWorkingSets.set(1, {
+      ranks: [2, 3],
+      labels: ["关联甲", "关联乙"],
+    });
+    state.pinnedWorkingSets.set(3, {
+      ranks: [4],
+      labels: ["关联丙"],
+    });
+
+    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
+      geo: { key: new Uint32Array(5) },
+      wsAnimStart: performance.now(),
+      posOf: (rank: number): [number, number, number] => [rank, 0, 0],
+      cb: {
+        onHover: () => undefined,
+        onHoverEdge: () => undefined,
+        onPick: () => undefined,
+      },
+    });
+    const buildLayers = Reflect.get(scene, "workingSetLayers") as () => {
+      id: string;
+      props: { data?: { length: number } };
+    }[];
+    const layerLength = (
+      layers: ReturnType<typeof buildLayers>,
+      ...ids: string[]
+    ): number => {
+      return layers.reduce((total, layer) => {
+        if (!ids.includes(layer.id)) return total;
+        assert.ok(layer.props.data);
+        return total + layer.props.data.length;
+      }, 0);
+    };
+
+    const expanded = buildLayers.call(scene);
+    assert.equal(
+      layerLength(expanded, "ws-edges", "ws-retained-edges"),
+      6,
+    );
+    assert.equal(layerLength(expanded, "ws-lit", "ws-retained-lit"), 4);
+    assert.equal(layerLength(expanded, "ws-pins"), 2);
+
+    removePinnedSelection(1);
+    const afterRemovingFirstFan = buildLayers.call(scene);
+    assert.equal(
+      layerLength(
+        afterRemovingFirstFan,
+        "ws-edges",
+        "ws-retained-edges",
+      ),
+      2,
+    );
+    assert.equal(
+      layerLength(afterRemovingFirstFan, "ws-lit", "ws-retained-lit"),
+      2,
+    );
+    assert.equal(layerLength(afterRemovingFirstFan, "ws-pins"), 1);
+  } finally {
+    state.selection = previousState.selection;
+    state.neighbors = previousState.neighbors;
+    state.neighborLabels = previousState.neighborLabels;
+    state.pinnedSelections.clear();
+    for (const rank of previousState.pinnedSelections)
+      state.pinnedSelections.add(rank);
+    state.pinnedWorkingSets.clear();
+    for (const [rank, workingSet] of previousState.pinnedWorkingSets)
+      state.pinnedWorkingSets.set(rank, workingSet);
+    if (originalWindow === undefined)
+      Reflect.deleteProperty(globalThis, "window");
+    else
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: originalWindow,
+      });
+  }
+});
+
+test("does not draw a retained fan twice while its root is the current focus", () => {
+  const previousState = {
+    selection: state.selection,
+    neighbors: state.neighbors,
+    neighborLabels: state.neighborLabels,
+    pinnedSelections: new Set(state.pinnedSelections),
+    pinnedWorkingSets: new Map(state.pinnedWorkingSets),
+  };
+  const originalWindow = globalThis.window;
+
+  try {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { matchMedia: () => ({ matches: true }) },
+    });
+    state.selection = 1;
+    state.neighbors = [2, 3];
+    state.neighborLabels = ["关联甲", "关联乙"];
+    state.pinnedSelections.clear();
+    state.pinnedWorkingSets.clear();
+    state.pinnedSelections.add(1);
+    state.pinnedWorkingSets.set(1, {
+      ranks: [2, 3],
+      labels: ["关联甲", "关联乙"],
+    });
+
+    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
+      geo: { key: new Uint32Array(4) },
+      wsAnimStart: performance.now(),
+      posOf: (rank: number): [number, number, number] => [rank, 0, 0],
+      cb: {
+        onHover: () => undefined,
+        onHoverEdge: () => undefined,
+        onPick: () => undefined,
+      },
+    });
+    const buildLayers = Reflect.get(scene, "workingSetLayers") as () => {
+      id: string;
+      props: { data?: { length: number } };
+    }[];
+
+    const edges = buildLayers.call(scene).find(({ id }) => id === "ws-edges");
+    assert.equal(edges?.props.data?.length, 4);
+  } finally {
+    state.selection = previousState.selection;
+    state.neighbors = previousState.neighbors;
+    state.neighborLabels = previousState.neighborLabels;
+    state.pinnedSelections.clear();
+    for (const rank of previousState.pinnedSelections)
+      state.pinnedSelections.add(rank);
+    state.pinnedWorkingSets.clear();
+    for (const [rank, workingSet] of previousState.pinnedWorkingSets)
+      state.pinnedWorkingSets.set(rank, workingSet);
+    if (originalWindow === undefined)
+      Reflect.deleteProperty(globalThis, "window");
+    else
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: originalWindow,
+      });
+  }
+});
+
+test("reuses stable working-set geometry across camera renders", () => {
+  const previousState = {
+    selection: state.selection,
+    neighbors: state.neighbors,
+    neighborLabels: state.neighborLabels,
+    pinnedSelections: new Set(state.pinnedSelections),
+    pinnedWorkingSets: new Map(state.pinnedWorkingSets),
+  };
+  const originalWindow = globalThis.window;
+
+  try {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { matchMedia: () => ({ matches: true }) },
+    });
+    state.selection = null;
+    state.neighbors = [];
+    state.neighborLabels = [];
+    state.pinnedSelections.clear();
+    state.pinnedWorkingSets.clear();
+    state.pinnedSelections.add(1);
+    state.pinnedWorkingSets.set(1, {
+      ranks: [2, 3, 4],
+      labels: ["关联甲", "关联乙", "关联丙"],
+    });
+
+    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
+      geo: {
+        key: new Uint32Array(5),
+        loaded: 5,
+        sparse: new Map<number, [number, number, number]>(),
+      },
+      wsAnimStart: 0,
+      posOf: (rank: number): [number, number, number] => [rank, 0, 0],
+      cb: {
+        onHover: () => undefined,
+        onHoverEdge: () => undefined,
+        onPick: () => undefined,
+      },
+    });
+    const buildLayers = Reflect.get(scene, "workingSetLayers") as () => {
+      id: string;
+    }[];
+
+    const first = buildLayers.call(scene);
+    const second = buildLayers.call(scene);
+
+    const firstEdges = first.find(({ id }) => id === "ws-retained-edges");
+    const firstNodes = first.find(({ id }) => id === "ws-retained-lit");
+    assert.ok(firstEdges);
+    assert.ok(firstNodes);
+    assert.equal(
+      second.find(({ id }) => id === "ws-retained-edges"),
+      firstEdges,
+    );
+    assert.equal(
+      second.find(({ id }) => id === "ws-retained-lit"),
+      firstNodes,
+    );
+  } finally {
+    state.selection = previousState.selection;
+    state.neighbors = previousState.neighbors;
+    state.neighborLabels = previousState.neighborLabels;
+    state.pinnedSelections.clear();
+    for (const rank of previousState.pinnedSelections)
+      state.pinnedSelections.add(rank);
+    state.pinnedWorkingSets.clear();
+    for (const [rank, workingSet] of previousState.pinnedWorkingSets)
+      state.pinnedWorkingSets.set(rank, workingSet);
+    if (originalWindow === undefined)
+      Reflect.deleteProperty(globalThis, "window");
+    else
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: originalWindow,
+      });
+  }
+});
+
+test("reuses retained geometry while the current relation fan animates", () => {
+  const previousState = {
+    selection: state.selection,
+    neighbors: state.neighbors,
+    neighborLabels: state.neighborLabels,
+    pinnedSelections: state.pinnedSelections,
+    pinnedWorkingSets: state.pinnedWorkingSets,
+  };
+  const originalWindow = globalThis.window;
+
+  try {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { matchMedia: () => ({ matches: false }) },
+    });
+    state.selection = 10;
+    state.neighbors = [11, 12];
+    state.neighborLabels = ["当前甲", "当前乙"];
+    state.pinnedSelections = new Set([1]);
+    state.pinnedWorkingSets = new Map([
+      [1, {
+        ranks: [2, 3, 4],
+        labels: ["保留甲", "保留乙", "保留丙"],
+      }],
+    ]);
+
+    const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
+      geo: {
+        key: new Uint32Array(13),
+        loaded: 13,
+        sparse: new Map<number, [number, number, number]>(),
+      },
+      wsAnimStart: performance.now(),
+      posOf: (rank: number): [number, number, number] => [rank, 0, 0],
+      cb: {
+        onHover: () => undefined,
+        onHoverEdge: () => undefined,
+        onPick: () => undefined,
+      },
+    });
+    const buildLayers = Reflect.get(scene, "workingSetLayers") as () => {
+      id: string;
+    }[];
+
+    const first = buildLayers.call(scene);
+    const second = buildLayers.call(scene);
+    const firstRetained = first.find(({ id }) => id === "ws-retained-edges");
+    const secondRetained = second.find(({ id }) => id === "ws-retained-edges");
+
+    assert.ok(firstRetained);
+    assert.equal(secondRetained, firstRetained);
+    assert.notEqual(
+      second.find(({ id }) => id === "ws-edges"),
+      first.find(({ id }) => id === "ws-edges"),
+      "only the animated fan should rebuild while its opacity changes",
     );
   } finally {
     Object.assign(state, previousState);

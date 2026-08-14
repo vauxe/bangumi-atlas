@@ -57,6 +57,8 @@ class FakeDrawerElement {
         closest: (selector: string) =>
           selector === "[data-tab]" && tab !== null
             ? { getAttribute: () => tab }
+            : selector === `#${id}`
+              ? { getAttribute: () => null }
             : null,
       },
     });
@@ -140,7 +142,7 @@ function makeDrawer(
 }
 
 test("renders the Bangumi link as an accessible top action", () => {
-  const markup = drawerTopActions((1 << 24) | 42);
+  const markup = drawerTopActions((1 << 24) | 42, false);
 
   assert.match(markup, /href="https:\/\/bgm\.tv\/subject\/42"/);
   assert.match(markup, /title="[^"]*bgm\.tv[^"]*"/);
@@ -148,10 +150,75 @@ test("renders the Bangumi link as an accessible top action", () => {
   assert.match(markup, /target="_blank"/);
   assert.match(markup, /rel="noopener"/);
   assert.match(markup, /<svg/);
+  assert.match(markup, /id="drawer-pin"/);
+  assert.match(markup, /aria-pressed="false"/);
+  assert.match(markup, /aria-label="保留节点及其关系"/);
+});
+
+test("exposes the pinned state through the drawer action", () => {
+  const markup = drawerTopActions((1 << 24) | 42, true);
+
+  assert.match(markup, /id="drawer-pin"/);
+  assert.match(markup, /aria-pressed="true"/);
+  assert.match(markup, /aria-label="取消保留节点及其关系"/);
+});
+
+test("toggles the current node from the drawer pin action", () => {
+  const previousSelection = state.selection;
+  const previousPinned = new Set(state.pinnedSelections);
+  const previousWorkingSets = new Map(state.pinnedWorkingSets);
+  const element = new FakeDrawerElement();
+  const drawer = makeDrawer(element);
+  let rerenders = 0;
+  try {
+    state.pinnedSelections.clear();
+    state.pinnedWorkingSets.clear();
+    state.selection = 42;
+    Reflect.set(drawer, "cur", { rank: 42 });
+    Reflect.set(drawer, "rerender", () => rerenders++);
+
+    element.clickTarget({ id: "drawer-pin" });
+    assert.deepEqual([...state.pinnedSelections], [42]);
+    assert.equal(rerenders, 1);
+
+    element.clickTarget({ id: "drawer-pin" });
+    assert.deepEqual([...state.pinnedSelections], []);
+    assert.equal(rerenders, 2);
+  } finally {
+    state.selection = previousSelection;
+    state.pinnedSelections.clear();
+    for (const rank of previousPinned) state.pinnedSelections.add(rank);
+    state.pinnedWorkingSets.clear();
+    for (const [rank, workingSet] of previousWorkingSets)
+      state.pinnedWorkingSets.set(rank, workingSet);
+  }
+});
+
+test("replaces stale details while the next selection is loading", () => {
+  const previousSelection = state.selection;
+  const element = new FakeDrawerElement();
+  const drawer = makeDrawer(element);
+  try {
+    state.selection = 42;
+    Reflect.set(drawer, "cur", { rank: 42 });
+
+    state.selection = 99;
+    drawer.syncState();
+
+    assert.match(element.innerHTML, /加载中/);
+    assert.equal(Reflect.get(drawer, "cur"), null);
+    assert.equal(element.classList.contains("open"), true);
+    assert.equal(element.inert, false);
+    assert.equal(element.getAttribute("aria-hidden"), "false");
+  } finally {
+    state.selection = previousSelection;
+  }
 });
 
 test("omits the external action outside node details", () => {
-  assert.doesNotMatch(drawerTopActions(), /bgm\.tv/);
+  const markup = drawerTopActions();
+  assert.doesNotMatch(markup, /bgm\.tv/);
+  assert.doesNotMatch(markup, /drawer-pin/);
 });
 
 test("keeps query construction out of the node overview", () => {

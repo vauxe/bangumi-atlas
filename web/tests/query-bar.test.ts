@@ -829,6 +829,16 @@ test("continues entity-reference suggestions until the release is exhausted", ()
   assert.match(queryRuntimeSource, /limit: offset \+ pageSize \+ 1/);
 });
 
+test("resolves one query entity through bounded reverse-index ranges", () => {
+  const navigation = queryRuntimeSource.match(
+    /const navigateEntity = async[\s\S]*?\n  };(?=\n\n  const highlightQueryResults)/,
+  )?.[0];
+
+  assert.ok(navigation);
+  assert.equal(navigation.match(/loadRanksByKey\(\[/g)?.length, 2);
+  assert.doesNotMatch(navigation, /ensureRankIndex\(/);
+});
+
 test("gives the complete relationship vocabulary a full-width searchable list", () => {
   assert.match(queryBarSource, /`选择\$\{OWNER_LABEL\[targetOwner\]\}`/);
   assert.match(
