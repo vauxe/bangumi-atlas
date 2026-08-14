@@ -1,6 +1,7 @@
 export interface DrawerRuntime {
   show(rank: number, key: number, episodeId?: number): Promise<void>;
   hide(): void;
+  syncState(): void;
 }
 
 export interface LazyDrawerRuntime extends DrawerRuntime {
@@ -55,5 +56,7 @@ export function createLazyDrawerRuntime(
     runtime?.hide();
   };
 
-  return { prepare, show, hide };
+  const syncState = (): void => runtime?.syncState();
+
+  return { prepare, show, hide, syncState };
 }

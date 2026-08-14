@@ -1,4 +1,4 @@
-import type { UrlState } from "./url";
+import type { UrlState } from "./view-url";
 
 export interface LocatedTarget {
   key: number;

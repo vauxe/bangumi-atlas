@@ -39,16 +39,28 @@ import type { Bounds3D, Geometry } from "./types";
 
 export type { OrbitState } from "./camera";
 
-export function interactionHint(selected: boolean): string {
+export function interactionHint(selected: boolean, pinnedCount = 0): string {
   const base =
     "拖动平移 · 右键拖动旋转 · 滚轮缩放 · 单击查看 · S 搜索 · T 俯视 · R 复位";
-  if (!selected) return base;
-  return `${base} · 单击空白或 Esc 取消选择`;
+  const status: string[] = [];
+  if (selected) {
+    if (pinnedCount === 0) status.push("图钉逐步保留节点和边");
+    status.push("Esc 关闭当前查看");
+  }
+  if (pinnedCount > 0)
+    status.push(`已保留 ${pinnedCount} 个节点及其关系`);
+  return status.length ? `${base} · ${status.join(" · ")}` : base;
+}
+
+function hasWorkingSet(): boolean {
+  return state.selection !== null || state.pinnedSelections.size > 0;
 }
 
 const EDGE_WIDTH = 1;
+const WORKING_DECORATION_LIMIT = 50;
 const CASCADE_STEP_MS = 30;
 const CASCADE_FADE_MS = 200;
+const CASCADE_STEPS = 50;
 const PULSE_MS = 500;
 const ANCHOR_FLASH_MS = 500;
 const NEARBY_LABEL_SETTLE_MS = 140;
@@ -58,6 +70,19 @@ const FOCUS_SCALE = 2 ** FOCUS_ZOOM;
 const WORKING_NODE_RADIUS = 9 / FOCUS_SCALE;
 const WORKING_COVER_SIZE = 16.5 / FOCUS_SCALE;
 const WORKING_GLOW_RADIUS = 36 / FOCUS_SCALE;
+
+function cascadeProgress(
+  elapsed: number,
+  index: number,
+  reduced: boolean,
+): number {
+  if (reduced) return 1;
+  const step = Math.min(index, CASCADE_STEPS - 1);
+  return Math.max(
+    0,
+    Math.min(1, (elapsed - step * CASCADE_STEP_MS) / CASCADE_FADE_MS),
+  );
+}
 
 const circleCropShaderModule = {
   name: "circleCrop",
@@ -265,6 +290,73 @@ interface ContextData {
   attributes: Record<string, unknown>;
 }
 
+type WorkingPosition = [number, number, number];
+
+interface WorkingShown {
+  rank: number;
+  label: string;
+  pos: WorkingPosition;
+}
+
+interface WorkingEdge {
+  a: WorkingPosition;
+  b: WorkingPosition;
+  label: string;
+  alpha: number;
+  retained: boolean;
+}
+
+interface WorkingNode {
+  pos: WorkingPosition;
+  active: boolean;
+  pinned: boolean;
+  retained: boolean;
+  neighborIndex: number | null;
+}
+
+interface WorkingSetCore {
+  selectedRank: number | null;
+  selectedPos: WorkingPosition | null;
+  pinned: { rank: number; pos: WorkingPosition }[];
+  shown: WorkingShown[];
+  edgeSegs: WorkingEdge[];
+  nodes: Map<number, WorkingNode>;
+  layers: unknown[];
+}
+
+interface WorkingGeometryLayers {
+  edgeLayer: unknown | null;
+  nodeLayers: unknown[];
+}
+
+interface RetainedWorkingSetCore {
+  edgeSegs: WorkingEdge[];
+  nodes: Map<number, WorkingNode>;
+  geometry: WorkingGeometryLayers;
+}
+
+interface WorkingSetCoreCache {
+  selection: number | null;
+  neighbors: readonly number[];
+  neighborLabels: readonly string[];
+  pinnedSelections: object;
+  pinnedWorkingSets: object;
+  geometryLoaded: number;
+  sparseCount: number;
+  reduced: boolean;
+  core: WorkingSetCore;
+}
+
+interface RetainedWorkingSetCoreCache {
+  selection: number | null;
+  neighbors: readonly number[];
+  pinnedSelections: object;
+  pinnedWorkingSets: object;
+  geometryLoaded: number;
+  sparseCount: number;
+  core: RetainedWorkingSetCore;
+}
+
 export interface SceneCallbacks {
   onPick: (rank: number | null) => void;
   onHover: (rank: number | null, x: number, y: number) => void;
@@ -300,6 +392,9 @@ export class Scene {
   private wsAnimStart = 0;
   private wsRaf = 0;
   private lastSelection: number | null = null;
+  private lastWorkingNeighbors: readonly number[] = state.neighbors;
+  private workingSetCoreCache: WorkingSetCoreCache | null = null;
+  private retainedWorkingSetCoreCache: RetainedWorkingSetCoreCache | null = null;
   private lastPickCycle: { x: number; y: number; depth: number } | null =
     null;
   private anchorCache: { x: number; y: number; rank: number; at: number } | null =
@@ -436,7 +531,7 @@ export class Scene {
     if (this.nearbyTimer !== null) clearTimeout(this.nearbyTimer);
     this.nearbyTimer = null;
     if (
-      state.selection !== null ||
+      hasWorkingSet() ||
       !this.cb.nameOf ||
       this.camera.viewState.zoom < NEARBY_LABEL_ZOOM
     ) {
@@ -456,7 +551,7 @@ export class Scene {
       return [projected?.[0] ?? NaN, projected?.[1] ?? NaN];
     };
     const next =
-      state.selection === null && viewport
+      !hasWorkingSet() && viewport
         ? nearbyLabelRanks(
             this.geo.positions,
             this.geo.loaded,
@@ -478,7 +573,7 @@ export class Scene {
 
   private nearbyLabelLayers(): unknown[] {
     const { nameOf } = this.cb;
-    if (state.selection !== null || !nameOf || !this.nearbyRanks.length)
+    if (hasWorkingSet() || !nameOf || !this.nearbyRanks.length)
       return [];
     const viewport = this.deck.getViewports()[0];
     if (!viewport) return [];
@@ -568,7 +663,17 @@ export class Scene {
 
   /** 选择只更新 uniform；查询变化另刷新结果成员掩码。 */
   recolor(): void {
-    if (state.selection !== this.lastSelection) {
+    const selectionChanged = state.selection !== this.lastSelection;
+    const neighborsChanged = state.neighbors !== this.lastWorkingNeighbors;
+    this.lastWorkingNeighbors = state.neighbors;
+    if (
+      selectionChanged ||
+      (
+        neighborsChanged &&
+        state.selection !== null &&
+        !state.pinnedWorkingSets.has(state.selection)
+      )
+    ) {
       this.lastSelection = state.selection;
       this.startWorkingSetAnim();
     }
@@ -668,7 +773,7 @@ export class Scene {
     cancelAnimationFrame(this.wsRaf);
     if (prefersReducedMotion() || state.selection === null) return;
     const total =
-      Math.min(state.neighbors.length, 50) * CASCADE_STEP_MS +
+      Math.min(state.neighbors.length, CASCADE_STEPS) * CASCADE_STEP_MS +
       CASCADE_FADE_MS +
       PULSE_MS;
     const tick = (): void => {
@@ -679,74 +784,19 @@ export class Scene {
     this.wsRaf = requestAnimationFrame(tick);
   }
 
-  private workingSetLayers(): unknown[] {
-    if (state.selection === null) return [];
-    const sel = state.selection;
-    const selPos = this.posOf(sel);
-    if (!selPos) return [];
-    const reduced = prefersReducedMotion();
-    const t = performance.now() - this.wsAnimStart;
-    // 未流式覆盖且无 sparse 坐标的邻居先不画(位置未知,不能画到原点)
-    const shown: {
-      rank: number;
-      label: string;
-      pos: [number, number, number];
-    }[] = [];
-    state.neighbors.forEach((rk, i) => {
-      const p = this.posOf(rk);
-      if (p)
-        shown.push({
-          rank: rk,
-          label: state.neighborLabels[i] ?? "",
-          pos: p,
-        });
-    });
-    const ranks = [sel, ...shown.map((s) => s.rank)];
-    const pos = new Float32Array(ranks.length * 3);
-    const col = new Uint8Array(ranks.length * 4);
-    pos.set(selPos, 0);
-    col.set([255, 255, 255, 255], 0);
-    shown.forEach((s, i) => {
-      pos.set(s.pos, (i + 1) * 3);
-      const [r, g, b] = TYPE_COLORS[etype(this.geo.key[s.rank] ?? 0)] ?? [
-        255, 255, 255,
-      ];
-      // 级联淡入:第 i 个邻居延迟 i*30ms,各自 200ms 到位
-      const k = reduced
-        ? 1
-        : Math.max(
-            0,
-            Math.min(1, (t - i * CASCADE_STEP_MS) / CASCADE_FADE_MS),
-          );
-      col.set([r, g, b, Math.round(255 * k)], (i + 1) * 4);
-    });
-    const edgeSegs: {
-      a: [number, number, number];
-      b: [number, number, number];
-      label: string;
-      alpha: number;
-    }[] = [];
-    shown.forEach((s, i) => {
-      const k = reduced
-        ? 1
-        : Math.max(
-            0,
-            Math.min(1, (t - i * CASCADE_STEP_MS) / CASCADE_FADE_MS),
-          );
-      edgeSegs.push({
-        a: selPos,
-        b: s.pos,
-        label: s.label,
-        alpha: Math.round(160 * k),
-      });
-    });
-    // 方向梯度:每条边拆成两个半段,亮端 = 关系的目标端。
-    // "← " 前缀表示选中侧是目标(指向选中节点);无标签的
-    // 对比扇没有方向语义,两端等亮。
+  private buildWorkingGeometryLayers(
+    prefix: "" | "retained",
+    edgeSegs: WorkingEdge[],
+    nodes: Map<number, WorkingNode>,
+    reduced: boolean,
+    t: number,
+  ): WorkingGeometryLayers {
+    const layerId = (part: string): string =>
+      prefix ? `ws-${prefix}-${part}` : `ws-${part}`;
     const linePos = new Float32Array(edgeSegs.length * 12);
-    const lineAlpha = new Uint8Array(edgeSegs.length * 8);
-    edgeSegs.forEach((sg, i) => {
-      const mid: [number, number, number] = [
+    const lineColor = new Uint8Array(edgeSegs.length * 8);
+    edgeSegs.forEach((sg, index) => {
+      const mid: WorkingPosition = [
         (sg.a[0] + sg.b[0]) / 2,
         (sg.a[1] + sg.b[1]) / 2,
         (sg.a[2] + sg.b[2]) / 2,
@@ -755,106 +805,417 @@ export class Scene {
       const towardSelf = sg.label.startsWith("← ");
       const aBright = !hasDirection || towardSelf;
       const bBright = !hasDirection || !towardSelf;
-      const o = i * 12;
-      linePos.set(sg.a, o);
-      linePos.set(mid, o + 3);
-      linePos.set(mid, o + 6);
-      linePos.set(sg.b, o + 9);
+      const offset = index * 12;
+      linePos.set(sg.a, offset);
+      linePos.set(mid, offset + 3);
+      linePos.set(mid, offset + 6);
+      linePos.set(sg.b, offset + 9);
       const dim = Math.round(sg.alpha * 0.2);
-      lineAlpha.set([255, 255, 255, aBright ? sg.alpha : dim], i * 8);
-      lineAlpha.set([255, 255, 255, bBright ? sg.alpha : dim], i * 8 + 4);
+      const color = sg.retained ? [242, 91, 166] : [255, 255, 255];
+      lineColor.set([...color, aBright ? sg.alpha : dim], index * 8);
+      lineColor.set([...color, bBright ? sg.alpha : dim], index * 8 + 4);
     });
-    const layers: unknown[] = [
-      new LineLayer({
-        id: "ws-edges",
-        data: {
-          length: edgeSegs.length * 2,
-          attributes: {
-            getSourcePosition: { value: linePos, size: 3, stride: 24 },
-            getTargetPosition: {
-              value: linePos,
-              size: 3,
-              stride: 24,
-              offset: 12,
+    const edgeLayer = edgeSegs.length
+      ? new LineLayer({
+          id: layerId("edges"),
+          data: {
+            length: edgeSegs.length * 2,
+            attributes: {
+              getSourcePosition: { value: linePos, size: 3, stride: 24 },
+              getTargetPosition: {
+                value: linePos,
+                size: 3,
+                stride: 24,
+                offset: 12,
+              },
+              getColor: { value: lineColor, size: 4, normalized: true },
             },
-            getColor: { value: lineAlpha, size: 4, normalized: true },
+          },
+          getWidth: EDGE_WIDTH,
+          widthUnits: "pixels",
+          pickable: true,
+          onHover: (info: { index: number; x: number; y: number }) => {
+            const seg =
+              info.index >= 0 ? edgeSegs[info.index >> 1] : undefined;
+            this.cb.onHoverEdge(seg?.label || null, info.x, info.y);
+          },
+          parameters: { depthCompare: "always", depthWriteEnabled: false },
+        })
+      : null;
+    const ranks = [...nodes.keys()];
+    if (!ranks.length) return { edgeLayer, nodeLayers: [] };
+    const pos = new Float32Array(ranks.length * 3);
+    const col = new Uint8Array(ranks.length * 4);
+    ranks.forEach((rank, index) => {
+      const node = nodes.get(rank)!;
+      pos.set(node.pos, index * 3);
+      if (node.active || node.pinned) {
+        col.set([255, 255, 255, 255], index * 4);
+        return;
+      }
+      const [r, g, b] = TYPE_COLORS[etype(this.geo.key[rank] ?? 0)] ?? [
+        255, 255, 255,
+      ];
+      if (node.retained) {
+        col.set([r, g, b, 210], index * 4);
+        return;
+      }
+      const k = cascadeProgress(t, node.neighborIndex ?? 0, reduced);
+      col.set([r, g, b, Math.round(255 * k)], index * 4);
+    });
+    return {
+      edgeLayer,
+      nodeLayers: [
+        new ScatterplotLayer({
+          id: layerId("xray"),
+          data: {
+            length: ranks.length,
+            attributes: {
+              getPosition: { value: pos, size: 3 },
+              getLineColor: { value: col, size: 4, normalized: true },
+            },
+          },
+          radiusUnits: "common",
+          getRadius: WORKING_NODE_RADIUS,
+          radiusMinPixels: 3,
+          filled: false,
+          stroked: true,
+          getLineWidth: 1,
+          lineWidthUnits: "pixels",
+          opacity: 0.45,
+          billboard: true,
+          parameters: {
+            depthCompare: "greater",
+            depthWriteEnabled: false,
+          },
+        }),
+        new ScatterplotLayer({
+          id: layerId("lit"),
+          data: {
+            length: ranks.length,
+            attributes: {
+              getPosition: { value: pos, size: 3 },
+              getFillColor: { value: col, size: 4, normalized: true },
+            },
+          },
+          radiusUnits: "common",
+          getRadius: WORKING_NODE_RADIUS,
+          radiusMinPixels: 3,
+          stroked: true,
+          getLineColor: [255, 255, 255, 200],
+          getLineWidth: 1,
+          lineWidthUnits: "pixels",
+          billboard: true,
+          pickable: true,
+          onHover: (info: { index: number; x: number; y: number }) => {
+            const rank = info.index >= 0 ? ranks[info.index] : undefined;
+            this.cb.onHover(rank ?? null, info.x, info.y);
+          },
+          onClick: (info: { index: number }) => {
+            const rank = ranks[info.index];
+            if (rank !== undefined) this.cb.onPick(rank);
+            return true;
+          },
+        }),
+      ],
+    };
+  }
+
+  private buildWorkingSetCore(
+    reduced: boolean,
+    t: number,
+  ): WorkingSetCore | null {
+    const selectedRank = state.selection;
+    const selectedPos = selectedRank === null ? null : this.posOf(selectedRank);
+    const pinned = [...state.pinnedSelections].flatMap((rank) => {
+      const pos = this.posOf(rank);
+      return pos ? [{ rank, pos }] : [];
+    });
+    if (!selectedPos && pinned.length === 0) return null;
+    // 未流式覆盖且无 sparse 坐标的邻居先不画(位置未知,不能画到原点)
+    const shown: WorkingShown[] = [];
+    const retainedSelected = selectedRank === null
+      ? undefined
+      : state.pinnedWorkingSets.get(selectedRank);
+    const selectedRanks = state.neighbors.length
+      ? state.neighbors
+      : retainedSelected?.ranks ?? state.neighbors;
+    const selectedLabels = state.neighbors.length
+      ? state.neighborLabels
+      : retainedSelected?.labels ?? state.neighborLabels;
+    if (selectedPos)
+      selectedRanks.forEach((rank, index) => {
+        const pos = this.posOf(rank);
+        if (pos)
+          shown.push({
+            rank,
+            label: selectedLabels[index] ?? "",
+            pos,
+          });
+      });
+    const edgeSegs: WorkingEdge[] = [];
+    shown.forEach((s, i) => {
+      const k = retainedSelected && state.neighbors.length === 0
+        ? 1
+        : cascadeProgress(t, i, reduced);
+      edgeSegs.push({
+        a: selectedPos!,
+        b: s.pos,
+        label: s.label,
+        alpha: Math.round(160 * k),
+        retained: false,
+      });
+    });
+    // 多条事实可以连到同一对端:边全部保留,节点实例按 rank 去重。
+    const nodes = new Map<number, WorkingNode>();
+    if (selectedRank !== null && selectedPos)
+      nodes.set(selectedRank, {
+        pos: selectedPos,
+        active: true,
+        pinned: state.pinnedSelections.has(selectedRank),
+        retained: state.pinnedSelections.has(selectedRank),
+        neighborIndex: null,
+      });
+    shown.forEach((node, neighborIndex) => {
+      if (!nodes.has(node.rank))
+        nodes.set(node.rank, {
+          pos: node.pos,
+          active: false,
+          pinned: false,
+          retained: false,
+          neighborIndex,
+        });
+    });
+    for (const node of pinned) {
+      const existing = nodes.get(node.rank);
+      if (existing) {
+        existing.pinned = true;
+        existing.retained = true;
+      }
+      else
+        nodes.set(node.rank, {
+          pos: node.pos,
+          active: false,
+          pinned: true,
+          retained: true,
+          neighborIndex: null,
+        });
+    }
+    const geometry = this.buildWorkingGeometryLayers(
+      "",
+      edgeSegs,
+      nodes,
+      reduced,
+      t,
+    );
+    const layers: unknown[] = [];
+    if (geometry.edgeLayer) layers.push(geometry.edgeLayer);
+    if (selectedPos)
+      layers.push(new ScatterplotLayer({
+        id: "ws-glow",
+        data: {
+          length: 1,
+          attributes: {
+            getPosition: {
+              value: new Float32Array(selectedPos),
+              size: 3,
+            },
           },
         },
-        getWidth: EDGE_WIDTH,
-        widthUnits: "pixels",
-        pickable: true, // 悬停工作集边时显示解码后的关系名
-        onHover: (info: { index: number; x: number; y: number }) => {
-          const seg =
-            info.index >= 0 ? edgeSegs[info.index >> 1] : undefined;
-          this.cb.onHoverEdge(seg?.label || null, info.x, info.y);
-        },
-        parameters: { depthCompare: "always", depthWriteEnabled: false },
-      }),
-      new ScatterplotLayer({
-        id: "ws-glow",
-        data: { length: 1, attributes: { getPosition: { value: pos, size: 3 } } },
         getFillColor: [242, 91, 166, 60],
         radiusUnits: "common",
         getRadius: WORKING_GLOW_RADIUS,
         radiusMinPixels: 12,
         billboard: true,
         parameters: { depthCompare: "always", depthWriteEnabled: false },
-      }),
-      // X-ray 通道：深度失败表示被遮挡，此时绘制低亮描边剪影。
-      new ScatterplotLayer({
-        id: "ws-xray",
+      }));
+    layers.push(...geometry.nodeLayers);
+    if (pinned.length) {
+      const pinPos = new Float32Array(pinned.length * 3);
+      pinned.forEach((node, index) => pinPos.set(node.pos, index * 3));
+      layers.push(new ScatterplotLayer({
+        id: "ws-pins",
         data: {
-          length: ranks.length,
-          attributes: {
-            getPosition: { value: pos, size: 3 },
-            getLineColor: { value: col, size: 4, normalized: true },
-          },
+          length: pinned.length,
+          attributes: { getPosition: { value: pinPos, size: 3 } },
         },
         radiusUnits: "common",
-        getRadius: WORKING_NODE_RADIUS,
-        radiusMinPixels: 3,
+        getRadius: WORKING_NODE_RADIUS * 1.65,
+        radiusMinPixels: 8,
         filled: false,
         stroked: true,
-        getLineWidth: 1,
-        lineWidthUnits: "pixels",
-        opacity: 0.45,
-        billboard: true,
-        parameters: {
-          depthCompare: "greater",
-          depthWriteEnabled: false,
-        },
-      }),
-      // 正常深度通道:高亮实体
-      new ScatterplotLayer({
-        id: "ws-lit",
-        data: {
-          length: ranks.length,
-          attributes: {
-            getPosition: { value: pos, size: 3 },
-            getFillColor: { value: col, size: 4, normalized: true },
-          },
-        },
-        radiusUnits: "common",
-        getRadius: WORKING_NODE_RADIUS,
-        radiusMinPixels: 3,
-        stroked: true,
-        getLineColor: [255, 255, 255, 200],
-        getLineWidth: 1,
+        getLineColor: [242, 91, 166, 235],
+        getLineWidth: 2,
         lineWidthUnits: "pixels",
         billboard: true,
-        pickable: true,
-        onHover: (info: { index: number; x: number; y: number }) => {
-          const rk = info.index >= 0 ? ranks[info.index] : undefined;
-          this.cb.onHover(rk ?? null, info.x, info.y);
-        },
-        onClick: (info: { index: number }) => {
-          const rk = ranks[info.index];
-          if (rk !== undefined) this.cb.onPick(rk);
-          return true;
-        },
-      }),
-    ];
-    const covers = coverItems(ranks, this.geo.key);
+        parameters: { depthCompare: "always", depthWriteEnabled: false },
+      }));
+    }
+    return {
+      selectedRank,
+      selectedPos,
+      pinned,
+      shown,
+      edgeSegs,
+      nodes,
+      layers,
+    };
+  }
+
+  private buildRetainedWorkingSetCore(
+    excludedRanks: ReadonlySet<number>,
+  ): RetainedWorkingSetCore {
+    const edgeSegs: WorkingEdge[] = [];
+    const nodes = new Map<number, WorkingNode>();
+    const addNode = (rank: number, pos: WorkingPosition): void => {
+      if (excludedRanks.has(rank) || nodes.has(rank)) return;
+      nodes.set(rank, {
+        pos,
+        active: false,
+        pinned: false,
+        retained: true,
+        neighborIndex: null,
+      });
+    };
+    for (const [rootRank, workingSet] of state.pinnedWorkingSets) {
+      if (
+        rootRank === state.selection ||
+        !state.pinnedSelections.has(rootRank)
+      ) continue;
+      const rootPos = this.posOf(rootRank);
+      if (!rootPos) continue;
+      addNode(rootRank, rootPos);
+      workingSet.ranks.forEach((rank, index) => {
+        const pos = this.posOf(rank);
+        if (!pos) return;
+        addNode(rank, pos);
+        edgeSegs.push({
+          a: rootPos,
+          b: pos,
+          label: workingSet.labels[index] ?? "",
+          alpha: 105,
+          retained: true,
+        });
+      });
+    }
+    return {
+      edgeSegs,
+      nodes,
+      geometry: this.buildWorkingGeometryLayers(
+        "retained",
+        edgeSegs,
+        nodes,
+        true,
+        0,
+      ),
+    };
+  }
+
+  /** 相机变化不改变工作集几何；动效结束后复用已构造的二进制图层。 */
+  private workingSetLayers(): unknown[] {
+    const reduced = prefersReducedMotion();
+    const t = performance.now() - this.wsAnimStart;
+    const stableAfter =
+      Math.min(state.neighbors.length, CASCADE_STEPS) * CASCADE_STEP_MS +
+      CASCADE_FADE_MS;
+    const stable =
+      reduced ||
+      state.selection === null ||
+      state.neighbors.length === 0 ||
+      t >= stableAfter;
+    const geometryLoaded = this.geo.loaded ?? -1;
+    const sparseCount = this.geo.sparse?.size ?? 0;
+    const cached = this.workingSetCoreCache ?? null;
+    const cacheHit = stable &&
+      cached !== null &&
+      cached.selection === state.selection &&
+      cached.neighbors === state.neighbors &&
+      cached.neighborLabels === state.neighborLabels &&
+      cached.pinnedSelections === state.pinnedSelections &&
+      cached.pinnedWorkingSets === state.pinnedWorkingSets &&
+      cached.geometryLoaded === geometryLoaded &&
+      cached.sparseCount === sparseCount &&
+      cached.reduced === reduced;
+    const core = cacheHit
+      ? cached.core
+      : this.buildWorkingSetCore(reduced, t);
+    if (!core) {
+      this.workingSetCoreCache = null;
+      return [];
+    }
+    if (stable && !cacheHit) {
+      this.workingSetCoreCache = {
+        selection: state.selection,
+        neighbors: state.neighbors,
+        neighborLabels: state.neighborLabels,
+        pinnedSelections: state.pinnedSelections,
+        pinnedWorkingSets: state.pinnedWorkingSets,
+        geometryLoaded,
+        sparseCount,
+        reduced,
+        core,
+      };
+    } else if (!stable) {
+      this.workingSetCoreCache = null;
+    }
+    const retainedCached = this.retainedWorkingSetCoreCache ?? null;
+    const retainedCacheHit =
+      retainedCached !== null &&
+      retainedCached.selection === state.selection &&
+      retainedCached.neighbors === state.neighbors &&
+      retainedCached.pinnedSelections === state.pinnedSelections &&
+      retainedCached.pinnedWorkingSets === state.pinnedWorkingSets &&
+      retainedCached.geometryLoaded === geometryLoaded &&
+      retainedCached.sparseCount === sparseCount;
+    const retained = retainedCacheHit
+      ? retainedCached.core
+      : this.buildRetainedWorkingSetCore(new Set(core.nodes.keys()));
+    if (!retainedCacheHit) {
+      this.retainedWorkingSetCoreCache = {
+        selection: state.selection,
+        neighbors: state.neighbors,
+        pinnedSelections: state.pinnedSelections,
+        pinnedWorkingSets: state.pinnedWorkingSets,
+        geometryLoaded,
+        sparseCount,
+        core: retained,
+      };
+    }
+    const {
+      selectedRank,
+      selectedPos,
+      pinned,
+      shown,
+      edgeSegs,
+      nodes,
+    } = core;
+    const layerId = (layer: unknown): string | undefined =>
+      (layer as { id?: string }).id;
+    const activeEdge = core.layers.find((layer) => layerId(layer) === "ws-edges");
+    const glow = core.layers.find((layer) => layerId(layer) === "ws-glow");
+    const layers: unknown[] = [];
+    if (retained.geometry.edgeLayer) layers.push(retained.geometry.edgeLayer);
+    if (activeEdge) layers.push(activeEdge);
+    if (glow) layers.push(glow);
+    layers.push(...retained.geometry.nodeLayers);
+    layers.push(...core.layers.filter((layer) => {
+      const id = layerId(layer);
+      return id !== "ws-edges" && id !== "ws-glow";
+    }));
+    // 全量边不应触发无界封面与名字请求。常驻装饰只取热度最高的
+    // 前 50 条关系;用户显式保留的根节点始终加入该集合。
+    const decorationRanks = new Set<number>();
+    if (selectedRank !== null && selectedPos) decorationRanks.add(selectedRank);
+    for (const node of shown.slice(0, WORKING_DECORATION_LIMIT))
+      decorationRanks.add(node.rank);
+    for (const node of pinned) decorationRanks.add(node.rank);
+    const decoratedRanks = [...decorationRanks];
+    const neighborIndexByRank = new Map<number, number>();
+    shown.forEach((node, index) => {
+      if (!neighborIndexByRank.has(node.rank))
+        neighborIndexByRank.set(node.rank, index);
+    });
+    const covers = coverItems(decoratedRanks, this.geo.key);
     if (covers.length) {
       // IconLayer auto-packing and onIconError are documented for deck.gl 9.x:
       // https://deck.gl/docs/api-reference/layers/icon-layer#oniconerror-function
@@ -872,17 +1233,11 @@ export class Scene {
           getPosition: (d) => this.posOf(d.rank) ?? [0, 0, 0],
           getSize: WORKING_COVER_SIZE,
           getColor: (d) => {
+            const neighborIndex = neighborIndexByRank.get(d.rank);
             const k =
-              reduced || d.index === 0
+              d.rank === selectedRank || state.pinnedSelections.has(d.rank)
                 ? 1
-                : Math.max(
-                    0,
-                    Math.min(
-                      1,
-                      (t - (d.index - 1) * CASCADE_STEP_MS) /
-                        CASCADE_FADE_MS,
-                    ),
-                  );
+                : cascadeProgress(t, neighborIndex ?? 0, reduced);
             return [255, 255, 255, Math.round(255 * k)];
           },
           updateTriggers: { getColor: t },
@@ -901,11 +1256,17 @@ export class Scene {
       const viewport = this.deck.getViewports()[0];
       if (viewport) {
         const { layers: nameLayers, missing } = workingLabelLayers(
+          decoratedRanks.flatMap((rank) => {
+            const node = nodes.get(rank) ?? retained.nodes.get(rank);
+            return node ? [{ rank, pos: node.pos }] : [];
+          }),
           [
-            { rank: sel, pos: selPos },
-            ...shown.map((s) => ({ rank: s.rank, pos: s.pos })),
+            ...edgeSegs.slice(0, WORKING_DECORATION_LIMIT),
+            ...retained.edgeSegs.slice(
+              0,
+              Math.max(0, WORKING_DECORATION_LIMIT - edgeSegs.length),
+            ),
           ],
-          edgeSegs,
           nameOf,
           (p) => {
             const s = viewport.project(p) as number[];
@@ -919,14 +1280,19 @@ export class Scene {
       }
     }
     // 选中后只播放一次 500ms 扩散，避免持续动画干扰浏览。
-    if (!reduced && t < PULSE_MS) {
+    if (selectedPos && !reduced && t < PULSE_MS) {
       const k = t / PULSE_MS;
       layers.push(
         new ScatterplotLayer({
           id: "ws-pulse",
           data: {
             length: 1,
-            attributes: { getPosition: { value: pos, size: 3 } },
+            attributes: {
+              getPosition: {
+                value: new Float32Array(selectedPos),
+                size: 3,
+              },
+            },
           },
           filled: false,
           stroked: true,
@@ -1036,7 +1402,7 @@ export class Scene {
 
   private atlasUniforms(): AtlasUniforms {
     return {
-      spotlight: state.selection !== null || this.hasVisibleQueryResult()
+      spotlight: hasWorkingSet() || this.hasVisibleQueryResult()
         ? 1
         : 0,
     };

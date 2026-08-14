@@ -17,7 +17,7 @@ import type {
 } from "./entity-presentation";
 import { esc, html, raw } from "./html";
 import { factLabel, factPrimaryOther } from "./neighbors";
-import { state } from "./store";
+import { state, togglePinnedSelection } from "./store";
 import { bgmUrl, TYPE_NAMES, eid, etype } from "./types";
 import { careerValueLabel } from "./value-labels";
 import type {
@@ -81,7 +81,7 @@ interface FactGroup {
   members: number[];
 }
 
-export function drawerTopActions(key?: number): string {
+export function drawerTopActions(key?: number, pinned = false): string {
   const external =
     key === undefined
       ? ""
@@ -99,8 +99,28 @@ export function drawerTopActions(key?: number): string {
             <path d="M19 13v6H5V5h6"></path>
           </svg>
         </a>`;
+  const pin = key === undefined
+    ? ""
+    : html`<button
+        id="drawer-pin"
+        class="drawer-action drawer-pin"
+        type="button"
+        aria-label="${
+          pinned ? "取消保留节点及其关系" : "保留节点及其关系"
+        }"
+        aria-pressed="${pinned}"
+        title="${
+          pinned ? "取消保留节点及其关系" : "保留节点及其关系"
+        }"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M9 3h6l-1 5 3 3v2H7v-2l3-3-1-5Z"></path>
+          <path d="M12 13v8"></path>
+        </svg>
+      </button>`;
   return html`<div class="drawer-actions">
     ${raw(external)}
+    ${raw(pin)}
     <button
       id="drawer-close"
       class="drawer-action"
@@ -149,6 +169,7 @@ export class Drawer {
   private deps: DrawerDeps;
   private cur: Current | null = null;
   private viewEpoch = 0;
+  private renderedPinned = false;
 
   constructor(
     el: HTMLElement,
@@ -182,6 +203,15 @@ export class Drawer {
       const epAttr = t.closest("[data-ep]")?.getAttribute("data-ep");
       if (epAttr) {
         this.run(this.toggleDescription(Number(epAttr)), "分集介绍加载");
+        return;
+      }
+      if (
+        t.closest("#drawer-pin") &&
+        this.cur &&
+        state.selection === this.cur.rank
+      ) {
+        togglePinnedSelection(this.cur.rank);
+        this.syncState();
         return;
       }
       if (t.id === "drawer-close") this.hide();
@@ -543,6 +573,23 @@ export class Drawer {
     this.rerender();
   }
 
+  /** 与全局选择/保留集合对齐；异步加载新节点时不暴露旧详情操作。 */
+  syncState(): void {
+    const cur = this.cur;
+    if (!cur) return;
+    if (state.selection !== null && state.selection !== cur.rank) {
+      this.cur = null;
+      this.renderedPinned = false;
+      this.open();
+      this.el.innerHTML = html`<div class="loading">加载中…</div>`;
+      return;
+    }
+    const pinned = state.pinnedSelections.has(cur.rank);
+    if (pinned === this.renderedPinned) return;
+    this.renderedPinned = pinned;
+    this.rerender();
+  }
+
   /** 内容锚点:展开会让上方的组全部变长,记录被点元素所在组的
    * 序号与视口位置,重绘后把该组拉回原位。 */
   private anchorOf(t: HTMLElement): { idx: number; top: number } | null {
@@ -571,6 +618,7 @@ export class Drawer {
   private rerender(): void {
     const cur = this.cur;
     if (!cur) return;
+    this.renderedPinned = state.pinnedSelections.has(cur.rank);
     const scroll = this.el.scrollTop;
     this.el.innerHTML = this.render(cur);
     this.el.scrollTop = scroll;
@@ -901,7 +949,7 @@ export class Drawer {
     const panel = this.renderPanel(cur);
     return html`
       <header class="dossier-header">
-        ${raw(drawerTopActions(key))}
+        ${raw(drawerTopActions(key, state.pinnedSelections.has(rank)))}
         ${raw(drawerCover(key))}
         <div class="eyebrow">${this.badge(cur)} · Bangumi #${eid(key)}</div>
         <h2>${title}</h2>
