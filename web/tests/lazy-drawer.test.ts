@@ -23,6 +23,7 @@ function fakeDrawer(events: string[]): DrawerRuntime {
       events.push(`show:${rank}:${key}:${episodeId ?? ""}`);
     },
     hide: () => events.push("hide"),
+    syncState: () => events.push("sync-state"),
   };
 }
 
@@ -73,4 +74,21 @@ test("retries a failed drawer module load", async () => {
 
   assert.equal(attempt, 2);
   assert.deepEqual(events, ["show:5:505:", "hide"]);
+});
+
+test("syncs a loaded drawer without pulling its chunk into the initial path", async () => {
+  const events: string[] = [];
+  let loadCount = 0;
+  const drawer = createLazyDrawerRuntime(async () => {
+    loadCount++;
+    return fakeDrawer(events);
+  });
+
+  drawer.syncState();
+  assert.equal(loadCount, 0);
+  await drawer.show(6, 606);
+  drawer.syncState();
+
+  assert.equal(loadCount, 1);
+  assert.deepEqual(events, ["show:6:606:", "sync-state"]);
 });
