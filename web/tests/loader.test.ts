@@ -7,6 +7,7 @@ import siteContract from "../../scripts/site-contract.json";
 import { Data } from "../src/data";
 import {
   loadEntityRanksById,
+  loadRanksByKey,
   loadGzJson,
   loadManifest,
   loadSubjectQueryColumns,
@@ -25,6 +26,7 @@ import {
   decodeDeltaPosting,
   foldWithCharmap,
   foldedUtf8Range,
+  fullTextSearchMemberPage,
   loadCharmap,
   loadEntityKeys,
   loadSearchDir,
@@ -45,6 +47,7 @@ const NGRAM_SHARDS = siteContract.limits.search_ngram_shards;
 const EMPTY_NGRAM_SHARD = gzipSync(
   JSON.stringify(new Array(65_536 / NGRAM_SHARDS).fill(null)),
 );
+const TEXT_POSTING_SHARDS = NGRAM_SHARDS;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -70,6 +73,51 @@ function u16le(values: Iterable<number>): Uint8Array {
   const view = new DataView(bytes.buffer);
   items.forEach((value, index) => view.setUint16(index * 2, value, true));
   return bytes;
+}
+
+function deltaVarints(values: readonly number[]): Uint8Array {
+  const encoded: number[] = [];
+  let previous = -1;
+  for (const value of values) {
+    let delta = previous < 0 ? value : value - previous;
+    do {
+      const low = delta & 0x7f;
+      delta >>>= 7;
+      encoded.push(low | (delta ? 0x80 : 0));
+    } while (delta);
+    previous = value;
+  }
+  return Uint8Array.from(encoded);
+}
+
+function textPostingArtifacts(
+  byBucket: ReadonlyMap<number, readonly number[]>,
+  bucketCount = 65_536,
+): { index: Uint8Array; pack: Uint8Array } {
+  const bucketMembers = new Array<number>(bucketCount + 1).fill(0);
+  const counts = new Array<number>(bucketCount).fill(0);
+  const offsets = [0];
+  const first: number[] = [];
+  const last: number[] = [];
+  const members: Uint8Array[] = [];
+  let size = 0;
+  for (let bucket = 0; bucket < bucketCount; bucket++) {
+    bucketMembers[bucket] = members.length;
+    const ids = [...(byBucket.get(bucket) ?? [])];
+    counts[bucket] = ids.length;
+    if (!ids.length) continue;
+    const member = new Uint8Array(gzipSync(deltaVarints(ids)));
+    members.push(member);
+    size += member.byteLength;
+    offsets.push(size);
+    first.push(ids[0] as number);
+    last.push(ids.at(-1) as number);
+  }
+  bucketMembers[bucketCount] = members.length;
+  return {
+    index: u32le([...bucketMembers, ...offsets, ...first, ...last, ...counts]),
+    pack: new Uint8Array(Buffer.concat(members)),
+  };
 }
 
 function ngramArtifacts(
@@ -584,6 +632,33 @@ test("rejects an incomplete full-text-v1 query release", async () => {
   await assert.rejects(loadManifest(), /full-text-v1 查询索引不完整/);
 });
 
+test("requires trigram shards as part of full-text-v1", async () => {
+  const placeholder = new Uint8Array([0]);
+  const files: Record<string, [number, string]> = {
+    "text.search.members": [placeholder.byteLength, hash(placeholder)],
+  };
+  for (let shard = 0; shard < TEXT_POSTING_SHARDS; shard++) {
+    files[`text.search.ngram-${shard}.idx`] = [
+      placeholder.byteLength,
+      hash(placeholder),
+    ];
+    files[`text.search.ngram-${shard}.pack`] = [
+      placeholder.byteLength,
+      hash(placeholder),
+    ];
+  }
+  const malformed = testManifest(files);
+  malformed.query = {
+    schema: "atlas-release-query-v1",
+    capabilities: ["atlas-query-v1", "full-text-v1"],
+    contractDigest: "0".repeat(64),
+  };
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(malformed))) as typeof fetch;
+
+  await assert.rejects(loadManifest(), /full-text-v1 查询索引不完整/);
+});
+
 test("accepts a query release without a deployment marker", async () => {
   const manifest = testManifest({});
   manifest.query = {
@@ -660,6 +735,148 @@ test("hashes Unicode bigrams exactly like the site baker", () => {
   assert.deepEqual(searchGramBuckets("之境界"), [53925, 53696]);
   assert.deepEqual(searchGramBuckets("😀界"), [6955]);
   assert.deepEqual(searchGramBuckets("境"), []);
+});
+
+test("uses a sharded bigram index for two-character text candidates", async () => {
+  const descriptors = [["entity-summary", 1, 0, 0, 10]];
+  const directory = new Uint8Array(gzipSync(JSON.stringify({
+    schema: "text-search-members-v1",
+    members: descriptors,
+  })));
+  const bucket = searchGramBuckets("时间")[0] as number;
+  const artifacts = new Map<string, Uint8Array>([
+    ["text.search.members", directory],
+  ]);
+  for (let shard = 0; shard < TEXT_POSTING_SHARDS; shard++) {
+    const postings = new Map<number, number[]>();
+    if (shard === bucket % TEXT_POSTING_SHARDS)
+      postings.set(Math.floor(bucket / TEXT_POSTING_SHARDS), [0]);
+    const bigram = textPostingArtifacts(
+      postings,
+      65_536 / TEXT_POSTING_SHARDS,
+    );
+    const trigram = textPostingArtifacts(
+      new Map(),
+      65_536 / TEXT_POSTING_SHARDS,
+    );
+    artifacts.set(`text.search.ngram-${shard}.idx`, bigram.index);
+    artifacts.set(`text.search.ngram-${shard}.pack`, bigram.pack);
+    artifacts.set(`text.search.trigram-${shard}.idx`, trigram.index);
+    artifacts.set(`text.search.trigram-${shard}.pack`, trigram.pack);
+  }
+  const manifest = testManifest(Object.fromEntries(
+    [...artifacts].map(([name, bytes]) => [
+      name,
+      [bytes.byteLength, hash(bytes)],
+    ]),
+  ));
+  manifest.query = {
+    schema: "atlas-release-query-v1",
+    capabilities: ["atlas-query-v1", "full-text-v1"],
+    contractDigest: "0".repeat(64),
+  };
+  const requests: string[] = [];
+  await installFetch(manifest, async (path, init) => {
+    const artifact = [...artifacts].find(([name]) => path.endsWith(`-${name}`));
+    assert.ok(artifact, `unexpected request ${path}`);
+    requests.push(artifact[0]);
+    const bytes = artifact[1];
+    const range = new Headers(init?.headers).get("Range");
+    if (!range) return new Response(body(bytes));
+    const match = /^bytes=(\d+)-(\d+)$/.exec(range);
+    assert.ok(match);
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    return new Response(body(bytes.slice(start, end + 1)), {
+      status: 206,
+      headers: { "Content-Range": `bytes ${start}-${end}/${bytes.byteLength}` },
+    });
+  });
+
+  assert.deepEqual(await fullTextSearchMemberPage("时间", 0, 256), {
+    members: [descriptors[0]],
+    next: null,
+    totalCandidates: 1,
+  });
+  const shard = bucket % TEXT_POSTING_SHARDS;
+  assert.ok(requests.includes(`text.search.ngram-${shard}.idx`));
+  assert.ok(requests.includes(`text.search.ngram-${shard}.pack`));
+});
+
+test("uses the trigram index to narrow authoritative text members", async () => {
+  const descriptors = [
+    ["entity-summary", 1, 0, 0, 10],
+    ["entity-summary", 1, 0, 10, 10],
+  ];
+  const directory = new Uint8Array(gzipSync(JSON.stringify({
+    schema: "text-search-members-v1",
+    members: descriptors,
+  })));
+  const trigramBuckets = searchGramBuckets("时间旅行", 3);
+  const trigramByShard = Array.from(
+    { length: TEXT_POSTING_SHARDS },
+    () => new Map<number, number[]>(),
+  );
+  for (const bucket of trigramBuckets)
+    trigramByShard[bucket % TEXT_POSTING_SHARDS]?.set(
+      Math.floor(bucket / TEXT_POSTING_SHARDS),
+      [1],
+    );
+  const artifacts = new Map<string, Uint8Array>([
+    ["text.search.members", directory],
+  ]);
+  for (let shard = 0; shard < TEXT_POSTING_SHARDS; shard++) {
+    const bigram = textPostingArtifacts(
+      new Map(),
+      65_536 / TEXT_POSTING_SHARDS,
+    );
+    artifacts.set(`text.search.ngram-${shard}.idx`, bigram.index);
+    artifacts.set(`text.search.ngram-${shard}.pack`, bigram.pack);
+    const trigram = textPostingArtifacts(
+      trigramByShard[shard] ?? new Map(),
+      65_536 / TEXT_POSTING_SHARDS,
+    );
+    artifacts.set(`text.search.trigram-${shard}.idx`, trigram.index);
+    artifacts.set(`text.search.trigram-${shard}.pack`, trigram.pack);
+  }
+  const manifest = testManifest(Object.fromEntries(
+    [...artifacts].map(([name, bytes]) => [
+      name,
+      [bytes.byteLength, hash(bytes)],
+    ]),
+  ));
+  manifest.query = {
+    schema: "atlas-release-query-v1",
+    capabilities: ["atlas-query-v1", "full-text-v1"],
+    contractDigest: "0".repeat(64),
+  };
+  const requests: string[] = [];
+  await installFetch(manifest, async (path, init) => {
+    const artifact = [...artifacts].find(([name]) => path.endsWith(`-${name}`));
+    assert.ok(artifact, `unexpected request ${path}`);
+    requests.push(artifact[0]);
+    const bytes = artifact[1];
+    const range = new Headers(init?.headers).get("Range");
+    if (!range) return new Response(body(bytes));
+    const match = /^bytes=(\d+)-(\d+)$/.exec(range);
+    assert.ok(match);
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    return new Response(body(bytes.slice(start, end + 1)), {
+      status: 206,
+      headers: { "Content-Range": `bytes ${start}-${end}/${bytes.byteLength}` },
+    });
+  });
+
+  assert.deepEqual(await fullTextSearchMemberPage("时间旅行", 0, 256), {
+    members: [descriptors[1]],
+    next: null,
+    totalCandidates: 1,
+  });
+  assert.ok(requests.includes("text.search.trigram-11.idx"));
+  assert.ok(requests.includes("text.search.trigram-15.idx"));
+  assert.ok(requests.includes("text.search.trigram-11.pack"));
+  assert.ok(requests.includes("text.search.trigram-15.pack"));
 });
 
 test("folding is defined only by the published character map", () => {
@@ -1696,6 +1913,62 @@ test("decodes the u24 rank-by-key reverse index", async () => {
   assert.equal(rankOfKey((1 << 24) | 0), null);
   assert.equal(rankOfKey((1 << 24) | 1), 5);
   assert.equal(rankOfKey((2 << 24) | 1), null);
+});
+
+test("resolves sparse EntityKeys from bounded rank index ranges", async () => {
+  const count = 5_000;
+  const bytes = new Uint8Array(count * 3).fill(0xff);
+  bytes.set([7, 0, 0], 1 * 3);
+  bytes.set([9, 0, 0], 4_097 * 3);
+  const manifest = {
+    ...testManifest({
+      "rank-by-key.bin": [bytes.byteLength, hash(bytes)] as [number, string],
+    }, 10),
+    counts: {
+      ...testManifest({}, 10).counts,
+      entities: { subject: 2, person: 0, character: 0 },
+    },
+    rank_index: {
+      encoding: "u24le",
+      sentinel: 0xffffff,
+      segments: {
+        "1": { offset: 0, count },
+        "2": { offset: bytes.byteLength, count: 0 },
+        "3": { offset: bytes.byteLength, count: 0 },
+      },
+    },
+  };
+  const ranges: string[] = [];
+  await installFetch(manifest, async (_path, init) => {
+    const range = new Headers(init?.headers).get("Range");
+    assert.ok(range, "sparse lookup must not read the whole index");
+    ranges.push(range);
+    const match = /^bytes=(\d+)-(\d+)$/.exec(range);
+    assert.ok(match);
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    return new Response(body(bytes.slice(start, end + 1)), {
+      status: 206,
+      headers: {
+        "Content-Range": `bytes ${start}-${end}/${bytes.byteLength}`,
+      },
+    });
+  });
+
+  const first = (1 << 24) | 1;
+  const second = (1 << 24) | 4_097;
+  const missing = (1 << 24) | 4_999;
+  assert.deepEqual(await loadRanksByKey([first, second, missing]), new Map([
+    [first, 7],
+    [second, 9],
+  ]));
+  assert.equal(rankOfKey(first), 7);
+  assert.equal(rankOfKey(second), 9);
+  assert.equal(rankOfKey(missing), null);
+  assert.deepEqual(ranges, ["bytes=0-12287", "bytes=12288-14999"]);
+
+  await loadRanksByKey([first, second]);
+  assert.equal(ranges.length, 2, "resolved rank blocks should be reused");
 });
 
 test("does not reuse rank-ordered entity keys across SiteReleases", async () => {

@@ -824,6 +824,9 @@ class TextSearchBuilder:
     def __init__(self) -> None:
         self.members: list[list[Any]] = []
         self.postings = [array("I") for _ in range(sr.SEARCH_NGRAM_BUCKETS)]
+        self.trigram_postings = [
+            array("I") for _ in range(sr.SEARCH_NGRAM_BUCKETS)
+        ]
         self._written = False
 
     def add(
@@ -832,6 +835,8 @@ class TextSearchBuilder:
         entity_kind: int,
         loc: list[int],
         texts: Iterable[str],
+        *,
+        full_text: bool = False,
     ) -> None:
         if self._written:
             raise RuntimeError("text search index is already written")
@@ -842,6 +847,7 @@ class TextSearchBuilder:
             raise ValueError("text search member id exceeds u24")
         self.members.append([family, entity_kind, *loc])
         buckets: set[int] = set()
+        trigram_buckets: set[int] = set()
         for text in texts:
             folded = sr.search_fold(text)
             buckets.update(
@@ -850,25 +856,33 @@ class TextSearchBuilder:
                 )
                 for start in range(len(folded) - sr.SEARCH_NGRAM_WIDTH + 1)
             )
+            if full_text:
+                width = sr.TEXT_SEARCH_TRIGRAM_WIDTH
+                trigram_buckets.update(
+                    sr.search_gram_bucket(
+                        folded[start : start + width], width=width
+                    )
+                    for start in range(len(folded) - width + 1)
+                )
         for bucket in buckets:
             self.postings[bucket].append(member_id)
+        for bucket in trigram_buckets:
+            self.trigram_postings[bucket].append(member_id)
 
-    def write(self) -> None:
-        if self._written:
-            raise RuntimeError("text search index is already written")
-        write_gzip_json(
-            "text.search.members",
-            {"schema": "text-search-members-v1", "members": self.members},
-            9,
-        )
-        pack = PackFile("text.search.ngram.pack")
-        bucket_members = np.empty(sr.SEARCH_NGRAM_BUCKETS + 1, dtype="<u4")
-        counts = np.empty(sr.SEARCH_NGRAM_BUCKETS, dtype="<u4")
+    def _write_postings(
+        self, stem: str, postings: list[array[int]]
+    ) -> tuple[int, int]:
+        pack = PackFile(f"{stem}.pack")
+        bucket_count = len(postings)
+        bucket_members = np.empty(bucket_count + 1, dtype="<u4")
+        counts = np.empty(bucket_count, dtype="<u4")
         first: list[int] = []
         last: list[int] = []
-        for bucket, member_ids in enumerate(self.postings):
+        posting_count = 0
+        for bucket, member_ids in enumerate(postings):
             bucket_members[bucket] = len(pack.sizes)
             counts[bucket] = len(member_ids)
+            posting_count += len(member_ids)
             for start in range(
                 0, len(member_ids), sr.SEARCH_NGRAM_MEMBER_RANKS
             ):
@@ -891,21 +905,60 @@ class TextSearchBuilder:
         offsets = np.empty(len(pack.sizes) + 1, dtype="<u4")
         offsets[0] = 0
         np.cumsum(pack.sizes, dtype=np.uint32, out=offsets[1:])
-        (SITE / "text.search.ngram.idx").write_bytes(
+        (SITE / f"{stem}.idx").write_bytes(
             bucket_members.tobytes()
             + offsets.tobytes()
             + np.asarray(first, dtype="<u4").tobytes()
             + np.asarray(last, dtype="<u4").tobytes()
             + counts.tobytes()
         )
+        return posting_count, pack.size
+
+    def _write_sharded_postings(
+        self,
+        stem: str,
+        postings: list[array[int]],
+        shards: int,
+    ) -> tuple[int, int]:
+        if shards <= 0 or len(postings) % shards:
+            raise ValueError("text search posting shards must divide buckets")
+        posting_count = 0
+        pack_bytes = 0
+        for shard in range(shards):
+            shard_count, shard_bytes = self._write_postings(
+                f"{stem}-{shard}", postings[shard::shards]
+            )
+            posting_count += shard_count
+            pack_bytes += shard_bytes
+        return posting_count, pack_bytes
+
+    def write(self) -> None:
+        if self._written:
+            raise RuntimeError("text search index is already written")
+        write_gzip_json(
+            "text.search.members",
+            {"schema": "text-search-members-v1", "members": self.members},
+            9,
+        )
+        posting_count, bigram_bytes = self._write_sharded_postings(
+            "text.search.ngram",
+            self.postings,
+            sr.TEXT_SEARCH_POSTING_SHARDS,
+        )
+        trigram_count, trigram_bytes = self._write_sharded_postings(
+            "text.search.trigram",
+            self.trigram_postings,
+            sr.TEXT_SEARCH_POSTING_SHARDS,
+        )
         member_count = len(self.members)
-        posting_count = sum(len(posting) for posting in self.postings)
         log(
             f"文本候选索引:{member_count:,} 成员,"
-            f"{posting_count:,} postings,{pack.size / 1e6:,.1f}MB"
+            f"二元 {posting_count:,}/{bigram_bytes / 1e6:,.1f}MB,"
+            f"全文三元 {trigram_count:,}/{trigram_bytes / 1e6:,.1f}MB"
         )
         self.members.clear()
         self.postings.clear()
+        self.trigram_postings.clear()
         self._written = True
 
 
@@ -2483,6 +2536,7 @@ def bake_release(  # noqa: PLR0915
                     selected_kind,
                     loc,
                     (str(item[1]) for item in chunk),
+                    full_text=True,
                 )
 
             kind_ranges, kind_stats = emit_sorted_parquet_text(
@@ -2571,6 +2625,7 @@ def bake_release(  # noqa: PLR0915
                     for _sid, pairs in chunk
                     for _episode, text in pairs
                 ),
+                full_text=True,
             )
             desc_ranges.append([chunk[0][0], chunk[-1][0], *loc])
             return
@@ -2597,6 +2652,7 @@ def bake_release(  # noqa: PLR0915
                 0,
                 loc,
                 (str(text) for _episode, text in part),
+                full_text=True,
             )
             desc_ranges.append([sid, sid, *loc, part[0][0], part[-1][0]])
 
@@ -2644,6 +2700,7 @@ def bake_release(  # noqa: PLR0915
                 0,
                 loc,
                 (str(item[1]) for item in chunk),
+                full_text=True,
             ),
         )
     )

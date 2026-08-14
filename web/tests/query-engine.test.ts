@@ -1720,6 +1720,72 @@ test("keeps lookup and full text as distinct verified sources", async () => {
   ));
 });
 
+test("does not rehydrate Subject names already required by lookup", async () => {
+  let lookupEntityFields: readonly string[] = [];
+  let candidateHydrations = 0;
+  const identity: EntityValue = {
+    kind: "entity",
+    owner: "subject",
+    ref: "subject:3",
+    fields: { name: "Original", nameCn: "中文名" },
+  };
+  const searched: QueryDataSource = {
+    scan: async function* () {},
+    lookup: async function* (_text, owner, _lookupFields, _signal, entityFields) {
+      assert.equal(owner, "subject");
+      lookupEntityFields = entityFields ?? [];
+      yield identity;
+    },
+    scanCandidates: async function* (_owner, refs) {
+      candidateHydrations++;
+      if (refs.includes(identity.ref)) yield identity;
+    },
+  };
+  const query: QueryDocument = {
+    schema: "atlas-query-document-v1",
+    root: "project",
+    parameters: {},
+    operators: {
+      lookup: {
+        kind: "lookup",
+        owner: "subject",
+        binding: "subject",
+        text: { kind: "literal", value: "Atlas" },
+        fields: ["name", "nameCn"],
+      },
+      project: {
+        kind: "project",
+        input: "lookup",
+        columns: [
+          {
+            name: "ref",
+            value: { kind: "field", binding: "subject", field: "ref" },
+          },
+          {
+            name: "name",
+            value: { kind: "field", binding: "subject", field: "name" },
+          },
+          {
+            name: "nameCn",
+            value: { kind: "field", binding: "subject", field: "nameCn" },
+          },
+        ],
+      },
+    },
+    limit: 20,
+  };
+
+  const result = await executeQuery(query, {}, searched, { pageSize: 20 });
+
+  assert.deepEqual(result.rows, [{
+    ref: "subject:3",
+    name: "Original",
+    nameCn: "中文名",
+  }]);
+  assert.equal(candidateHydrations, 0);
+  assert.deepEqual(lookupEntityFields, ["name", "nameCn", "ref"]);
+});
+
 test("isolates projected fields for lookup branches that reuse a binding name", async () => {
   const requested = new Map<"subject" | "character", readonly string[]>();
   const searched: QueryDataSource = {

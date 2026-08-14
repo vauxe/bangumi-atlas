@@ -454,7 +454,7 @@ class SearchIndexTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "sorted"):
             bake_site.encode_delta_varints([2, 2])
 
-    def test_text_search_indexes_members_and_keeps_hash_hits_as_candidates(
+    def test_text_search_shards_bigrams_and_keeps_hash_hits_as_candidates(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -478,12 +478,18 @@ class SearchIndexTests(unittest.TestCase):
             directory_value = bake_site.orjson.loads(
                 gzip.decompress((site / "text.search.members").read_bytes())
             )
-            raw_index = bake_site.np.frombuffer(
-                (site / "text.search.ngram.idx").read_bytes(), dtype="<u4"
-            )
             bucket = bake_site.sr.search_gram_bucket("星空")
-            bucket_members = raw_index[:65_537]
-            posting_count = int(raw_index[-65_536 + bucket])
+            shards = bake_site.sr.TEXT_SEARCH_POSTING_SHARDS
+            shard = bucket % shards
+            local_bucket = bucket // shards
+            bucket_count = bake_site.sr.SEARCH_NGRAM_BUCKETS // shards
+            raw_index = bake_site.np.frombuffer(
+                (site / f"text.search.ngram-{shard}.idx").read_bytes(),
+                dtype="<u4",
+            )
+            bucket_members = raw_index[: bucket_count + 1]
+            posting_count = int(raw_index[-bucket_count + local_bucket])
+            created = {path.name for path in site.iterdir()}
 
         self.assertEqual(
             directory_value["members"],
@@ -494,9 +500,14 @@ class SearchIndexTests(unittest.TestCase):
         )
         self.assertEqual(posting_count, 1)
         self.assertEqual(
-            int(bucket_members[bucket + 1] - bucket_members[bucket]),
+            int(
+                bucket_members[local_bucket + 1] - bucket_members[local_bucket]
+            ),
             1,
         )
+        for shard in range(shards):
+            self.assertIn(f"text.search.ngram-{shard}.idx", created)
+            self.assertIn(f"text.search.ngram-{shard}.pack", created)
 
     def test_text_search_write_releases_source_buffers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -523,6 +534,49 @@ class SearchIndexTests(unittest.TestCase):
                         [0, 56, 78],
                         ["不能继续追加"],
                     )
+
+    def test_text_search_writes_member_level_trigrams_for_full_text(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory)
+            with patch.object(bake_site, "SITE", site):
+                index = bake_site.TextSearchBuilder()
+                index.add(
+                    "entity-summary",
+                    1,
+                    [0, 0, 10],
+                    ["时间", "间旅"],
+                    full_text=True,
+                )
+                index.add(
+                    "entity-summary",
+                    1,
+                    [0, 10, 10],
+                    ["时间旅行"],
+                    full_text=True,
+                )
+                index.write()
+
+            bucket = bake_site.sr.search_gram_bucket("时间旅", width=3)
+            shards = bake_site.sr.TEXT_SEARCH_POSTING_SHARDS
+            shard = bucket % shards
+            local_bucket = bucket // shards
+            bucket_count = bake_site.sr.SEARCH_NGRAM_BUCKETS // shards
+            raw_index = bake_site.np.frombuffer(
+                (site / f"text.search.trigram-{shard}.idx").read_bytes(),
+                dtype="<u4",
+            )
+            bucket_members = raw_index[: bucket_count + 1]
+            posting_count = int(raw_index[-bucket_count + local_bucket])
+
+        self.assertEqual(posting_count, 1)
+        self.assertEqual(
+            int(
+                bucket_members[local_bucket + 1] - bucket_members[local_bucket]
+            ),
+            1,
+        )
 
     def test_alias_pack_halves_block_width_until_members_fit(self) -> None:
         random_text = random.Random(0).randbytes(180_000).hex()

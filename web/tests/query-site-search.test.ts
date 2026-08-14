@@ -601,6 +601,41 @@ test("uses hashed text members only as candidates and verifies authoritative tex
   }]);
 });
 
+test("uses the refined full-text page without changing lookup candidates", async () => {
+  const descriptor: TextSearchMember = ["entity-summary", 1, 0, 10, 20];
+  let legacyPages = 0;
+  let refinedPages = 0;
+  const reader: SiteQueryReader = {
+    entities: async function* () {},
+    entity: async (entityKey) => entityKey === subject.key ? subject : null,
+    factsFor: async () => ({ items: [], total: 0, next: null }),
+    textSearchRows: async () => [
+      { owner: "subject", id: 3, field: "summary", text: "穿过星空的旅程" },
+    ],
+  };
+  const search = new SiteQuerySearchIndex(reader, {} as Manifest, {
+    normalize: async () => "星空",
+    page: async () => ({ entries: [], next: null, scannedThroughRank: -1 }),
+    keys: async () => new Uint32Array(),
+    textPage: async () => {
+      legacyPages++;
+      return { members: [], next: null, totalCandidates: 0 };
+    },
+    fullTextPage: async () => {
+      refinedPages++;
+      return { members: [descriptor], next: null, totalCandidates: 1 };
+    },
+  });
+
+  const results = [];
+  for await (const hit of search.fullText("星空", "subject", "summary"))
+    results.push(hit);
+
+  assert.equal(results.length, 1);
+  assert.equal(refinedPages, 1);
+  assert.equal(legacyPages, 0);
+});
+
 test("does not truncate decoded text candidates", async () => {
   const descriptor: TextSearchMember = ["entity-summary", 1, 0, 10, 20];
   const reader: SiteQueryReader = {

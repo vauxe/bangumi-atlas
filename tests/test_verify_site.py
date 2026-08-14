@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -246,6 +247,66 @@ class RoutingContractTests(unittest.TestCase):
             ):
                 verify_site.decode_delta_posting(malformed, 1, 10)
 
+    def test_text_posting_verifier_checks_trigram_members_independently(
+        self,
+    ) -> None:
+        global_bucket = verify_site.expected_search_gram_bucket(
+            "时间旅", width=3
+        )
+        shard = global_bucket % sr.TEXT_SEARCH_POSTING_SHARDS
+        bucket = global_bucket // sr.TEXT_SEARCH_POSTING_SHARDS
+        bucket_count = sr.SEARCH_NGRAM_BUCKETS // sr.TEXT_SEARCH_POSTING_SHARDS
+        posting = gzip.compress(bytes([0, 2]), mtime=0)
+        bucket_members = np.zeros(bucket_count + 1, dtype="<u4")
+        bucket_members[bucket + 1 :] = 1
+        offsets = np.asarray([0, len(posting)], dtype="<u4")
+        counts = np.zeros(bucket_count, dtype="<u4")
+        counts[bucket] = 2
+        index = b"".join(
+            (
+                bucket_members.tobytes(),
+                offsets.tobytes(),
+                np.asarray([0], dtype="<u4").tobytes(),
+                np.asarray([2], dtype="<u4").tobytes(),
+                counts.tobytes(),
+            )
+        )
+        expected_hash = hashlib.sha256()
+        expected_hash.update((0).to_bytes(3, "little"))
+        expected_hash.update((2).to_bytes(3, "little"))
+        expected_hashes = [None] * bucket_count
+        expected_hashes[bucket] = expected_hash
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stem = f"text.search.trigram-{shard}"
+            (root / f"{stem}.idx").write_bytes(index)
+            (root / f"{stem}.pack").write_bytes(posting)
+            with patch.object(
+                verify_site,
+                "site_file",
+                side_effect=lambda name: root / name,
+            ):
+                self.assertTrue(
+                    verify_site.text_search_postings_are_valid(
+                        stem,
+                        counts,
+                        expected_hashes,
+                        3,
+                        bucket_count=bucket_count,
+                    )
+                )
+                counts[bucket] = 1
+                self.assertFalse(
+                    verify_site.text_search_postings_are_valid(
+                        stem,
+                        counts,
+                        expected_hashes,
+                        3,
+                        bucket_count=bucket_count,
+                    )
+                )
+
     def test_binary_array_loader_rejects_trailing_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "index.bin"
@@ -324,8 +385,12 @@ class RoutingContractTests(unittest.TestCase):
             verify_site.sr, "search_gram_bucket", return_value=0
         ):
             bucket = verify_site.expected_search_gram_bucket("之境")
+            trigram_bucket = verify_site.expected_search_gram_bucket(
+                "时间旅", width=3
+            )
 
         self.assertEqual(bucket, 53925)
+        self.assertEqual(trigram_bucket, 51211)
 
     def test_search_alias_wire_shape_allows_unsearchable_ranks(self) -> None:
         self.assertTrue(verify_site.search_alias_row_is_valid([[], "　", 1]))

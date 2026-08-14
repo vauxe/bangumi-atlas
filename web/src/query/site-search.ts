@@ -4,6 +4,7 @@ import { WeightedLru } from "../cache";
 import {
   fold,
   foldedUtf8Range,
+  fullTextSearchMemberPage,
   loadCharmap,
   loadEntityKeys,
   openNames,
@@ -231,6 +232,12 @@ export interface SiteSearchDependencies {
     limit: number,
     signal: AbortSignal,
   ): Promise<TextSearchMemberPage>;
+  fullTextPage?(
+    query: string,
+    cursor: number,
+    limit: number,
+    signal: AbortSignal,
+  ): Promise<TextSearchMemberPage>;
 }
 
 function defaultDependencies(
@@ -262,6 +269,7 @@ function defaultDependencies(
     },
     prefetchNames: (signal) => names.prefetch?.(signal) ?? Promise.resolve(),
     textPage: textSearchMemberPage,
+    fullTextPage: fullTextSearchMemberPage,
   };
 }
 
@@ -861,7 +869,8 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
     utf8Range: [number, number];
   }> {
     const query = await this.normalized(text, "fullText");
-    if (!this.dependencies.textPage || !this.reader.textSearchRows)
+    const textPage = this.dependencies.fullTextPage ?? this.dependencies.textPage;
+    if (!textPage || !this.reader.textSearchRows)
       throw new TypeError("published text search index is unavailable");
     const seen = new Set<string>();
     let textCursor = 0;
@@ -869,7 +878,7 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
     let prefetchedEntities = false;
     for (;;) {
       signal.throwIfAborted();
-      const page = await this.dependencies.textPage(query, textCursor, 256, signal);
+      const page = await textPage(query, textCursor, 256, signal);
       const descriptors = page.members.filter((descriptor) =>
         textDescriptorMatches(descriptor, owner, field)
       );
@@ -975,13 +984,14 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
     if (factKind !== "VOICE_CREDIT" || field !== "summary")
       throw new TypeError(`unsupported fact full text ${factKind}.${field}`);
     const query = await this.normalized(text, "fullText");
-    if (!this.dependencies.textPage || !this.reader.textSearchRows)
+    const textPage = this.dependencies.fullTextPage ?? this.dependencies.textPage;
+    if (!textPage || !this.reader.textSearchRows)
       throw new TypeError("published text search index is unavailable");
     const seen = new Set<number>();
     let cursor = 0;
     for (;;) {
       signal.throwIfAborted();
-      const page = await this.dependencies.textPage(query, cursor, 256, signal);
+      const page = await textPage(query, cursor, 256, signal);
       const descriptors = page.members.filter((descriptor) =>
         descriptor[0] === "fact-summary"
       );

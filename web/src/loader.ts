@@ -48,6 +48,8 @@ const MANIFEST_BYTE_CAP = 1_000_000;
 const SMALL_FILE_CAP = 16_000_000;
 const EDGE_FILE_CAP = 256_000_000;
 const RANK_INDEX_CAP = RANK_SENTINEL * 3 * 3;
+const RANK_LOOKUP_BLOCK_IDS = 4_096;
+const RANK_LOOKUP_MAX_BLOCKS = 16;
 const SITE_BYTE_CAP = 1_000_000_000;
 const REQUIRED_SEARCH_FILES = [
   "charmap.json",
@@ -64,11 +66,25 @@ const REQUIRED_SEARCH_FILES = [
     (_, shard) => `search.ngram.idx-${shard}.json.gz`,
   ),
 ];
+const TEXT_SEARCH_POSTING_SHARDS = SEARCH_NGRAM_SHARDS;
 const REQUIRED_TEXT_QUERY_FILES = [
   "text.search.members",
-  "text.search.ngram.idx",
-  "text.search.ngram.pack",
+  ...Array.from(
+    { length: TEXT_SEARCH_POSTING_SHARDS },
+    (_, shard) => [
+      `text.search.ngram-${shard}.idx`,
+      `text.search.ngram-${shard}.pack`,
+    ],
+  ).flat(),
+  ...Array.from(
+    { length: TEXT_SEARCH_POSTING_SHARDS },
+    (_, shard) => [
+      `text.search.trigram-${shard}.idx`,
+      `text.search.trigram-${shard}.pack`,
+    ],
+  ).flat(),
 ] as const;
+const TEXT_SEARCH_TRIGRAM_WIDTH = 3;
 const SUBJECT_QUERY_COLUMNS_V1 = "subject-query-columns-v1";
 const SUBJECT_QUERY_COLUMNS_V2 = "subject-query-columns-v2";
 const CACHE_BUDGET = {
@@ -550,6 +566,8 @@ export async function loadManifest(): Promise<Manifest> {
   loadedKeyIndex = null;
   rankBytes = null;
   rankPromise = null;
+  rankBlocks.clear();
+  rankBlockLoads.clear();
   charmap = null;
   charmapPromise = null;
   manifestRef = m;
@@ -1538,6 +1556,61 @@ export async function anchorForFact(
 
 let rankBytes: Uint8Array | null = null;
 let rankPromise: Promise<void> | null = null;
+const rankBlocks = new Map<string, Uint8Array>();
+const rankBlockLoads = new SharedAbortableMemo<string, Uint8Array>();
+
+function rankBlockKey(kind: number, block: number): string {
+  return `${kind}:${block}`;
+}
+
+function decodeRank(bytes: Uint8Array, at: number): number {
+  return (
+    (bytes[at] ?? 0) |
+    ((bytes[at + 1] ?? 0) << 8) |
+    ((bytes[at + 2] ?? 0) << 16)
+  );
+}
+
+async function loadRankBlock(
+  kind: number,
+  block: number,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  const manifest = manifestRef;
+  const segment = manifest?.rank_index.segments[String(kind)];
+  const startId = block * RANK_LOOKUP_BLOCK_IDS;
+  if (!manifest || !segment || startId >= segment.count)
+    throw new SiteDataContractError("rank-by-key block is unavailable");
+  const key = rankBlockKey(kind, block);
+  const cached = rankBlocks.get(key);
+  if (cached) return cached;
+  return rankBlockLoads.get(
+    key,
+    async (workSignal) => {
+      const count = Math.min(
+        RANK_LOOKUP_BLOCK_IDS,
+        segment.count - startId,
+      );
+      const buffer = await packSlice(
+        "rank-by-key.bin",
+        segment.offset + startId * 3,
+        count * 3,
+        workSignal,
+      );
+      const bytes = new Uint8Array(buffer);
+      for (let at = 0; at < bytes.byteLength; at += 3) {
+        const rank = decodeRank(bytes, at);
+        if (rank !== manifest.rank_index.sentinel && rank >= manifest.n_nodes)
+          throw new SiteDataContractError(
+            "rank-by-key block contains an invalid VisualRank",
+          );
+      }
+      rankBlocks.set(key, bytes);
+      return bytes;
+    },
+    signal,
+  );
+}
 
 export function ensureRankIndex(signal?: AbortSignal): Promise<void> {
   rankPromise ??= (async () => {
@@ -1547,6 +1620,7 @@ export function ensureRankIndex(signal?: AbortSignal): Promise<void> {
       RANK_INDEX_CAP,
     );
     rankBytes = bytes;
+    rankBlocks.clear();
   })().catch((error: unknown) => {
     rankPromise = null;
     throw error;
@@ -1557,17 +1631,63 @@ export function ensureRankIndex(signal?: AbortSignal): Promise<void> {
 /** 稳定键 -> VisualRank;索引未载入或键不在当前发布时返回 null。 */
 export function rankOfKey(key: number): number | null {
   const m = manifestRef;
-  if (!rankBytes || !m) return null;
+  if (!m) return null;
   const seg = m.rank_index.segments[String(key >>> 24)];
   if (!seg) return null;
   const id = key & 0xffffff;
   if (id >= seg.count) return null;
-  const at = seg.offset + id * 3;
-  const rank =
-    (rankBytes[at] ?? 0) |
-    ((rankBytes[at + 1] ?? 0) << 8) |
-    ((rankBytes[at + 2] ?? 0) << 16);
+  let bytes = rankBytes;
+  let at = seg.offset + id * 3;
+  if (!bytes) {
+    const block = Math.floor(id / RANK_LOOKUP_BLOCK_IDS);
+    bytes = rankBlocks.get(rankBlockKey(key >>> 24, block)) ?? null;
+    if (!bytes) return null;
+    at = (id - block * RANK_LOOKUP_BLOCK_IDS) * 3;
+  }
+  const rank = decodeRank(bytes, at);
   return rank === m.rank_index.sentinel ? null : rank;
+}
+
+/** Resolve a small set of stable keys from fixed Range blocks. Broad callers
+ * fall back to the verified whole index instead of creating a request fan-out. */
+export async function loadRanksByKey(
+  keys: Iterable<number>,
+  signal?: AbortSignal,
+): Promise<Map<number, number>> {
+  signal?.throwIfAborted();
+  const manifest = manifestRef;
+  if (!manifest) throw new Error("manifest must be loaded before rank lookup");
+  const requested = [...new Set(keys)].filter((key) => {
+    if (!Number.isSafeInteger(key) || key < 0 || key > 0xffff_ffff)
+      return false;
+    const segment = manifest.rank_index.segments[String(key >>> 24)];
+    return Boolean(segment && (key & 0xffffff) < segment.count);
+  });
+  const blocks = new Map<string, [kind: number, block: number]>();
+  if (!rankBytes) {
+    for (const key of requested) {
+      const kind = key >>> 24;
+      const block = Math.floor((key & 0xffffff) / RANK_LOOKUP_BLOCK_IDS);
+      const cacheKey = rankBlockKey(kind, block);
+      if (!rankBlocks.has(cacheKey)) blocks.set(cacheKey, [kind, block]);
+    }
+    if (rankPromise || blocks.size > RANK_LOOKUP_MAX_BLOCKS) {
+      await ensureRankIndex(signal);
+    } else {
+      await Promise.all(
+        [...blocks.values()].map(([kind, block]) =>
+          loadRankBlock(kind, block, signal)
+        ),
+      );
+    }
+  }
+  signal?.throwIfAborted();
+  const resolved = new Map<number, number>();
+  for (const key of requested) {
+    const rank = rankOfKey(key);
+    if (rank !== null) resolved.set(key, rank);
+  }
+  return resolved;
 }
 
 /** Dense source-id -> VisualRank segment. Missing archive IDs keep the u24
@@ -1943,15 +2063,18 @@ interface SearchNgramIndex {
 }
 
 /** Fixed u32 index retained by authoritative full-text search. */
-function searchNgramIndex(index: Uint32Array): SearchNgramIndex {
-  const bucketMembers = index.subarray(0, SEARCH_NGRAM_BUCKETS + 1);
-  const memberCount = bucketMembers[SEARCH_NGRAM_BUCKETS] ?? 0;
-  const expectedLength = SEARCH_NGRAM_BUCKETS * 2 + memberCount * 3 + 2;
+function searchNgramIndex(
+  index: Uint32Array,
+  bucketCount = SEARCH_NGRAM_BUCKETS,
+): SearchNgramIndex {
+  const bucketMembers = index.subarray(0, bucketCount + 1);
+  const memberCount = bucketMembers[bucketCount] ?? 0;
+  const expectedLength = bucketCount * 2 + memberCount * 3 + 2;
   if (index.length !== expectedLength)
     throw new SiteDataContractError(
       `text search index 应有 ${expectedLength} 项,实际为 ${index.length}`,
     );
-  const offsetsStart = SEARCH_NGRAM_BUCKETS + 1;
+  const offsetsStart = bucketCount + 1;
   const firstStart = offsetsStart + memberCount + 1;
   const lastStart = firstStart + memberCount;
   const countsStart = lastStart + memberCount;
@@ -2044,13 +2167,18 @@ async function loadSearchNgramShard(
 
 /** 与烘焙器一致地按 Unicode 码点散列连续二元字符。碰撞只会增加
  * 候选；最终仍用完整规范化名称过滤，因此不会制造错误命中。 */
-export function searchGramBuckets(text: string): number[] {
+export function searchGramBuckets(
+  text: string,
+  width = SEARCH_NGRAM_WIDTH,
+): number[] {
   const chars = [...text];
-  if (chars.length < SEARCH_NGRAM_WIDTH) return [];
+  if (!Number.isInteger(width) || width <= 0)
+    throw new RangeError("search gram width must be positive");
+  if (chars.length < width) return [];
   const buckets = new Set<number>();
-  for (let start = 0; start <= chars.length - SEARCH_NGRAM_WIDTH; start++) {
-    let value = (2166136261 ^ SEARCH_NGRAM_WIDTH) >>> 0;
-    for (let i = 0; i < SEARCH_NGRAM_WIDTH; i++) {
+  for (let start = 0; start <= chars.length - width; start++) {
+    let value = (2166136261 ^ width) >>> 0;
+    for (let i = 0; i < width; i++) {
       value ^= chars[start + i]?.codePointAt(0) ?? 0;
       value = Math.imul(value, 16777619) >>> 0;
     }
@@ -2115,16 +2243,20 @@ function loadTextSearchMembers(): Promise<TextSearchMembers> {
   });
 }
 
-function validateTextSearchIndex(index: Uint32Array): void {
+function validateTextSearchIndex(
+  index: Uint32Array,
+  packPath: string,
+  bucketCount = SEARCH_NGRAM_BUCKETS,
+): void {
   const {
     bucketMembers,
     memberOffsets,
     memberFirst,
     memberLast,
     counts,
-  } = searchNgramIndex(index);
+  } = searchNgramIndex(index, bucketCount);
   const memberCount = memberFirst.length;
-  const [packBytes] = publishedMeta("text.search.ngram.pack");
+  const [packBytes] = publishedMeta(packPath);
   if (bucketMembers[0] !== 0 || memberOffsets[0] !== 0)
     throw new SiteDataContractError("text search index 必须从零开始");
   for (let member = 0; member < memberCount; member++) {
@@ -2133,7 +2265,7 @@ function validateTextSearchIndex(index: Uint32Array): void {
     if (end <= start || end - start > MEMBER_CAP)
       throw new SiteDataContractError("text search posting 成员边界无效");
   }
-  for (let bucket = 0; bucket < SEARCH_NGRAM_BUCKETS; bucket++) {
+  for (let bucket = 0; bucket < bucketCount; bucket++) {
     const start = bucketMembers[bucket] ?? 0;
     const end = bucketMembers[bucket + 1] ?? start;
     const count = counts[bucket] ?? 0;
@@ -2225,6 +2357,7 @@ async function textPosting(
   bucket: number,
   layout: ReturnType<typeof searchNgramIndex>,
   directorySize: number,
+  packPath: string,
   signal?: AbortSignal,
 ): Promise<number[]> {
   const total = layout.counts[bucket] ?? 0;
@@ -2242,7 +2375,7 @@ async function textPosting(
     const end = layout.memberOffsets[postingMember + 1] ?? start;
     const bytes = await binaryMember(
       "search",
-      "text.search.ngram.pack",
+      packPath,
       start,
       end - start,
       (postingBytes) => {
@@ -2265,27 +2398,67 @@ async function textPosting(
 }
 
 /** Intersect every query bigram posting before reading authoritative text. */
-export async function textSearchMemberPage(
+async function textSearchMemberPageFrom(
   normalized: string,
   cursor: number,
   limit: number,
+  width: number,
+  stem: string,
+  shards: number,
   signal?: AbortSignal,
 ): Promise<TextSearchMemberPage> {
   if (!Number.isSafeInteger(cursor) || cursor < 0 || !Number.isSafeInteger(limit) || limit <= 0)
     throw new RangeError("text search page is invalid");
-  const buckets = [...new Set(searchGramBuckets(normalized))];
+  const buckets = [...new Set(searchGramBuckets(normalized, width))];
   if (!buckets.length) return { members: [], next: null, totalCandidates: 0 };
-  const [directory, index] = await Promise.all([
-    waitForSignal(loadTextSearchMembers(), signal),
-    waitForSignal(loadIdx("text.search.ngram.idx", validateTextSearchIndex), signal),
-  ]);
-  const layout = searchNgramIndex(index);
-  buckets.sort((left, right) =>
-    (layout.counts[left] ?? 0) - (layout.counts[right] ?? 0) || left - right,
-  );
+  if (
+    !Number.isInteger(shards) ||
+    shards <= 0 ||
+    SEARCH_NGRAM_BUCKETS % shards
+  ) throw new RangeError("text search shard count is invalid");
+  const bucketCount = SEARCH_NGRAM_BUCKETS / shards;
+  const sources = buckets.map((bucket) => {
+    const shard = bucket % shards;
+    return {
+      globalBucket: bucket,
+      bucket: Math.floor(bucket / shards),
+      indexPath: shards === 1 ? `${stem}.idx` : `${stem}-${shard}.idx`,
+      packPath: shards === 1 ? `${stem}.pack` : `${stem}-${shard}.pack`,
+    };
+  });
+  const directoryPromise = waitForSignal(loadTextSearchMembers(), signal);
+  const layouts = new Map<string, ReturnType<typeof searchNgramIndex>>();
+  await Promise.all([...new Map(sources.map((source) => [
+    source.indexPath,
+    source,
+  ])).values()].map(async (source) => {
+    const index = await waitForSignal(loadIdx(
+      source.indexPath,
+      (value) => validateTextSearchIndex(
+        value,
+        source.packPath,
+        bucketCount,
+      ),
+    ), signal);
+    layouts.set(source.indexPath, searchNgramIndex(index, bucketCount));
+  }));
+  const directory = await directoryPromise;
+  sources.sort((left, right) => {
+    const leftCount = layouts.get(left.indexPath)?.counts[left.bucket] ?? 0;
+    const rightCount = layouts.get(right.indexPath)?.counts[right.bucket] ?? 0;
+    return leftCount - rightCount || left.globalBucket - right.globalBucket;
+  });
   const postings: number[][] = [];
-  for (const bucket of buckets) {
-    postings.push(await textPosting(bucket, layout, directory.members.length, signal));
+  for (const source of sources) {
+    const layout = layouts.get(source.indexPath);
+    if (!layout) throw new SiteDataContractError("text search shard missing");
+    postings.push(await textPosting(
+      source.bucket,
+      layout,
+      directory.members.length,
+      source.packPath,
+      signal,
+    ));
     if (!(postings.at(-1)?.length)) break;
   }
   const candidates = intersectSortedPostings(postings);
@@ -2305,6 +2478,44 @@ export async function textSearchMemberPage(
     next: consumed < total ? consumed : null,
     totalCandidates: total,
   };
+}
+
+export function textSearchMemberPage(
+  normalized: string,
+  cursor: number,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<TextSearchMemberPage> {
+  return textSearchMemberPageFrom(
+    normalized,
+    cursor,
+    limit,
+    SEARCH_NGRAM_WIDTH,
+    "text.search.ngram",
+    TEXT_SEARCH_POSTING_SHARDS,
+    signal,
+  );
+}
+
+/** Two-character queries use bigram shards; longer queries use narrower
+ * trigram shards. Both are required by the full-text-v1 contract. */
+export function fullTextSearchMemberPage(
+  normalized: string,
+  cursor: number,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<TextSearchMemberPage> {
+  if ([...normalized].length < TEXT_SEARCH_TRIGRAM_WIDTH)
+    return textSearchMemberPage(normalized, cursor, limit, signal);
+  return textSearchMemberPageFrom(
+    normalized,
+    cursor,
+    limit,
+    TEXT_SEARCH_TRIGRAM_WIDTH,
+    "text.search.trigram",
+    TEXT_SEARCH_POSTING_SHARDS,
+    signal,
+  );
 }
 
 /** 从查询的最稀疏二元字符桶按全局热度分页取候选。最终包含判断
