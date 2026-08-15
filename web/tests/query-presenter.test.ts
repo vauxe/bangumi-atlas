@@ -73,6 +73,23 @@ test("projects a list draft as one readable query sentence", () => {
   }), "机器人");
 });
 
+test("describes only the columns the user can change", () => {
+  assert.deepEqual(queryTokens({
+    kind: "list",
+    query: {
+      scope: ["subject", "person", "character"],
+      columns: ["entityType", "score"],
+    },
+  }).map(({ label }) => label), [
+    "作品、人物、角色",
+    "显示实体类型、评分",
+  ]);
+  assert.equal(queryTokens({
+    kind: "list",
+    query: { scope: ["subject"], columns: [] },
+  }).at(-1)?.label, "仅显示条目");
+});
+
 test("uses readable enum labels for conditions shared by multiple entity types", () => {
   const condition = queryTokens({
     kind: "list",

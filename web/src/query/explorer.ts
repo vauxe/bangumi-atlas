@@ -23,6 +23,7 @@ import type {
   QueryOperator,
 } from "./document";
 import type { CompareOperator } from "./value";
+import { defaultResultProjection } from "./result-columns";
 
 export type ExplorerCondition =
   | {
@@ -95,13 +96,6 @@ export interface ExplorerAggregate {
 export function explorerMetricName(metric: ExplorerAggregateMetric): string {
   return metric.field ? `${metric.function}_${metric.field}` : metric.function;
 }
-
-const DEFAULT_COLUMNS: Record<Owner, string[]> = {
-  subject: ["ref", "name", "nameCn", "type", "date", "score", "rank"],
-  person: ["ref", "name", "type", "career", "comments", "collects"],
-  character: ["ref", "name", "role", "comments", "collects"],
-  episode: ["ref", "name", "nameCn", "type", "airdate", "duration"],
-};
 
 function relationEndpoints(
   relation: ExplorerRelation,
@@ -525,7 +519,7 @@ export function compileExplorerQuery(draft: ExplorerQuery): QueryBundle {
     }
     answerShape = "aggregate-table";
   } else {
-    const selectedColumns = draft.columns ?? DEFAULT_COLUMNS[draft.owner];
+    const selectedColumns = draft.columns ?? defaultResultProjection(draft.owner);
     if (!selectedColumns.length || new Set(selectedColumns).size !== selectedColumns.length)
       throw new TypeError("结果列必须非空且唯一");
     for (const { column } of draft.orderBy ?? [])
@@ -1063,8 +1057,9 @@ export function decompileExplorerQuery(bundle: QueryBundle): ExplorerQuery | nul
     } else return null;
     if (operator.binding !== binding) return null;
     const columns = projectedFields?.map((field) => field.field) ?? [];
-    const usesDefaultColumns = columns.length === DEFAULT_COLUMNS[owner].length &&
-      columns.every((field, index) => field === DEFAULT_COLUMNS[owner][index]);
+    const defaults = defaultResultProjection(owner);
+    const usesDefaultColumns = columns.length === defaults.length &&
+      columns.every((field, index) => field === defaults[index]);
     return {
       owner,
       ...(text ? { text } : {}),

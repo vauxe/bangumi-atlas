@@ -19,10 +19,12 @@ import { MEDIA_NAMES } from "../types";
 import type { Mappings } from "../types";
 import { CAREER_VALUES } from "../value-labels";
 import { FACT_LABEL, OWNER_LABEL } from "./vocabulary";
+export { DEFAULT_RESULT_FIELDS } from "./result-columns";
 
 export { FACT_LABEL, OWNER_LABEL } from "./vocabulary";
 
 export const FIELD_LABEL: Record<string, string> = {
+  entityType: "实体类型",
   name: "原名",
   nameCn: "中文名",
   type: "类型",
@@ -131,13 +133,6 @@ const QUERY_FIELD_UI: Partial<Record<Owner, Record<string, QueryFieldUi>>> = {
     nameCn: { add: false },
     airdate: { inputType: "date" },
   },
-};
-
-export const DEFAULT_RESULT_FIELDS: Record<Owner, string[]> = {
-  subject: ["name", "nameCn", "type", "date", "year", "score", "rank"],
-  person: ["name", "type", "career", "comments", "collects"],
-  character: ["name", "role", "comments", "collects"],
-  episode: ["name", "nameCn", "type", "airdate", "year", "duration"],
 };
 
 export const COMPARE = new Set<CompareOperator>([

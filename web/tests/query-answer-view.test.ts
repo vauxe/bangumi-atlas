@@ -105,6 +105,17 @@ test("renders missing and explicit null as different user-visible states", () =>
   assert.equal(queryValueText(false), "否");
 });
 
+test("distinguishes an unavailable multi-entity column from a missing value", () => {
+  assert.equal(queryValueText(null, {
+    column: "score",
+    row: { ref: "person:7" },
+  }), "不适用");
+  assert.equal(queryValueText(null, {
+    column: "score",
+    row: { ref: "subject:7" },
+  }), "未记录");
+});
+
 test("renders stable references as domain labels instead of storage IDs", () => {
   assert.equal(queryValueText("subject:42"), "作品 #42");
   assert.equal(queryValueText("person:7"), "人物 #7");
@@ -241,6 +252,10 @@ test("renders person careers as readable labels without changing raw data", () =
     row: { ref: "person:42" },
     semantic: "person.career",
   }), "声优、作家");
+  assert.equal(queryValueText(["seiyu", "writer"], {
+    column: "career",
+    row: { ref: "person:42" },
+  }), "声优、作家");
 });
 
 test("labels unknown release enum values with their domain meaning", () => {
@@ -284,6 +299,11 @@ test("uses the contract enum namespace for Episode types", () => {
     column: "type",
     row: { ref: "episode:7" },
     semantic: "episode.type",
+    mappings,
+  }), "特别篇");
+  assert.equal(queryValueText(1, {
+    column: "type",
+    row: { ref: "episode:7" },
     mappings,
   }), "特别篇");
 });
