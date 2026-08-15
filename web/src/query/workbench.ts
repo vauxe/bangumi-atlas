@@ -136,9 +136,7 @@ export function queryWorkspaceVisibility(
 }
 
 export function queryHighlightStatus(count: number, current: boolean): string {
-  return count > 0
-    ? `图上 ${count.toLocaleString()} 个${current ? "当前" : "上次"}结果`
-    : "";
+  return count > 0 && !current ? "图中仍显示上次结果" : "";
 }
 
 export class QueryWorkbench {
@@ -330,7 +328,7 @@ export class QueryWorkbench {
       this.resultsCurrent = false;
       this.renderHighlightStatus();
       this.runnable = false;
-      this.setStatus("名称至少需要两个字才能查看完整结果");
+      this.setStatus("名称至少需要两个字");
       this.updateRunState();
       return;
     }

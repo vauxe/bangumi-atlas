@@ -39,17 +39,8 @@ import type { Bounds3D, Geometry } from "./types";
 
 export type { OrbitState } from "./camera";
 
-export function interactionHint(selected: boolean, pinnedCount = 0): string {
-  const base =
-    "拖动平移 · 右键拖动旋转 · 滚轮缩放 · 单击查看 · S 搜索 · T 俯视 · R 复位";
-  const status: string[] = [];
-  if (selected) {
-    if (pinnedCount === 0) status.push("图钉逐步保留节点和边");
-    status.push("Esc 关闭当前查看");
-  }
-  if (pinnedCount > 0)
-    status.push(`已保留 ${pinnedCount} 个节点及其关系`);
-  return status.length ? `${base} · ${status.join(" · ")}` : base;
+export function interactionHint(selected: boolean): string {
+  return selected ? "Esc 取消选中" : "";
 }
 
 function hasWorkingSet(): boolean {
@@ -395,8 +386,6 @@ export class Scene {
   private lastWorkingNeighbors: readonly number[] = state.neighbors;
   private workingSetCoreCache: WorkingSetCoreCache | null = null;
   private retainedWorkingSetCoreCache: RetainedWorkingSetCoreCache | null = null;
-  private lastPickCycle: { x: number; y: number; depth: number } | null =
-    null;
   private anchorCache: { x: number; y: number; rank: number; at: number } | null =
     null;
   private anchorFlash: {
@@ -465,10 +454,7 @@ export class Scene {
       },
       onViewStateChange: (change) => this.handleViewStateChange(change),
       onClick: (info: { layer: unknown }) => {
-        if (!info.layer) {
-          this.lastPickCycle = null; // 循环拾取状态随空白点击复位
-          this.cb.onPick(null); // 单击空白 = 取消选中
-        }
+        if (!info.layer) this.cb.onPick(null); // 单击空白 = 取消选中
       },
       getCursor: ({ isHovering }) => (isHovering ? "pointer" : "grab"),
       layers: [],
@@ -740,16 +726,6 @@ export class Scene {
   setOrtho(v: boolean): void {
     if (this.camera.ortho === v) return;
     this.camera.ortho = v;
-    this.applyCamera(true);
-  }
-
-  topView(): void {
-    this.camera.toggleTop();
-    this.applyCamera(true);
-  }
-
-  home(): void {
-    this.camera.home();
     this.applyCamera(true);
   }
 
@@ -1432,8 +1408,8 @@ export class Scene {
             info.y,
           );
         },
-        onClick: (info: { index: number; x: number; y: number }) => {
-          this.pickWithCycle(info);
+        onClick: (info: { index: number }) => {
+          this.cb.onPick(info.index >= 0 ? info.index : null);
           return true;
         },
       } as never),
@@ -1465,25 +1441,5 @@ export class Scene {
       }
     }
     this.deck.setProps({ layers: layers as never[] });
-  }
-
-  /** 重叠处连续点击循环切换:同一位置再点,拾取下一深度候选。 */
-  private pickWithCycle(info: { index: number; x: number; y: number }): void {
-    const prev = this.lastPickCycle;
-    if (prev && Math.abs(prev.x - info.x) < 4 && Math.abs(prev.y - info.y) < 4) {
-      const picks = this.deck.pickMultipleObjects({
-        x: info.x,
-        y: info.y,
-        radius: 4,
-        depth: prev.depth + 2,
-        layerIds: ["context"],
-      });
-      const next = picks[(prev.depth + 1) % Math.max(picks.length, 1)];
-      this.lastPickCycle = { x: info.x, y: info.y, depth: prev.depth + 1 };
-      this.cb.onPick(next ? (next.index as number) : info.index);
-      return;
-    }
-    this.lastPickCycle = { x: info.x, y: info.y, depth: 0 };
-    this.cb.onPick(info.index >= 0 ? info.index : null);
   }
 }

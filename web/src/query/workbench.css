@@ -935,7 +935,6 @@ select.query-popover-control { cursor: pointer; }
   display: grid;
   width: 100%;
   min-height: 0;
-  container-type: inline-size;
   flex: 1;
   margin-top: 10px;
   grid-template-rows: 48px minmax(0, 1fr);
@@ -1021,7 +1020,7 @@ select.query-popover-control { cursor: pointer; }
 .query-result-count,
 .query-empty { margin: 5px 0 10px; color: var(--ink-2); font-size: 12px; }
 .query-table-wrap { max-width: 100%; overflow: auto; }
-.query-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.query-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 12px; }
 
 .query-table th,
 .query-table td {
@@ -1029,15 +1028,21 @@ select.query-popover-control { cursor: pointer; }
   border-bottom: 1px solid var(--line);
   text-align: left;
   vertical-align: top;
-  white-space: nowrap;
 }
 
 .query-table th {
   position: sticky;
   z-index: 1;
   top: 0;
+  width: 8rem;
   background: var(--panel);
   color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.query-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .query-entity-table th:first-child,
@@ -1046,7 +1051,7 @@ select.query-popover-control { cursor: pointer; }
   left: 0;
   background: var(--panel);
 }
-.query-entity-table th:first-child { z-index: 2; }
+.query-entity-table th:first-child { z-index: 2; width: 16rem; }
 .query-entity-table td:first-child { z-index: 1; }
 .query-table .query-match-row td { padding-top: 0; color: var(--ink-2); font-size: 11px; line-height: 1.5; white-space: normal; }
 .query-entity-link {
@@ -1066,55 +1071,6 @@ select.query-popover-control { cursor: pointer; }
 .query-path-chain { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
 .query-path-step { color: var(--ink-2); font-size: 11px; }
 .query-more { margin-top: 10px; }
-
-@container (max-width: 34rem) {
-  .query-table-wrap { overflow: visible; }
-  .query-table,
-  .query-table tbody { display: block; }
-  .query-table thead {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    clip-path: inset(50%);
-    white-space: nowrap;
-  }
-  .query-table tbody tr:not(.query-match-row) {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 2px 8px;
-    margin-bottom: 8px;
-    padding: 8px;
-    border: 1px solid var(--line);
-    border-radius: 14px;
-    background: rgba(15, 26, 28, .26);
-  }
-  .query-table tbody td {
-    display: grid;
-    min-width: 0;
-    gap: 2px;
-    padding: 5px;
-    border: 0;
-    white-space: normal;
-  }
-  .query-table tbody tr:not(.query-match-row) td::before {
-    content: attr(data-label);
-    color: var(--ink-2);
-    font-size: 10px;
-  }
-  .query-entity-table tbody td:first-child {
-    position: static;
-    grid-column: 1 / -1;
-    padding-bottom: 7px;
-    border-bottom: 1px solid var(--line);
-    background: transparent;
-  }
-  .query-entity-table tbody tr:not(.query-match-row) td:first-child::before {
-    display: none;
-  }
-  .query-table .query-match-row { display: block; margin: -8px 0 8px; }
-}
 
 @media (prefers-reduced-motion: reduce) {
   #query-workbench,

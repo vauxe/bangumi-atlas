@@ -455,20 +455,6 @@ export class Search {
         this.pick(Number(rank));
       }
     });
-    document.addEventListener("keydown", (ev) => {
-      if (
-        ev.key.toLowerCase() === "s" && // Search
-        document.activeElement !== this.box &&
-        !(document.activeElement instanceof HTMLInputElement) &&
-        !(document.activeElement instanceof HTMLTextAreaElement) &&
-        !(document.activeElement instanceof HTMLSelectElement) &&
-        !(document.activeElement instanceof HTMLElement &&
-          document.activeElement.isContentEditable)
-      ) {
-        ev.preventDefault();
-        this.box.focus();
-      }
-    });
   }
 
   private runUpdate(): void {
