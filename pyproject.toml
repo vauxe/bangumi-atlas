@@ -7,18 +7,18 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
-    "ladybug>=0.19",
-    "pyarrow>=18",
+    "ladybug>=0.19.1",
+    "pyarrow>=25.0.1",
     "orjson>=3.10",
     "pyyaml>=6",
-    "numpy>=2.5.1",
+    "numpy>=2.5.2",
     "igraph>=1.0.0",
     "scipy>=1.18.0",
     "opencc>=1.1.9",
 ]
 
 [dependency-groups]
-dev = ["ruff>=0.16.1", "mypy>=1.14", "types-pyyaml>=6"]
+dev = ["ruff>=0.16.2", "mypy>=1.14", "types-pyyaml>=6"]
 
 [tool.ruff]
 line-length = 79
