@@ -183,7 +183,7 @@ test("lets Escape return from a nested panel or close the top level", () => {
   assert.ok(keydown);
   assert.match(
     keydown,
-    /event\.key === "Escape"[\s\S]*if \(this\.panelBackAction\) this\.panelBackAction\(\);[\s\S]*else this\.closePanel\(true\)/,
+    /event\.key === "Escape"[\s\S]*event\.preventDefault\(\);[\s\S]*if \(this\.panelBackAction\) this\.panelBackAction\(\);[\s\S]*else this\.closePanel\(true\)/,
   );
 });
 

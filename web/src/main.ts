@@ -604,6 +604,11 @@ async function boot(): Promise<void> {
 
   // ---- 标准关闭键；不注册会误触的全局字母快捷键 ----
   document.addEventListener("keydown", (ev) => {
+    if (
+      ev.defaultPrevented ||
+      ev.key !== "Escape" ||
+      state.selection === null
+    ) return;
     const target = ev.target;
     if (
       target instanceof HTMLInputElement ||
@@ -611,7 +616,7 @@ async function boot(): Promise<void> {
       target instanceof HTMLSelectElement ||
       (target instanceof HTMLElement && target.isContentEditable)
     ) return;
-    if (ev.key === "Escape" && state.selection !== null) deselect(true);
+    deselect(true);
   });
 
   // ---- URL 恢复(深链)与 popstate:控件已就绪后再接线 ----

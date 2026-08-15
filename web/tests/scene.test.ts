@@ -74,6 +74,19 @@ test("keeps graph controls in one passive line with direct wording", () => {
   assert.doesNotMatch(sceneSource, /已固定 \$\{pinnedCount\}/);
 });
 
+test("keeps a handled Escape inside the active control", () => {
+  const mainSource = readFileSync("src/main.ts", "utf8");
+  const handler = mainSource.match(
+    /document\.addEventListener\("keydown", \(ev\) => \{[\s\S]*?\n  \}\);/,
+  )?.[0];
+
+  assert.ok(handler);
+  const handledGuard = handler.indexOf("ev.defaultPrevented");
+  const deselect = handler.indexOf("deselect(true)");
+  assert.ok(handledGuard >= 0, "handled keyboard events must not reach graph selection");
+  assert.ok(handledGuard < deselect, "the handled-event guard must run before deselection");
+});
+
 test("keeps the desktop shell fluid without resolution-specific breakpoints", () => {
   const pageSource = readFileSync("../site/index.html", "utf8");
   const root = pageSource.match(/:root\s*\{(?<body>[^}]*)\}/s)
