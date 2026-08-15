@@ -1,4 +1,5 @@
 import { normalizeQuery } from "./canonical";
+import { QUERY_CONTRACT, type Owner } from "./contract";
 import type { ParameterValues, QueryDocument } from "./document";
 import { QUERY_SECURITY_PROFILE, safeRecordKey } from "./security";
 
@@ -11,10 +12,18 @@ export type AnswerShape =
   | "aggregate-table"
   | "table";
 
-export interface AnswerSpec {
-  shape: AnswerShape;
-  title: string;
-}
+export type AnswerSpec =
+  | {
+      shape: "entity-list";
+      title: string;
+      /** Entity types whose fields can be chosen in this result view. */
+      entityScope: Owner[];
+    }
+  | {
+      shape: Exclude<AnswerShape, "entity-list">;
+      title: string;
+      entityScope?: never;
+    };
 
 export interface QuerySection {
   query: QueryDocument;
@@ -43,6 +52,29 @@ const ANSWER_SHAPES = new Set<AnswerShape>([
   "table",
 ]);
 
+const OWNER_ORDER = Object.keys(QUERY_CONTRACT.owners) as Owner[];
+
+function normalizeAnswer(answer: AnswerSpec): AnswerSpec {
+  if (!answer?.title || !ANSWER_SHAPES.has(answer.shape))
+    throw new TypeError("query bundle answer specification is invalid");
+  if (answer.shape !== "entity-list") {
+    if (answer.entityScope !== undefined)
+      throw new TypeError("query bundle answer entity scope is invalid");
+    return { shape: answer.shape, title: answer.title };
+  }
+  if (
+    !Array.isArray(answer.entityScope) ||
+    !answer.entityScope.length ||
+    answer.entityScope.some((owner) => !OWNER_ORDER.includes(owner))
+  ) throw new TypeError("query bundle answer entity scope is invalid");
+  const selected = new Set(answer.entityScope);
+  return {
+    shape: answer.shape,
+    title: answer.title,
+    entityScope: OWNER_ORDER.filter((owner) => selected.has(owner)),
+  };
+}
+
 export function normalizeBundle(bundle: QueryBundle): QueryBundle {
   if (bundle?.schema !== "atlas-query-bundle-v1")
     throw new TypeError("query bundle schema is unsupported");
@@ -64,7 +96,7 @@ export function normalizeBundle(bundle: QueryBundle): QueryBundle {
   const sections: Record<string, QuerySection> = {};
   for (const [name, section] of entries) {
     safeRecordKey(name, "query section name");
-    if (!name || !section?.answer?.title || !ANSWER_SHAPES.has(section.answer.shape))
+    if (!name || !section?.answer)
       throw new TypeError("query bundle answer specification is invalid");
     const parameterValues = Object.fromEntries(
       Object.entries(section.parameterValues ?? {}).sort(([left], [right]) =>
@@ -76,7 +108,7 @@ export function normalizeBundle(bundle: QueryBundle): QueryBundle {
         preserveParameters: true,
       }),
       ...(Object.keys(parameterValues).length ? { parameterValues } : {}),
-      answer: { ...section.answer },
+      answer: normalizeAnswer(section.answer),
     };
   }
   return {

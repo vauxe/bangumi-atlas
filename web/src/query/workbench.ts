@@ -1,15 +1,21 @@
 import { canonicalJson } from "./canonical";
-import { normalizeBundle, type QueryBundle, type QuerySection } from "./bundle";
+import {
+  normalizeBundle,
+  type QueryBundle,
+  type QuerySection,
+} from "./bundle";
 import {
   compileQueryDraft,
   defaultQueryDraft,
   draftQuery,
+  ENTITY_SCOPE_ORDER,
   queryDraftFromBundle,
   type QueryDraft,
 } from "./draft";
-import type { QueryResult } from "./engine";
+import type { EntityValue, QueryResult, RuntimeValue } from "./engine";
 import type { QueryHighlights } from "./highlights";
 import { queryResultEntityRefs, renderAnswer } from "./answer-view";
+import { queryRowPrimaryEntityRef, type QueryEntityRef } from "./result-entities";
 import {
   QueryBar,
   type EntitySuggestionBatch,
@@ -22,10 +28,16 @@ import {
   revealQueryResult,
 } from "./result-buffer";
 import { QUERY_SECURITY_PROFILE } from "./security";
-import type { Owner } from "./contract";
+import { fieldDefinition, parseEntityRef, type Owner } from "./contract";
 import { notify, state } from "../store";
 import type { Mappings, TagVocabularyField } from "../types";
 import { setQueryIconButton, type QueryIconName } from "./icons";
+import {
+  RESULT_ENTITY_TYPE_FIELD,
+  normalizeResultColumnSelection,
+  ownerSupportsResultField,
+} from "./result-columns";
+import { MISSING } from "./value";
 
 export interface QueryWorkbenchDependencies {
   host?: HTMLElement;
@@ -61,6 +73,12 @@ export interface QueryWorkbenchDependencies {
   onResultEntities?(refs: readonly string[]): number | Promise<number>;
   onResultHighlights?(highlights: readonly QueryHighlights[]): number | Promise<number>;
   mappings?(): Promise<Mappings>;
+  projectResultEntities?(
+    owner: Owner,
+    refs: readonly QueryEntityRef[],
+    fields: readonly string[],
+    signal: AbortSignal,
+  ): Promise<readonly EntityValue[]>;
   onBundle?(bundle: QueryBundle): void;
   updateUrl(): void;
   pushUrl?(): void;
@@ -111,6 +129,67 @@ export function mergeQueryResultRefs(
   for (const section of sections.values())
     for (const ref of section) refs.add(ref);
   return [...refs];
+}
+
+/** Adds presentation-only fields while preserving the executed result metadata. */
+export function hydrateQueryResultColumns(
+  result: QueryResult,
+  selectedColumns: readonly string[],
+  entities: readonly EntityValue[],
+): QueryResult {
+  const entityByRef = new Map<QueryEntityRef, EntityValue>();
+  for (const entity of entities) {
+    if (entityByRef.has(entity.ref))
+      throw new TypeError(`结果列返回了重复实体：${entity.ref}`);
+    entityByRef.set(entity.ref, entity);
+  }
+  const columns = { ...result.columns };
+  for (const field of selectedColumns) {
+    if (columns[field]) continue;
+    if (field === RESULT_ENTITY_TYPE_FIELD) {
+      columns[field] = { type: "string" };
+      continue;
+    }
+    const owners = ENTITY_SCOPE_ORDER.filter((owner) =>
+      ownerSupportsResultField(owner, field)
+    );
+    const owner = owners[0];
+    if (!owner) continue;
+    columns[field] = {
+      type: fieldDefinition(owner, field).type,
+      ...(owners.length === 1 ? { semantic: `${owner}.${field}` } : {}),
+    };
+  }
+  const evidence = [...result.evidence];
+  const rows = result.rows.map((row, index) => {
+    const ref = queryRowPrimaryEntityRef(row, result.evidence[index]);
+    if (!ref) return row;
+    const owner = parseEntityRef(ref).owner;
+    let next = row;
+    let nextEvidence = result.evidence[index] ?? {};
+    for (const field of selectedColumns) {
+      if (Object.hasOwn(row, field)) continue;
+      let value: RuntimeValue;
+      if (field === RESULT_ENTITY_TYPE_FIELD) value = owner;
+      else if (!ownerSupportsResultField(owner, field)) value = null;
+      else {
+        const entity = entityByRef.get(ref);
+        value = entity && Object.hasOwn(entity.fields, field)
+          ? entity.fields[field]!
+          : MISSING;
+        if (entity && Object.hasOwn(entity.fields, field)) {
+          if (nextEvidence === result.evidence[index])
+            nextEvidence = { ...nextEvidence };
+          nextEvidence[field] = [{ kind: "entity-field", ref, field }];
+        }
+      }
+      if (next === row) next = { ...row };
+      next[field] = value;
+    }
+    if (nextEvidence !== result.evidence[index]) evidence[index] = nextEvidence;
+    return next;
+  });
+  return { ...result, rows, evidence, columns };
 }
 
 export function queryWorkspaceVisibility(
@@ -247,7 +326,7 @@ export class QueryWorkbench {
     }
     this.expand();
     void this.runBundle(normalized, false).then(() => {
-      if (!draft) this.setStatus("此旧查询只能查看结果");
+      if (!draft) this.setStatus("此查询不可编辑");
     }).catch((error) => this.showError(error));
   }
 
@@ -456,15 +535,86 @@ export class QueryWorkbench {
       const sectionHighlights = execution.highlights;
       if (result.releaseId !== releaseId)
         throw new TypeError("查询结果来自不同的数据版本，请刷新页面后重试");
+      const entityScope = section.answer.shape === "entity-list"
+        ? [...section.answer.entityScope]
+        : [];
+      let selectedColumns = entityScope.length
+        ? normalizeResultColumnSelection(entityScope, Object.keys(result.columns))
+        : [];
+      const hydratedEntities = new Map<QueryEntityRef, EntityValue>();
+      let presentedResult: QueryResult | null = null;
+      let presentedSource: QueryResult | null = null;
+      let presentedColumns = "";
       let shown = Math.min(50, result.rows.length);
       let loadingMore = false;
       let publishedRows = -1;
       let answerView: ReturnType<typeof renderAnswer> | null = null;
+      let renderSerial = 0;
+      let columnChangeSerial = 0;
+      const hydrateColumns = async (selection: readonly string[]): Promise<void> => {
+        const projector = this.dependencies.projectResultEntities;
+        if (!projector || !entityScope.length) return;
+        const requests = entityScope.flatMap((owner) => {
+          const available = selection.filter((field) =>
+            field !== RESULT_ENTITY_TYPE_FIELD &&
+            ownerSupportsResultField(owner, field)
+          );
+          if (!available.length) return [];
+          const refs: QueryEntityRef[] = [];
+          const fields = new Set<string>();
+          result.rows.forEach((row, index) => {
+            const ref = queryRowPrimaryEntityRef(row, result.evidence[index]);
+            if (!ref || parseEntityRef(ref).owner !== owner) return;
+            const cached = hydratedEntities.get(ref);
+            const missing = available.filter((field) =>
+              !Object.hasOwn(row, field) &&
+              !(cached && Object.hasOwn(cached.fields, field))
+            );
+            if (!missing.length) return;
+            refs.push(ref);
+            for (const field of missing) fields.add(field);
+          });
+          return refs.length ? [{ owner, refs: [...new Set(refs)], fields: [...fields] }] : [];
+        });
+        const batches = await Promise.all(requests.map(({ owner, refs, fields }) =>
+          projector(owner, refs, fields, signal).then((entities) => ({
+            owner,
+            refs,
+            fields,
+            entities,
+          }))
+        ));
+        signal.throwIfAborted();
+        for (const { owner, refs, fields, entities } of batches) {
+          const requested = new Set(refs);
+          const returned = new Set<QueryEntityRef>();
+          for (const entity of entities) {
+            if (entity.owner !== owner || !requested.has(entity.ref))
+              throw new TypeError("结果列返回了未请求的实体");
+            if (returned.has(entity.ref))
+              throw new TypeError(`结果列返回了重复实体：${entity.ref}`);
+            returned.add(entity.ref);
+            const previous = hydratedEntities.get(entity.ref);
+            hydratedEntities.set(entity.ref, {
+              ...entity,
+              fields: { ...previous?.fields, ...entity.fields },
+            });
+          }
+          const missing = refs.find((ref) => !returned.has(ref));
+          if (missing)
+            throw new TypeError(`当前数据版本缺少结果实体：${missing}`);
+          for (const entity of entities)
+            for (const field of fields)
+              if (!Object.hasOwn(entity.fields, field))
+                throw new TypeError(`结果实体缺少显示列：${entity.ref}.${field}`);
+        }
+      };
+      let render: (focusMore?: boolean) => Promise<void>;
       const showMore = async (): Promise<void> => {
         if (loadingMore) return;
         if (shown < result.rows.length) {
           shown = Math.min(shown + 50, result.rows.length);
-          render(true);
+          await render(true);
           return;
         }
         if (!result.hasMore) return;
@@ -478,7 +628,7 @@ export class QueryWorkbench {
           });
           result = appendQueryResultPage(result, next);
           shown = Math.min(shown + 50, result.rows.length);
-          render(true);
+          await render(true);
         } catch (error) {
           this.showError(error);
         } finally {
@@ -486,14 +636,42 @@ export class QueryWorkbench {
           if (this.controller?.signal === signal) this.setRunning(false);
         }
       };
-      const render = (focusMore = false): void => {
-        const visible = revealQueryResult(result, shown);
+      const changeColumns = (columns: readonly string[]): void => {
+        const serial = ++columnChangeSerial;
+        selectedColumns = normalizeResultColumnSelection(entityScope, columns);
+        card.setAttribute("aria-busy", "true");
+        void render()
+          .catch((error) => {
+            if (!signal.aborted && serial === columnChangeSerial)
+              this.showError(error);
+          })
+          .finally(() => {
+            if (serial === columnChangeSerial)
+              card.removeAttribute("aria-busy");
+          });
+      };
+      render = async (focusMore = false): Promise<void> => {
+        const serial = ++renderSerial;
+        const selection = [...selectedColumns];
+        await hydrateColumns(selection);
+        if (signal.aborted || serial !== renderSerial) return;
+        const selectionKey = selection.join("\u0000");
+        if (presentedSource !== result || presentedColumns !== selectionKey) {
+          presentedResult = hydrateQueryResultColumns(
+            result,
+            selection,
+            [...hydratedEntities.values()],
+          );
+          presentedSource = result;
+          presentedColumns = selectionKey;
+        }
+        const visible = revealQueryResult(presentedResult ?? result, shown);
         if (publishedRows !== result.rows.length) {
           const highlightRefs = queryResultEntityRefs(result);
           publishedRows = result.rows.length;
           onResult(highlightRefs, sectionHighlights);
         }
-        if (answerView) answerView.update(visible);
+        if (answerView) answerView.update(visible, selection);
         else {
           answerView = renderAnswer(card, section.answer, visible, {
             onEntity: (ref) => {
@@ -501,6 +679,9 @@ export class QueryWorkbench {
                 .catch((error) => this.showError(error));
             },
             onMore: visible.hasMore ? () => void showMore() : undefined,
+            ...(entityScope.length && this.dependencies.projectResultEntities
+              ? { onColumnsChange: changeColumns }
+              : {}),
             mappings,
           });
         }
@@ -508,7 +689,7 @@ export class QueryWorkbench {
           card.querySelector<HTMLElement>(".query-more")?.focus();
       };
       card.classList.remove("loading");
-      render();
+      await render();
       return true;
     } catch (error) {
       if (signal.aborted) return false;

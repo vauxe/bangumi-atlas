@@ -25,7 +25,6 @@ import {
   splitFactDiscriminatorCondition,
 } from "./workbench-model";
 import type { Mappings } from "../types";
-import { normalizeResultColumnSelection } from "./result-columns";
 
 export type QueryTokenTarget =
   | { type: "head" }
@@ -34,7 +33,6 @@ export type QueryTokenTarget =
   | { type: "text" }
   | { type: "condition"; index: number }
   | { type: "relation"; index: number }
-  | { type: "columns" }
   | { type: "aggregate" }
   | { type: "having" }
   | { type: "order" }
@@ -316,22 +314,6 @@ function listTokens(
       "relation",
       describeRelation(relation, options),
       { type: "relation", index },
-      true,
-    ));
-  }
-
-  if (draft.kind === "list" && query.columns !== undefined) {
-    const columns = normalizeResultColumnSelection(
-      draft.query.scope,
-      query.columns,
-    );
-    result.push(token(
-      "columns",
-      "shape",
-      columns.length
-        ? `显示${columns.map((field) => FIELD_LABEL[field] ?? field).join("、")}`
-        : "仅显示条目",
-      { type: "columns" },
       true,
     ));
   }

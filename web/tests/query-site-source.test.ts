@@ -443,6 +443,47 @@ test("does not scan storage for an empty candidate set", async () => {
   assert.deepEqual(rows, []);
 });
 
+test("hydrates Episode candidates with point reads instead of a full scan", async () => {
+  const requested: number[] = [];
+  const source = new SiteQueryDataSource({
+    entities: async function* () {},
+    episodes: async function* () {
+      throw new Error("Episode candidate hydration must not scan every Episode");
+    },
+    episode: async (id) => {
+      requested.push(id);
+      return id === 7 ? {
+        id,
+        subject: key(1, 3),
+        name: "第七话",
+        nameCn: "",
+        airdate: "2024-02-01",
+        disc: 1,
+        duration: "24m",
+        sort: 7,
+        type: 0,
+        hasDescription: true,
+      } : null;
+    },
+    entity: async () => null,
+    factsFor: async () => ({ items: [], total: 0, next: null }),
+  });
+  const rows = [];
+
+  for await (const entity of source.scanCandidates!(
+    "episode",
+    ["episode:7", "episode:8", "episode:7"],
+    undefined,
+    ["airdate"],
+  )) rows.push(entity);
+
+  assert.deepEqual(requested, [7, 8]);
+  assert.deepEqual(rows.map(({ ref, fields }) => ({ ref, fields })), [{
+    ref: "episode:7",
+    fields: { airdate: "2024-02-01" },
+  }]);
+});
+
 test("keeps lookup point hydration projected to downstream fields", async () => {
   let requested: readonly string[] = [];
   const reader: SiteQueryReader = {

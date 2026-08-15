@@ -63,7 +63,11 @@ test("keeps typed parameter values with the section they execute", () => {
           },
         },
         parameterValues: { minimum: 8 },
-        answer: { shape: "entity-list", title: "高分作品" },
+        answer: {
+          shape: "entity-list",
+          title: "高分作品",
+          entityScope: ["subject"],
+        },
       },
     },
   };
@@ -93,6 +97,70 @@ test("keeps typed parameter values with the section they execute", () => {
   const encoded = encodeShareableBundle(bundle);
   assert.ok(encoded);
   assert.deepEqual(decodeBundle(encoded), normalized);
+});
+
+test("normalizes the entity scope used by result presentation", () => {
+  const bundle: QueryBundle = {
+    schema: "atlas-query-bundle-v1",
+    release: { policy: "latest" },
+    sections: {
+      results: {
+        query: {
+          schema: "atlas-query-document-v1",
+          root: "values",
+          parameters: {},
+          operators: {
+            values: { kind: "values", columns: ["ref"], rows: [["subject:1"]] },
+          },
+        },
+        answer: {
+          shape: "entity-list",
+          title: "结果",
+          entityScope: ["person", "subject", "person"],
+        },
+      },
+    },
+  };
+
+  assert.deepEqual(
+    normalizeBundle(bundle).sections.results?.answer.entityScope,
+    ["subject", "person"],
+  );
+  assert.throws(() => normalizeBundle({
+    ...bundle,
+    sections: {
+      results: {
+        ...bundle.sections.results!,
+        answer: { shape: "table", title: "结果", entityScope: ["subject"] },
+      },
+    },
+  } as unknown as QueryBundle), /entity scope/);
+});
+
+test("requires current entity results to declare their complete scope", () => {
+  const bundle = {
+    schema: "atlas-query-bundle-v1",
+    release: { policy: "latest" },
+    sections: {
+      results: {
+        query: {
+          schema: "atlas-query-document-v1",
+          root: "values",
+          parameters: {},
+          operators: {
+            values: {
+              kind: "values",
+              columns: ["ref"],
+              rows: [["subject:1"]],
+            },
+          },
+        },
+        answer: { shape: "entity-list", title: "结果" },
+      },
+    },
+  } as unknown as QueryBundle;
+
+  assert.throws(() => normalizeBundle(bundle), /entity scope/);
 });
 
 test("declines an oversized share URL without rejecting the local query", () => {

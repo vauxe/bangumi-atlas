@@ -145,6 +145,7 @@ export function fullTextRecipe(text: string): QueryBundle {
         answer: {
           shape: "entity-list",
           title: `${OWNER_LABEL[owner]}${field === "description" ? "介绍" : "简介"}`,
+          entityScope: [owner],
         },
       };
     }

@@ -29,13 +29,19 @@ import {
 } from "./workbench-model";
 import {
   projectedEntityRef,
-  queryRowVisibleEntityRefs,
+  queryRowPrimaryEntityRef,
 } from "./result-entities";
+import {
+  defaultResultColumnSelection,
+  normalizeResultColumnSelection,
+  resultColumnChoices,
+} from "./result-columns";
 export { queryResultEntityRefs } from "./result-entities";
 
 export interface AnswerViewOptions {
   onEntity?(ref: string): void;
   onMore?(): void;
+  onColumnsChange?(columns: readonly string[]): void;
   mappings?: Mappings;
 }
 
@@ -202,16 +208,6 @@ function readableRef(ref: string): string {
   return factRef ? `关系事实 #${factRef[1]}` : ref;
 }
 
-function rowEntityRef(
-  row: Record<string, RuntimeValue>,
-  evidence: RowEvidence | undefined,
-): string | null {
-  if (typeof row.ref === "string" && ENTITY_REF.test(row.ref)) return row.ref;
-  return queryRowVisibleEntityRefs(row).length
-    ? null
-    : projectedEntityRef(row, evidence);
-}
-
 function isFullTextMatch(
   item: Evidence,
 ): item is Extract<Evidence, { kind: "text-range" }> {
@@ -347,22 +343,120 @@ interface RenderedTable {
   layout: TableLayout;
 }
 
-function tableLayout(result: QueryResult): TableLayout {
+const ENTITY_RESULT_COLUMN = Symbol("entity-result-column");
+const DEFAULT_COLUMN_WIDTH = 112;
+const DEFAULT_ENTITY_COLUMN_WIDTH = 224;
+const MIN_COLUMN_WIDTH = 72;
+const MAX_COLUMN_WIDTH = 1_600;
+const COLUMN_WIDTH_STEP = 8;
+
+type ResultColumnKey = string | typeof ENTITY_RESULT_COLUMN;
+
+interface ResultColumnHeader {
+  key: ResultColumnKey;
+  defaultWidth: number;
+  cell: HTMLTableCellElement;
+  resizer: HTMLSpanElement;
+}
+
+function clampColumnWidth(width: number): number {
+  return Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, Math.round(width)));
+}
+
+function resultColumnHeader(
+  key: ResultColumnKey,
+  label: string,
+  widths: Map<ResultColumnKey, number>,
+  onResize: (key: ResultColumnKey, width: number) => void,
+): ResultColumnHeader {
+  const cell = document.createElement("th");
+  cell.scope = "col";
+  cell.textContent = label;
+  const defaultWidth = key === ENTITY_RESULT_COLUMN
+    ? DEFAULT_ENTITY_COLUMN_WIDTH
+    : DEFAULT_COLUMN_WIDTH;
+  const savedWidth = widths.get(key);
+  if (savedWidth !== undefined) cell.style.width = `${savedWidth}px`;
+
+  const resizer = document.createElement("span");
+  resizer.className = "query-column-resizer";
+  resizer.tabIndex = 0;
+  resizer.title = "拖动调整列宽";
+  resizer.setAttribute("role", "separator");
+  resizer.setAttribute("aria-label", `${label}列宽`);
+  resizer.setAttribute("aria-orientation", "vertical");
+  resizer.setAttribute("aria-valuemin", String(MIN_COLUMN_WIDTH));
+  resizer.setAttribute("aria-valuemax", String(MAX_COLUMN_WIDTH));
+  resizer.setAttribute("aria-valuenow", String(savedWidth ?? defaultWidth));
+
+  const currentWidth = (): number => {
+    const renderedWidth = cell.getBoundingClientRect().width;
+    return widths.get(key) ?? (renderedWidth > 0 ? renderedWidth : defaultWidth);
+  };
+  const setWidth = (width: number): void => {
+    onResize(key, clampColumnWidth(width));
+  };
+
+  let drag: { pointerId: number; startX: number; startWidth: number } | null = null;
+  resizer.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    resizer.focus({ preventScroll: true });
+    event.preventDefault();
+    drag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: currentWidth(),
+    };
+    resizer.setPointerCapture(event.pointerId);
+  });
+  resizer.addEventListener("pointermove", (event) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    setWidth(drag.startWidth + event.clientX - drag.startX);
+  });
+  const stopDragging = (event: PointerEvent): void => {
+    if (event.pointerId === drag?.pointerId) drag = null;
+  };
+  resizer.addEventListener("pointerup", stopDragging);
+  resizer.addEventListener("pointercancel", stopDragging);
+  resizer.addEventListener("lostpointercapture", stopDragging);
+  resizer.addEventListener("keydown", (event) => {
+    const direction = event.key === "ArrowLeft"
+      ? -1
+      : event.key === "ArrowRight"
+      ? 1
+      : 0;
+    if (!direction) return;
+    event.preventDefault();
+    setWidth(
+      currentWidth() + direction * COLUMN_WIDTH_STEP * (event.shiftKey ? 4 : 1),
+    );
+  });
+  resizer.addEventListener("focus", () => {
+    resizer.setAttribute("aria-valuenow", String(clampColumnWidth(currentWidth())));
+  });
+  cell.append(resizer);
+  return { key, defaultWidth, cell, resizer };
+}
+
+function tableLayout(
+  result: QueryResult,
+  selectedColumns?: readonly string[],
+): TableLayout {
   const columns = [...new Set([
     ...Object.keys(result.columns),
     ...result.rows.flatMap((row) => Object.keys(row)),
   ])];
   const hasEntityColumn = result.rows.some((row, index) =>
-    rowEntityRef(row, result.evidence[index]) !== null
+    queryRowPrimaryEntityRef(row, result.evidence[index]) !== null
   );
   return {
     columns,
     hasEntityColumn,
-    displayColumns: hasEntityColumn
+    displayColumns: selectedColumns ? [...selectedColumns] : (hasEntityColumn
       ? columns.filter((column) =>
         column !== "ref" && column !== "name" && column !== "nameCn"
       )
-      : columns,
+      : columns),
   };
 }
 
@@ -379,7 +473,7 @@ function appendTableRows(
     const tr = body.insertRow();
     if (layout.hasEntityColumn) {
       const cell = tr.insertCell();
-      const ref = rowEntityRef(row, result.evidence[rowIndex]);
+      const ref = queryRowPrimaryEntityRef(row, result.evidence[rowIndex]);
       const names = entityNames(row.name, row.nameCn);
       const value = ref ?? null;
       cell.append(valueNode(
@@ -407,7 +501,10 @@ function appendTableRows(
       const matchRow = body.insertRow();
       matchRow.className = "query-match-row";
       const cell = matchRow.insertCell();
-      cell.colSpan = Math.max(1, layout.displayColumns.length);
+      cell.colSpan = Math.max(
+        1,
+        layout.displayColumns.length + Number(layout.hasEntityColumn),
+      );
       cell.textContent = snippet;
     }
   }
@@ -416,26 +513,58 @@ function appendTableRows(
 function renderTable(
   result: QueryResult,
   options: AnswerViewOptions,
+  widths: Map<ResultColumnKey, number>,
+  selectedColumns?: readonly string[],
 ): RenderedTable {
   const wrapper = document.createElement("div");
   wrapper.className = "query-table-wrap";
   const table = document.createElement("table");
-  const layout = tableLayout(result);
+  const layout = tableLayout(result, selectedColumns);
   table.className = layout.hasEntityColumn
     ? "query-table query-entity-table"
     : "query-table";
   const head = table.createTHead().insertRow();
-  if (layout.hasEntityColumn) {
-    const cell = document.createElement("th");
-    cell.scope = "col";
-    cell.textContent = "条目";
-    head.append(cell);
-  }
-  for (const column of layout.displayColumns) {
-    const cell = document.createElement("th");
-    cell.scope = "col";
-    cell.textContent = columnLabel(column);
-    head.append(cell);
+  const headers: ResultColumnHeader[] = [];
+  const applyWidth = (header: ResultColumnHeader, width: number): void => {
+    widths.set(header.key, width);
+    header.cell.style.width = `${width}px`;
+    header.resizer.setAttribute("aria-valuenow", String(width));
+  };
+  const fitTableToColumns = (): void => {
+    table.style.minWidth = "0";
+    table.style.width = `${headers.reduce((total, header) =>
+      total + (widths.get(header.key) ?? header.defaultWidth), 0)}px`;
+  };
+  const resizeColumn = (key: ResultColumnKey, width: number): void => {
+    if (!table.style.width) {
+      const renderedWidths = headers.map((header) => {
+        const rendered = header.cell.getBoundingClientRect().width;
+        return clampColumnWidth(rendered > 0 ? rendered : header.defaultWidth);
+      });
+      headers.forEach((header, index) => {
+        applyWidth(
+          header,
+          renderedWidths[index] ?? header.defaultWidth,
+        );
+      });
+    }
+    const header = headers.find((candidate) => candidate.key === key);
+    if (!header) return;
+    applyWidth(header, width);
+    fitTableToColumns();
+  };
+  const appendHeader = (key: ResultColumnKey, label: string): void => {
+    const header = resultColumnHeader(key, label, widths, resizeColumn);
+    headers.push(header);
+    head.append(header.cell);
+  };
+  if (layout.hasEntityColumn) appendHeader(ENTITY_RESULT_COLUMN, "条目");
+  for (const column of layout.displayColumns)
+    appendHeader(column, columnLabel(column));
+  if (widths.size) {
+    for (const header of headers)
+      applyWidth(header, widths.get(header.key) ?? header.defaultWidth);
+    fitTableToColumns();
   }
   const body = table.createTBody();
   appendTableRows(body, result, options, layout, 0);
@@ -504,7 +633,77 @@ function renderPaths(
 }
 
 export interface AnswerView {
-  update(result: QueryResult): void;
+  update(result: QueryResult, selectedColumns?: readonly string[]): void;
+}
+
+interface ColumnSelector {
+  element: HTMLDetailsElement;
+  sync(columns: readonly string[]): void;
+}
+
+function sameOwnerScope(left: readonly Owner[], right: readonly Owner[]): boolean {
+  return left.length === right.length &&
+    left.every((owner, index) => owner === right[index]);
+}
+
+function renderColumnSelector(
+  scope: readonly Owner[],
+  onChange: (columns: readonly string[]) => void,
+): ColumnSelector {
+  const details = document.createElement("details");
+  details.className = "query-result-columns";
+  const summary = document.createElement("summary");
+  summary.textContent = "显示列";
+  const panel = document.createElement("div");
+  panel.className = "query-result-columns-panel";
+  const grid = document.createElement("div");
+  grid.className = "query-result-columns-grid";
+  const choices = resultColumnChoices(scope);
+  const controls = choices.map(({ field, owners }) => {
+    const label = document.createElement("label");
+    label.className = "query-result-column";
+    const control = document.createElement("input");
+    control.type = "checkbox";
+    const baseLabel = FIELD_LABEL[field] ?? field;
+    control.setAttribute("aria-label", baseLabel);
+    const text = document.createElement("span");
+    text.textContent = sameOwnerScope(owners, scope)
+      ? baseLabel
+      : `${baseLabel}（仅${owners.map((owner) => OWNER_LABEL[owner]).join("、")}）`;
+    label.append(control, text);
+    grid.append(label);
+    return { field, control };
+  });
+  const actions = document.createElement("div");
+  actions.className = "query-result-columns-actions";
+  const reset = document.createElement("button");
+  reset.type = "button";
+  reset.textContent = "恢复默认";
+  reset.addEventListener("click", () => {
+    const defaults = new Set(defaultResultColumnSelection(scope));
+    for (const { field, control } of controls)
+      control.checked = defaults.has(field);
+  });
+  const apply = document.createElement("button");
+  apply.type = "button";
+  apply.textContent = "应用";
+  apply.addEventListener("click", () => {
+    onChange(controls.flatMap(({ field, control }) =>
+      control.checked ? [field] : []
+    ));
+    details.open = false;
+  });
+  actions.append(reset, apply);
+  panel.append(grid, actions);
+  details.append(summary, panel);
+  return {
+    element: details,
+    sync: (columns) => {
+      const selected = new Set(columns);
+      for (const { field, control } of controls)
+        control.checked = selected.has(field);
+    },
+  };
 }
 
 type RenderedAnswerContent =
@@ -544,7 +743,7 @@ function tableCanAppend(
     if (!row || Object.keys(row).some((column) => !columns.has(column))) return false;
     if (
       !rendered.layout.hasEntityColumn &&
-      rowEntityRef(row, result.evidence[index]) !== null
+      queryRowPrimaryEntityRef(row, result.evidence[index]) !== null
     ) return false;
   }
   return true;
@@ -574,6 +773,16 @@ export function renderAnswer(
   let moreVisible = false;
   let previous: QueryResult | null = null;
   let content: RenderedAnswerContent | null = null;
+  const columnWidths = new Map<ResultColumnKey, number>();
+  const scope = answer.entityScope;
+  let visibleColumns = scope
+    ? normalizeResultColumnSelection(scope, Object.keys(result.columns))
+    : undefined;
+  let previousColumns = visibleColumns?.join("\u0000") ?? "";
+  const selector = scope && options.onColumnsChange
+    ? renderColumnSelector(scope, options.onColumnsChange)
+    : null;
+  selector?.sync(visibleColumns ?? []);
 
   const updateCount = (next: QueryResult): void => {
     count.textContent = next.totalMatches === next.visibleMatches
@@ -598,21 +807,32 @@ export function renderAnswer(
       const element = renderPaths(next, options);
       content = { kind: "path", element };
     } else {
-      const table = renderTable(next, options);
+      const table = renderTable(next, options, columnWidths, visibleColumns);
       content = { kind: "table", table };
     }
     const element = content.kind === "table"
       ? content.table.element
       : content.element;
-    container.replaceChildren(heading, count, element, moreHost);
+    container.replaceChildren(
+      heading,
+      count,
+      ...(selector ? [selector.element] : []),
+      element,
+      moreHost,
+    );
   };
   const view: AnswerView = {
-    update: (next) => {
+    update: (next, selectedColumns) => {
+      if (scope && selectedColumns)
+        visibleColumns = normalizeResultColumnSelection(scope, selectedColumns);
+      const columnKey = visibleColumns?.join("\u0000") ?? "";
+      const columnsChanged = columnKey !== previousColumns;
+      selector?.sync(visibleColumns ?? []);
       updateCount(next);
       const prior = previous;
       const rendered = content;
       const append = prior !== null && rendered !== null &&
-        sameResultPrefix(prior, next);
+        !columnsChanged && sameResultPrefix(prior, next);
       let reused = false;
       if (
         append &&
@@ -635,6 +855,7 @@ export function renderAnswer(
       if (!reused) rebuild(next);
       updateMore(next);
       previous = next;
+      previousColumns = columnKey;
     },
   };
   view.update(result);

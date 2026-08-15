@@ -49,52 +49,12 @@ test("lowers and lifts a multi-entity name query without hidden limits", () => {
   assert.ok(section);
   assert.equal(section.query.limit, null);
   assert.equal(section.query.operators[section.query.root]?.kind, "union");
+  assert.deepEqual(Object.keys(queryResultColumns(section.query)), [
+    "ref", "name", "nameCn", "entityType",
+  ]);
+  assert.deepEqual(section.answer.entityScope, ["subject", "person", "character"]);
   assert.deepEqual(queryDraftFromBundle(bundle), draft);
   assert.deepEqual(queryDraftFromBundle(normalizeBundle(bundle)), draft);
-});
-
-test("projects owner-specific columns across one multi-entity result", () => {
-  const draft: QueryDraft = {
-    kind: "list",
-    query: {
-      scope: ["subject", "person", "character"],
-      columns: ["score", "comments"],
-    },
-  };
-
-  const bundle = compileQueryDraft(draft);
-  const section = bundle.sections.results;
-  assert.ok(section);
-  assert.deepEqual(Object.keys(queryResultColumns(section.query)), [
-    "ref", "name", "nameCn", "score", "comments",
-  ]);
-  assert.deepEqual(queryDraftFromBundle(bundle), draft);
-});
-
-test("keeps entity type selectable and preserves an explicit identity-only result", () => {
-  const withType: QueryDraft = {
-    kind: "list",
-    query: {
-      scope: ["subject", "person", "character"],
-      columns: ["entityType", "score"],
-    },
-  };
-  const identityOnly = applyQueryAction(defaultQueryDraft("subject"), {
-    type: "setColumns",
-    columns: [],
-  });
-
-  assert.deepEqual(Object.keys(queryResultColumns(
-    compileQueryDraft(withType).sections.results!.query,
-  )), ["ref", "name", "nameCn", "entityType", "score"]);
-  assert.deepEqual(queryDraftFromBundle(compileQueryDraft(withType)), withType);
-  assert.deepEqual(identityOnly, {
-    kind: "list",
-    query: { scope: ["subject"], columns: [] },
-  });
-  assert.deepEqual(Object.keys(queryResultColumns(
-    compileQueryDraft(identityOnly).sections.results!.query,
-  )), ["ref", "name", "nameCn"]);
 });
 
 test("lowers one semantic body condition through each entity's own text field", () => {
