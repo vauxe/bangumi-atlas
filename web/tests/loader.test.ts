@@ -2522,7 +2522,7 @@ test("shares one whole-pack fallback across concurrent members", async () => {
   assert.equal(packRequests, 1);
 });
 
-test("prefetches a range-capable pack once for a local full scan", async () => {
+test("keeps a range-capable pack on one cache path for a full scan", async () => {
   const first: NameRow[] = [["a", "A", 1]];
   const second: NameRow[] = [["b", "B", 2]];
   const firstGzip = gzipSync(JSON.stringify(first));
@@ -2548,11 +2548,11 @@ test("prefetches a range-capable pack once for a local full scan", async () => {
     });
   });
 
-  await prefetchPack("facts.pack");
   assert.deepEqual(
     await member("structure", "facts.pack", 0, firstGzip.byteLength),
     first,
   );
+  await prefetchPack("facts.pack");
   assert.deepEqual(
     await member(
       "structure",
@@ -2563,7 +2563,49 @@ test("prefetches a range-capable pack once for a local full scan", async () => {
     second,
   );
 
+  assert.deepEqual(ranges, [
+    `bytes=0-${firstGzip.byteLength - 1}`,
+    `bytes=0-${pack.byteLength - 1}`,
+  ]);
+});
+
+test("prefetches a verified empty pack without an invalid Range", async () => {
+  const pack = new Uint8Array();
+  const manifest = testManifest({
+    "facts.pack": [pack.byteLength, hash(pack)],
+  });
+  const ranges: Array<string | null> = [];
+  await installFetch(manifest, async (_path, init) => {
+    ranges.push(new Headers(init?.headers).get("Range"));
+    return new Response(body(pack));
+  });
+
+  await prefetchPack("facts.pack");
+
   assert.deepEqual(ranges, [null]);
+});
+
+test("verifies a whole-pack range before caching it", async () => {
+  const pack = new Uint8Array(gzipSync(JSON.stringify([["a", "A", 1]])));
+  const corrupt = pack.slice();
+  corrupt[0] = (corrupt[0] ?? 0) ^ 1;
+  const manifest = testManifest({
+    "facts.pack": [pack.byteLength, hash(pack)],
+  });
+  await installFetch(manifest, async () =>
+    new Response(body(corrupt), {
+      status: 206,
+      headers: {
+        "Content-Range": `bytes 0-${pack.byteLength - 1}/${pack.byteLength}`,
+      },
+    })
+  );
+
+  await assert.rejects(
+    prefetchPack("facts.pack"),
+    (error: unknown) => error instanceof ReleaseChangedError,
+  );
+  assert.equal(releaseWasReplaced(), true);
 });
 
 test("prefetches and reuses one contiguous range for a partial scan", async () => {

@@ -970,7 +970,11 @@ export async function prefetchPack(
     async (workSignal) => {
       const bytes = await loadPublishedBytes(
         path,
-        { priority: "low", signal: workSignal } as RequestInit,
+        {
+          headers: size ? { Range: `bytes=0-${size - 1}` } : undefined,
+          priority: "low",
+          signal: workSignal,
+        } as RequestInit,
         cap,
       );
       const whole = bytes.buffer.slice(
