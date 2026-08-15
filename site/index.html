@@ -130,11 +130,24 @@ button:focus-visible, input:focus-visible, a:focus-visible {
   font-size: 13px; }
 .drawer-actions { position: sticky; top: 0; float: right; z-index: 2;
   display: flex; gap: 4px; }
-.drawer-action { display: grid; place-items: center; border: 0;
+.drawer-action { position: relative; display: grid; place-items: center; border: 0;
   width: 32px; height: 32px; border-radius: 50%; text-decoration: none;
   background: rgba(20, 38, 43, .85); color: var(--ink-2);
   cursor: pointer; }
 .drawer-action:hover { color: var(--ink); background: var(--line); }
+.drawer-action[aria-disabled="true"] { opacity: .55; cursor: progress; }
+.drawer-action::after { content: attr(data-tooltip); position: absolute;
+  top: calc(100% + 7px); right: 0; width: max-content; max-width: 220px;
+  padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: rgba(15, 26, 28, .98); color: var(--ink);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .32); font-size: 12px;
+  font-weight: 400; line-height: 1.4; white-space: nowrap;
+  opacity: 0; visibility: hidden; transform: translateY(-2px);
+  transition: opacity .12s, transform .12s, visibility .12s;
+  pointer-events: none; }
+.drawer-action:hover::after,
+.drawer-action:focus-visible::after { opacity: 1; visibility: visible;
+  transform: none; }
 .drawer-external svg { width: 17px; height: 17px; fill: none;
   stroke: currentColor; stroke-width: 2; stroke-linecap: round;
   stroke-linejoin: round; }
@@ -247,7 +260,7 @@ button:focus-visible, input:focus-visible, a:focus-visible {
 .text-action { display: block; padding: 6px 0 0; border: 0;
   background: none; color: var(--miku); cursor: pointer; font: inherit;
   font-size: 12px; }
-.relations-intro { color: var(--ink-2); font-size: 12px; margin-bottom: 12px; }
+.relation-warning { margin-bottom: 10px; }
 .relation-section { border-top: 1px solid var(--line); }
 .relation-section:last-of-type { border-bottom: 1px solid var(--line); }
 .relation-section > summary { display: flex; align-items: center; gap: 8px;
@@ -356,8 +369,8 @@ pre.infobox { white-space: pre-wrap; word-break: break-all;
 </div>
 <aside id="drawer" aria-label="节点详情" aria-hidden="true" tabindex="-1" inert></aside>
 <button id="drawer-reopen" type="button" aria-controls="drawer"
-        aria-label="重新打开当前节点详情" hidden>‹ 详情</button>
-<aside id="pinned-manager" aria-label="保留节点及其关系" hidden></aside>
+        aria-label="打开详情" hidden>‹ 详情</button>
+<aside id="pinned-manager" aria-label="固定节点" hidden></aside>
 
 <div id="legend">
   <i style="background:var(--c-subject)"></i>作品

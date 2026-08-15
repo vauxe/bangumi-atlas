@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { Drawer, drawerTopActions } from "../src/drawer";
@@ -141,18 +142,45 @@ function makeDrawer(
   );
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 test("renders the Bangumi link as an accessible top action", () => {
   const markup = drawerTopActions((1 << 24) | 42, false);
 
   assert.match(markup, /href="https:\/\/bgm\.tv\/subject\/42"/);
-  assert.match(markup, /title="[^"]*bgm\.tv[^"]*"/);
   assert.match(markup, /aria-label="[^"]*bgm\.tv[^"]*"/);
+  assert.match(markup, /data-tooltip="[^"]*bgm\.tv[^"]*"/);
   assert.match(markup, /target="_blank"/);
   assert.match(markup, /rel="noopener"/);
   assert.match(markup, /<svg/);
   assert.match(markup, /id="drawer-pin"/);
   assert.match(markup, /aria-pressed="false"/);
-  assert.match(markup, /aria-label="保留节点及其关系"/);
+  assert.match(markup, /aria-label="固定节点"/);
+  assert.match(markup, /data-tooltip="固定节点"/);
+  assert.match(markup, /id="drawer-close"/);
+  assert.match(markup, /aria-label="关闭详情"/);
+  assert.match(markup, /data-tooltip="关闭详情"/);
+  assert.doesNotMatch(markup, /\stitle=/);
+});
+
+test("shows top-action explanations on pointer hover and keyboard focus", () => {
+  const pageSource = readFileSync("../site/index.html", "utf8");
+
+  assert.match(pageSource, /\.drawer-action::after\s*\{/);
+  assert.match(
+    pageSource,
+    /\.drawer-action:hover::after,\s*\.drawer-action:focus-visible::after/,
+  );
+  assert.match(pageSource, /content:\s*attr\(data-tooltip\)/);
 });
 
 test("exposes the pinned state through the drawer action", () => {
@@ -160,7 +188,8 @@ test("exposes the pinned state through the drawer action", () => {
 
   assert.match(markup, /id="drawer-pin"/);
   assert.match(markup, /aria-pressed="true"/);
-  assert.match(markup, /aria-label="取消保留节点及其关系"/);
+  assert.match(markup, /aria-label="取消固定"/);
+  assert.match(markup, /data-tooltip="取消固定"/);
 });
 
 test("toggles the current node from the drawer pin action", () => {
@@ -492,6 +521,37 @@ test("makes the complete subject overview the default dossier view", () => {
   assert.match(element.innerHTML, /成人内容/);
   assert.match(element.innerHTML, /这是简介/);
   assert.doesNotMatch(element.innerHTML, /<dt>条目<\/dt>/);
+  assert.equal(element.innerHTML.match(/2026-01-02/g)?.length, 1);
+  assert.doesNotMatch(element.innerHTML, /收藏 165/);
+});
+
+test("keeps repeated overview facts out of the detail header", () => {
+  const drawer = makeDrawer(new FakeDrawerElement());
+  const statsOf = Reflect.get(drawer, "statsOf") as (
+    current: unknown,
+  ) => string[];
+
+  assert.deepEqual(statsOf.call(drawer, {
+    entity: {
+      kind: "subject",
+      score: 8.8,
+      bgmRank: 12,
+      favorite: [1, 2, 3, 4, 5],
+      date: "2026-01-02",
+      platformCode: 1001,
+      type: 2,
+    },
+    mappings: { platform: { "2:1001": "TV" } },
+  }), ["评分 8.8", "Rank #12"]);
+  assert.deepEqual(statsOf.call(drawer, {
+    entity: {
+      kind: "person",
+      collects: 120,
+      comments: 30,
+      career: ["seiyu"],
+    },
+    mappings: { platform: {} },
+  }), []);
 });
 
 test("labels unknown subject codes without exposing bare enum values", () => {
@@ -632,6 +692,509 @@ test("shows resolved relations only on their tab while the rank cache is cold", 
   } finally {
     state.selection = previousSelection;
   }
+});
+
+test("shows node details while the complete relation fan is still resolving", async () => {
+  const previousSelection = state.selection;
+  const element = new FakeDrawerElement();
+  const selfKey = (1 << 24) | 1;
+  const otherKey = (1 << 24) | 2;
+  const relationRanks = deferred<ReadonlyMap<number, number>>();
+  const drawer = makeDrawer(element, {
+    data: {
+      rankOf: () => null,
+      entity: async () => ({
+        kind: "subject",
+        key: selfKey,
+        name: "Example",
+        nameCn: "立即可见的详情",
+        type: 2,
+        platformCode: null,
+        date: "",
+        score: null,
+        bgmRank: null,
+        nsfw: false,
+        favorite: [0, 0, 0, 0, 0],
+        series: false,
+        scoreDetails: [],
+        metaTags: [],
+        tags: [],
+        hasSummary: false,
+        hasInfobox: false,
+      }),
+      factsFor: async () => ({
+        items: [{
+          kind: "RELATES_TO",
+          ref: 1,
+          multiplicity: 1,
+          source: selfKey,
+          target: otherKey,
+          relationType: 1,
+          sortOrder: 0,
+        }],
+        total: 1,
+        next: null,
+      }),
+      mappings: async () => ({
+        fact_labels: { RELATES_TO: { "1": "续集" } },
+        subject_type: {},
+        platform: {},
+        person_type: {},
+        character_role: {},
+        episode_type: {},
+      }),
+    },
+  } as unknown as Partial<DrawerDeps>);
+
+  try {
+    state.selection = 0;
+    await drawer.show(0, selfKey, relationRanks.promise);
+
+    assert.match(element.innerHTML, /立即可见的详情/);
+    assert.match(
+      element.innerHTML,
+      /id="drawer-pin"[^>]*aria-disabled="true"/s,
+    );
+    assert.match(element.innerHTML, /加载完成后可固定/);
+
+    element.clickTarget({ tab: "relations" });
+    assert.match(element.innerHTML, /正在加载关联/);
+
+    relationRanks.resolve(new Map([[otherKey, 7]]));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    assert.match(element.innerHTML, /续集/);
+    assert.match(element.innerHTML, /节点 7/);
+    assert.doesNotMatch(element.innerHTML, /aria-disabled="true"/);
+  } finally {
+    state.selection = previousSelection;
+  }
+});
+
+test("keeps resolved relations usable when relation names fail to load", async () => {
+  const previousSelection = state.selection;
+  const element = new FakeDrawerElement();
+  const selfKey = (1 << 24) | 1;
+  const otherKey = (1 << 24) | 2;
+  const relationRanks = deferred<ReadonlyMap<number, number>>();
+  const failure = new Error("name pack unavailable");
+  const failures: [string, unknown][] = [];
+  const drawer = makeDrawer(element, {
+    names: {
+      get: () => null,
+      row: () => null,
+      load: async () => { throw failure; },
+    },
+    data: {
+      rankOf: () => null,
+      entity: async () => null,
+      factsFor: async () => ({
+        items: [{
+          kind: "RELATES_TO",
+          ref: 1,
+          multiplicity: 1,
+          source: selfKey,
+          target: otherKey,
+          relationType: 1,
+          sortOrder: 0,
+        }],
+        total: 1,
+        next: null,
+      }),
+      mappings: async () => ({
+        fact_labels: { RELATES_TO: { "1": "续集" } },
+        subject_type: {},
+        platform: {},
+        person_type: {},
+        character_role: {},
+        episode_type: {},
+      }),
+    },
+    reportError: (context: string, error: unknown) =>
+      failures.push([context, error]),
+  } as unknown as Partial<DrawerDeps>);
+
+  try {
+    state.selection = 0;
+    await drawer.show(0, selfKey, relationRanks.promise);
+    element.clickTarget({ tab: "relations" });
+
+    relationRanks.resolve(new Map([[otherKey, 7]]));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    const current = Reflect.get(drawer, "cur") as {
+      relationRankState: string;
+    };
+    assert.equal(current.relationRankState, "ready");
+    assert.match(element.innerHTML, /续集/);
+    assert.match(element.innerHTML, /#7/);
+    assert.doesNotMatch(element.innerHTML, /关联暂时加载失败/);
+    assert.doesNotMatch(element.innerHTML, /aria-disabled="true"/);
+    assert.deepEqual(failures, [["关系名称加载", failure]]);
+  } finally {
+    state.selection = previousSelection;
+  }
+});
+
+test("does not explain unresolved references when the node has no relation records", () => {
+  const drawer = makeDrawer(new FakeDrawerElement());
+  const renderRelations = Reflect.get(drawer, "renderRelations") as (
+    current: unknown,
+  ) => string;
+  const markup = renderRelations.call(drawer, {
+    rank: 0,
+    key: (1 << 24) | 1,
+    mappings: { fact_labels: {} },
+    facts: [],
+    relationRanks: new Map(),
+    factsTotal: 0,
+    factsNext: null,
+    relationsLoading: false,
+    expanded: false,
+  });
+
+  assert.match(markup, /<strong>暂无关联<\/strong>/);
+  assert.doesNotMatch(markup, /<span>/);
+  assert.doesNotMatch(markup, /未解析引用|错误跳转/);
+});
+
+test("distinguishes unavailable relation targets from an actually empty node", () => {
+  const drawer = makeDrawer(new FakeDrawerElement());
+  const selfKey = (1 << 24) | 1;
+  const missingKey = (1 << 24) | 2;
+  const renderRelations = Reflect.get(drawer, "renderRelations") as (
+    current: unknown,
+  ) => string;
+  const markup = renderRelations.call(drawer, {
+    rank: 0,
+    key: selfKey,
+    mappings: { fact_labels: { RELATES_TO: { "1": "续集" } } },
+    facts: [{
+      kind: "RELATES_TO",
+      ref: 1,
+      multiplicity: 1,
+      source: selfKey,
+      target: missingKey,
+      relationType: 1,
+      sortOrder: 0,
+    }],
+    relationRanks: new Map(),
+    factsTotal: 1,
+    factsNext: null,
+    relationsLoading: false,
+    expanded: false,
+  });
+
+  assert.match(markup, /暂无可打开的关联/);
+  assert.match(markup, /1 条关联未收录/);
+  assert.doesNotMatch(markup, /无法打开/);
+  assert.doesNotMatch(markup, /错误跳转/);
+});
+
+test("does not repeat an empty relation state while another page is available", () => {
+  const drawer = makeDrawer(new FakeDrawerElement());
+  const selfKey = (1 << 24) | 1;
+  const missingKey = (1 << 24) | 2;
+  const renderRelations = Reflect.get(drawer, "renderRelations") as (
+    current: unknown,
+  ) => string;
+  const markup = renderRelations.call(drawer, {
+    rank: 0,
+    key: selfKey,
+    mappings: { fact_labels: { RELATES_TO: { "1": "续集" } } },
+    facts: [{
+      kind: "RELATES_TO",
+      ref: 1,
+      multiplicity: 1,
+      source: selfKey,
+      target: missingKey,
+      relationType: 1,
+      sortOrder: 0,
+    }],
+    relationRanks: new Map(),
+    relationRankState: "ready",
+    factsTotal: 2,
+    factsNext: "next-page",
+    relationsLoading: false,
+    expanded: false,
+  });
+
+  assert.equal(markup.match(/暂无可打开的关联/g)?.length, 1);
+  assert.match(markup, /继续加载 · 1 \/ 2/);
+});
+
+test("uses direct loading and source-fallback copy", () => {
+  const drawer = makeDrawer(new FakeDrawerElement());
+  const renderRelations = Reflect.get(drawer, "renderRelations") as (
+    current: unknown,
+  ) => string;
+  const renderEpisodes = Reflect.get(drawer, "renderEpisodes") as (
+    current: unknown,
+  ) => string;
+  const renderReference = Reflect.get(drawer, "renderReference") as (
+    current: unknown,
+  ) => string;
+
+  assert.match(renderRelations.call(drawer, {
+    factsTotal: 1,
+    relationRankState: "ready",
+    relationsLoading: true,
+  }), /正在加载关联/);
+  assert.doesNotMatch(renderRelations.call(drawer, {
+    factsTotal: 1,
+    relationRankState: "ready",
+    relationsLoading: true,
+  }), /准备关系名称/);
+  assert.match(renderEpisodes.call(drawer, {
+    loading: false,
+    eps: null,
+  }), /正在加载分集/);
+  assert.doesNotMatch(renderEpisodes.call(drawer, {
+    loading: false,
+    eps: null,
+  }), /准备分集数据/);
+  const reference = renderReference.call(drawer, {
+    infobox: { s: "ready", text: "free-form source", shown: 10_000 },
+  });
+  assert.match(reference, /第 1 行无法整理/);
+  assert.doesNotMatch(reference, /仍完整保留/);
+});
+
+test("labels a paged relation action as continuation from the first page", () => {
+  const drawer = makeDrawer(new FakeDrawerElement());
+  const selfKey = (1 << 24) | 1;
+  const otherKey = (1 << 24) | 2;
+  const renderRelations = Reflect.get(drawer, "renderRelations") as (
+    current: unknown,
+  ) => string;
+  const markup = renderRelations.call(drawer, {
+    rank: 0,
+    key: selfKey,
+    mappings: { fact_labels: { RELATES_TO: { "1": "续集" } } },
+    facts: [{
+      kind: "RELATES_TO",
+      ref: 1,
+      multiplicity: 1,
+      source: selfKey,
+      target: otherKey,
+      relationType: 1,
+      sortOrder: 0,
+    }],
+    relationRanks: new Map([[otherKey, 7]]),
+    relationRankState: "ready",
+    factsTotal: 2,
+    factsNext: "next-page",
+    relationsLoading: false,
+    expanded: false,
+  });
+
+  assert.match(markup, /继续加载 · 1 \/ 2/);
+  assert.doesNotMatch(markup, /显示全部 · 2 条/);
+});
+
+test("keeps a loaded relation page usable when its names fail to load", async () => {
+  const element = new FakeDrawerElement();
+  const selfKey = (1 << 24) | 1;
+  const firstKey = (1 << 24) | 2;
+  const secondKey = (1 << 24) | 3;
+  const failure = new Error("name pack unavailable");
+  const failures: [string, unknown][] = [];
+  const drawer = makeDrawer(element, {
+    names: {
+      get: () => null,
+      row: () => null,
+      load: async () => { throw failure; },
+    },
+    data: {
+      factsFor: async (_key: number, page: string | null = null) => {
+        assert.equal(page, "next-page");
+        return {
+          items: [{
+            kind: "RELATES_TO" as const,
+            ref: 2,
+            multiplicity: 1,
+            source: selfKey,
+            target: secondKey,
+            relationType: 1,
+            sortOrder: 1,
+          }],
+          total: 2,
+          next: null,
+        };
+      },
+    },
+    reportError: (context: string, error: unknown) =>
+      failures.push([context, error]),
+  } as unknown as Partial<DrawerDeps>);
+  const current = {
+    rank: 0,
+    key: selfKey,
+    mappings: { fact_labels: { RELATES_TO: { "1": "续集" } } },
+    facts: [{
+      kind: "RELATES_TO" as const,
+      ref: 1,
+      multiplicity: 1,
+      source: selfKey,
+      target: firstKey,
+      relationType: 1,
+      sortOrder: 0,
+    }],
+    relationRanks: new Map([[firstKey, 7], [secondKey, 8]]),
+    relationRankState: "ready",
+    factsTotal: 2,
+    factsNext: "next-page",
+    relationsLoading: false,
+    relationsLoaded: true,
+    expanded: false,
+    loading: false,
+  };
+  Reflect.set(drawer, "cur", current);
+  Reflect.set(drawer, "rerender", () => undefined);
+  const expandRelations = Reflect.get(drawer, "expandRelations") as (
+    anchor: null,
+  ) => Promise<void>;
+
+  await expandRelations.call(drawer, null);
+
+  assert.equal(current.facts.length, 2);
+  assert.equal(current.factsNext, null);
+  assert.deepEqual(failures, [["关系名称加载", failure]]);
+  const renderRelations = Reflect.get(drawer, "renderRelations") as (
+    value: unknown,
+  ) => string;
+  const markup = renderRelations.call(drawer, current);
+  assert.match(markup, /#7/);
+  assert.match(markup, /#8/);
+  assert.doesNotMatch(markup, /关联节点|条记录|单击节点|已合并重复项/);
+});
+
+test("deduplicates navigation entries without explaining internal bookkeeping", () => {
+  const drawer = makeDrawer(new FakeDrawerElement());
+  const selfKey = (1 << 24) | 1;
+  const otherKey = (2 << 24) | 2;
+  const fact = {
+    kind: "WORKED_ON",
+    multiplicity: 1,
+    subject: selfKey,
+    person: otherKey,
+    position: 23,
+  };
+  const current = {
+    rank: 0,
+    key: selfKey,
+    mappings: {
+      fact_labels: { WORKED_ON: { "23": "助理制片人", "53": "助理制片人" } },
+    },
+    facts: [
+      { ...fact, ref: 1 },
+      { ...fact, ref: 2, position: 53 },
+    ],
+    relationRanks: new Map([[otherKey, 7]]),
+    factsTotal: 2,
+    factsNext: null,
+    relationsLoading: false,
+    expanded: false,
+  };
+  const renderRelations = Reflect.get(drawer, "renderRelations") as (
+    current: unknown,
+  ) => string;
+  const renderTabs = Reflect.get(drawer, "renderTabs") as (
+    current: unknown,
+  ) => string;
+  const markup = renderRelations.call(drawer, current);
+
+  assert.equal(markup.match(/data-rank="7"/g)?.length, 1);
+  assert.doesNotMatch(markup, /关联节点|条记录|单击节点|已合并重复项/);
+  assert.doesNotMatch(markup, /id="expand-rel"/);
+  assert.match(renderTabs.call(drawer, current), /关联 2/);
+});
+
+test("counts one node once when it appears in different relationship groups", () => {
+  const drawer = makeDrawer(new FakeDrawerElement());
+  const selfKey = (1 << 24) | 1;
+  const otherKey = (2 << 24) | 2;
+  const current = {
+    rank: 0,
+    key: selfKey,
+    mappings: {
+      fact_labels: { WORKED_ON: { "23": "导演", "24": "原作" } },
+    },
+    facts: [
+      {
+        kind: "WORKED_ON",
+        ref: 1,
+        multiplicity: 1,
+        subject: selfKey,
+        person: otherKey,
+        position: 23,
+      },
+      {
+        kind: "WORKED_ON",
+        ref: 2,
+        multiplicity: 1,
+        subject: selfKey,
+        person: otherKey,
+        position: 24,
+      },
+    ],
+    relationRanks: new Map([[otherKey, 7]]),
+    factsTotal: 2,
+    factsNext: null,
+    relationsLoading: false,
+    expanded: false,
+  };
+  const renderRelations = Reflect.get(drawer, "renderRelations") as (
+    current: unknown,
+  ) => string;
+  const markup = renderRelations.call(drawer, current);
+
+  assert.equal(markup.match(/data-rank="7"/g)?.length, 2);
+  assert.doesNotMatch(markup, /关联节点|条记录|单击节点|已合并重复项/);
+});
+
+test("decodes character references in summaries and episode text without enabling markup", () => {
+  const drawer = makeDrawer(new FakeDrawerElement());
+  const renderSummary = Reflect.get(drawer, "renderSummary") as (
+    current: unknown,
+  ) => string;
+  const summary = renderSummary.call(drawer, {
+    entity: { hasSummary: true },
+    summary: {
+      s: "ready",
+      text: "キャラ&amp;ストーリー &lt;script&gt;x&lt;/script&gt; &Bass;",
+      shown: 10_000,
+    },
+    summaryOpen: false,
+  });
+
+  assert.match(summary, /キャラ&amp;ストーリー/);
+  assert.doesNotMatch(summary, /&amp;amp;/);
+  assert.match(summary, /&lt;script&gt;x&lt;\/script&gt;/);
+  assert.doesNotMatch(summary, /<script>/);
+  assert.match(summary, /&amp;Bass;/);
+
+  const episodeRow = Reflect.get(drawer, "episodeRow") as (
+    current: unknown,
+    episode: unknown,
+  ) => string;
+  const episode = episodeRow.call(drawer, {
+    descs: new Map([[9, {
+      s: "ready",
+      text: "介绍&amp;补充",
+      shown: 10_000,
+    }]]),
+  }, {
+    id: 9,
+    name: "Title&amp;Story",
+    nameCn: "标题&amp;故事",
+    airdate: "",
+    sort: 1,
+    hasDescription: true,
+  });
+
+  assert.match(episode, /标题&amp;故事/);
+  assert.match(episode, /介绍&amp;补充/);
+  assert.doesNotMatch(episode, /&amp;amp;/);
 });
 
 test("loads summary eagerly but defers episodes and reference by tab", async () => {

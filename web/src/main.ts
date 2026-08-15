@@ -132,8 +132,8 @@ async function boot(): Promise<void> {
   };
   const nodeContext = (rank: number): string => [
     TYPE_NAMES[etype(geo.key[rank] ?? 0)] ?? "节点",
-    state.selection === rank ? "查看中" : "",
-    state.pinnedSelections.has(rank) ? "已保留" : "",
+    state.selection === rank ? "已选中" : "",
+    state.pinnedSelections.has(rank) ? "已固定" : "",
   ].filter(Boolean).join(" · ");
 
   // ---- URL 历史:离散导航入栈,相机/查询表单原地替换 ----
@@ -335,13 +335,13 @@ async function boot(): Promise<void> {
       return;
     }
     state.selectionKey = key;
-    // 模块请求与完整事实/映射读取并行；真正展示仍在关系状态就绪后进行。
+    // 节点概览与完整关系扇并行：详情不依赖全量关系，图工作集仍只在
+    // 所有事实分页与 rank 解析完成后原子提交。
     const dataPromise = prepareData();
-    void drawer.prepare().catch(() => undefined);
     if (cam === "fly") scene.flyTo(rank);
     else if (cam === "center")
       scene.centerSelection(rank);
-    const relationData = await (async () => {
+    const relationData = (async () => {
       try {
         const data = await dataPromise;
         const [facts, mappings] = await Promise.all([
@@ -370,8 +370,17 @@ async function boot(): Promise<void> {
         if (relationLoad === relationController) relationLoad = null;
       }
     })();
-    if (relationData === null) return;
-    const [facts, mappings, neighborRanks] = relationData;
+    const relationRanksPromise = relationData.then((resolved) =>
+      resolved?.[2] ?? new Map<number, number>()
+    );
+    runTask(
+      drawer.show(rank, key, relationRanksPromise, episodeId ?? undefined)
+        .then(warmTextIndex),
+      "详情加载",
+    );
+    const resolvedRelationData = await relationData;
+    if (resolvedRelationData === null) return;
+    const [facts, mappings, neighborRanks] = resolvedRelationData;
     if (epoch !== navigationEpoch || state.selection !== rank) return;
     const nb = relationNeighbors(
       facts,
@@ -381,11 +390,6 @@ async function boot(): Promise<void> {
     );
     state.neighbors = nb.ranks;
     state.neighborLabels = nb.labels;
-    runTask(
-      drawer.show(rank, key, neighborRanks, episodeId ?? undefined)
-        .then(warmTextIndex),
-      "详情加载",
-    );
     notify();
     if (push) pushUrl();
   }

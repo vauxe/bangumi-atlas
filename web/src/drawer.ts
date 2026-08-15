@@ -15,8 +15,11 @@ import type {
   ParsedInfoboxField,
   RelationshipSection,
 } from "./entity-presentation";
-import { esc, html, raw } from "./html";
-import type { ResolvedRelationRanks } from "./lazy-drawer";
+import { decodeDisplayText, esc, html, raw } from "./html";
+import type {
+  RelationRankSource,
+  ResolvedRelationRanks,
+} from "./lazy-drawer";
 import { factLabel, factPrimaryOther } from "./neighbors";
 import { state, togglePinnedSelection } from "./store";
 import { bgmUrl, TYPE_NAMES, eid, etype } from "./types";
@@ -60,6 +63,7 @@ interface Current {
   mappings: Mappings;
   facts: Fact[];
   relationRanks: ResolvedRelationRanks;
+  relationRankState: "loading" | "ready" | "error";
   factsTotal: number;
   factsNext: string | null;
   tab: DrawerTab;
@@ -83,7 +87,21 @@ interface FactGroup {
   members: number[];
 }
 
-export function drawerTopActions(key?: number, pinned = false): string {
+interface RelationView {
+  groups: FactGroup[];
+  /** 实际渲染的“分组 + 目标”条目数。 */
+  entryCount: number;
+  unresolvedCount: number;
+}
+
+export function drawerTopActions(
+  key?: number,
+  pinned = false,
+  pinUnavailableReason: string | null = null,
+): string {
+  const pinLabel = pinUnavailableReason ?? (pinned
+    ? "取消固定"
+    : "固定节点");
   const external =
     key === undefined
       ? ""
@@ -92,8 +110,8 @@ export function drawerTopActions(key?: number, pinned = false): string {
           href="${bgmUrl(key)}"
           target="_blank"
           rel="noopener"
-          title="在 bgm.tv 查看"
           aria-label="在 bgm.tv 查看"
+          data-tooltip="在 bgm.tv 查看"
         >
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M14 5h5v5"></path>
@@ -107,13 +125,10 @@ export function drawerTopActions(key?: number, pinned = false): string {
         id="drawer-pin"
         class="drawer-action drawer-pin"
         type="button"
-        aria-label="${
-          pinned ? "取消保留节点及其关系" : "保留节点及其关系"
-        }"
+        aria-label="${pinLabel}"
         aria-pressed="${pinned}"
-        title="${
-          pinned ? "取消保留节点及其关系" : "保留节点及其关系"
-        }"
+        ${raw(pinUnavailableReason ? 'aria-disabled="true"' : "")}
+        data-tooltip="${pinLabel}"
       >
         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
           <path d="M9 3h6l-1 5 3 3v2H7v-2l3-3-1-5Z"></path>
@@ -127,7 +142,8 @@ export function drawerTopActions(key?: number, pinned = false): string {
       id="drawer-close"
       class="drawer-action"
       type="button"
-      aria-label="关闭"
+      aria-label="关闭详情"
+      data-tooltip="关闭详情"
     >
       ×
     </button>
@@ -152,15 +168,18 @@ export function segmented(
 }
 
 function infoboxFieldMarkup(field: ParsedInfoboxField): string {
-  if (field.kind === "text") return html`${field.value || "—"}`;
+  if (field.kind === "text")
+    return html`${decodeDisplayText(field.value) || "—"}`;
   if (field.items.length === 0) return html`—`;
 
   const items = field.items.map((item) => html`<li>
     ${raw(
       item.label
-        ? html`<span class="reference-item-label">${item.label}</span>`
+        ? html`<span class="reference-item-label">${
+            decodeDisplayText(item.label)
+          }</span>`
         : "",
-    )}<span>${item.value || "—"}</span>
+    )}<span>${decodeDisplayText(item.value) || "—"}</span>
   </li>`).join("");
   return html`<ul class="reference-values">${raw(items)}</ul>`;
 }
@@ -210,7 +229,8 @@ export class Drawer {
       if (
         t.closest("#drawer-pin") &&
         this.cur &&
-        state.selection === this.cur.rank
+        state.selection === this.cur.rank &&
+        this.canTogglePin(this.cur)
       ) {
         togglePinnedSelection(this.cur.rank);
         this.syncState();
@@ -293,7 +313,7 @@ export class Drawer {
   }
 
   nameOf(rank: number): string {
-    return this.deps.names.get(rank) ?? `#${rank}`;
+    return decodeDisplayText(this.deps.names.get(rank) ?? `#${rank}`);
   }
 
   /** key 由调用方解析传入:深链/行走落点未流式覆盖时
@@ -301,7 +321,7 @@ export class Drawer {
   async show(
     rank: number,
     key: number,
-    relationRanks: ResolvedRelationRanks,
+    relationRanks: RelationRankSource,
     episodeId?: number,
   ): Promise<void> {
     const viewEpoch = ++this.viewEpoch;
@@ -315,13 +335,19 @@ export class Drawer {
       data.mappings(),
     ]);
     if (state.selection !== rank || this.viewEpoch !== viewEpoch) return;
+    const relationRanksLoading = typeof (
+      relationRanks as PromiseLike<ResolvedRelationRanks>
+    ).then === "function";
     const cur: Current = {
       rank,
       key,
       entity,
       mappings,
       facts: factsPage.items,
-      relationRanks,
+      relationRanks: relationRanksLoading
+        ? new Map<number, number>()
+        : relationRanks as ResolvedRelationRanks,
+      relationRankState: relationRanksLoading ? "loading" : "ready",
       factsTotal: factsPage.total,
       factsNext: factsPage.next,
       tab: "overview",
@@ -340,9 +366,40 @@ export class Drawer {
     };
     this.cur = cur;
     this.rerender();
+    if (relationRanksLoading)
+      this.run(
+        this.resolveRelationRanks(
+          cur,
+          relationRanks as PromiseLike<ResolvedRelationRanks>,
+        ),
+        "完整关联解析",
+      );
     if (episodeId !== undefined) await this.focusEpisode(cur, episodeId);
     if (cur.entity?.hasSummary)
       this.run(this.loadSummary(), "简介加载");
+  }
+
+  private async resolveRelationRanks(
+    cur: Current,
+    source: PromiseLike<ResolvedRelationRanks>,
+  ): Promise<void> {
+    let resolved: ResolvedRelationRanks;
+    try {
+      resolved = await source;
+    } catch (error) {
+      if (this.cur === cur) {
+        cur.relationRankState = "error";
+        this.rerender();
+      }
+      throw error;
+    }
+    if (this.cur !== cur) return;
+    cur.relationRanks = resolved;
+    cur.relationRankState = "ready";
+    cur.relationsLoaded = false;
+    this.rerender();
+    if (cur.tab === "relations")
+      this.run(this.prepareRelations(cur), "关系名称加载");
   }
 
   private async focusEpisode(cur: Current, episodeId: number): Promise<void> {
@@ -386,7 +443,11 @@ export class Drawer {
   }
 
   private async prepareRelations(cur: Current): Promise<void> {
-    if (cur.relationsLoading || cur.relationsLoaded) return;
+    if (
+      cur.relationRankState !== "ready" ||
+      cur.relationsLoading ||
+      cur.relationsLoaded
+    ) return;
     cur.relationsLoading = true;
     this.rerender();
     try {
@@ -395,32 +456,36 @@ export class Drawer {
       cur.relationsLoaded = true;
     } finally {
       cur.relationsLoading = false;
+      if (this.cur === cur) this.rerender();
     }
-    this.rerender();
   }
 
   private async loadChipNames(cur: Current): Promise<void> {
     const ranks = [cur.rank];
-    for (const group of this.groupFacts(cur))
+    for (const group of this.relationView(cur).groups)
       for (const rank of group.members.slice(0, GROUP_CHIPS))
         ranks.push(rank);
     await this.deps.names.load(ranks);
   }
 
   /** 事实先按稳定语义分区,再按显示标签分组;组内成员是主要对端
-   * rank(热度序,去重)。未知枚举仍由 factLabel 以数值显示。 */
-  private groupFacts(cur: Current): FactGroup[] {
+   * rank(热度序,去重)。 */
+  private relationView(cur: Current): RelationView {
     const groups = new Map<string, FactGroup>();
     const seen = new Map<string, Set<number>>();
+    let unresolvedCount = 0;
     for (const fact of cur.facts) {
       const section = relationshipSection(fact);
-      const label = factLabel(fact, cur.key, cur.mappings);
+      const label = decodeDisplayText(factLabel(fact, cur.key, cur.mappings));
       const groupKey = `${section.id}\0${label}`;
       const other = factPrimaryOther(fact, cur.key);
       const rank = other === cur.key
         ? cur.rank
         : cur.relationRanks.get(other) ?? null;
-      if (rank === null) continue; // 未解析引用不产生可行走 chip
+      if (rank === null) {
+        unresolvedCount++;
+        continue;
+      }
       const inGroup = seen.get(groupKey) ?? new Set<number>();
       if (inGroup.has(rank)) continue;
       inGroup.add(rank);
@@ -431,7 +496,15 @@ export class Drawer {
     }
     for (const group of groups.values())
       group.members.sort((a, b) => a - b);
-    return [...groups.values()];
+    const grouped = [...groups.values()];
+    return {
+      groups: grouped,
+      entryCount: grouped.reduce(
+        (total, group) => total + group.members.length,
+        0,
+      ),
+      unresolvedCount,
+    };
   }
 
   private async loadSummary(): Promise<void> {
@@ -508,7 +581,7 @@ export class Drawer {
     this.rerender();
   }
 
-  /** 展开全部:先放开各组 inline 上限,再按页拉取溢出事实。 */
+  /** 展开已载条目，再按页拉取后续事实；按钮不把单页加载冒充全部。 */
   private async expandRelations(
     anchor: { idx: number; top: number } | null,
   ): Promise<void> {
@@ -530,8 +603,16 @@ export class Drawer {
       }
     }
     const ranks: number[] = [];
-    for (const group of this.groupFacts(cur)) ranks.push(...group.members);
-    await this.deps.names.load(ranks);
+    for (const group of this.relationView(cur).groups)
+      ranks.push(...group.members);
+    this.rerender();
+    this.restoreAnchor(anchor);
+    try {
+      await this.deps.names.load(ranks);
+    } catch (error) {
+      if (this.cur === cur)
+        this.deps.reportError("关系名称加载", error);
+    }
     if (this.cur !== cur) return;
     this.rerender();
     this.restoreAnchor(anchor);
@@ -583,7 +664,7 @@ export class Drawer {
     this.rerender();
   }
 
-  /** 与全局选择/保留集合对齐；异步加载新节点时不暴露旧详情操作。 */
+  /** 与全局选择/固定节点集合对齐；异步加载新节点时不暴露旧详情操作。 */
   syncState(): void {
     const cur = this.cur;
     if (!cur) return;
@@ -652,18 +733,6 @@ export class Drawer {
     if (e.kind === "subject") {
       if (e.score) bits.push(`评分 ${e.score}`);
       if (e.bgmRank) bits.push(`Rank #${e.bgmRank}`);
-      bits.push(`收藏 ${e.favorite.reduce((a, b) => a + b, 0)}`);
-      if (e.date) bits.push(e.date);
-      if (e.platformCode !== null) {
-        const plat =
-          cur.mappings.platform[`${e.type}:${e.platformCode}`];
-        if (plat) bits.push(plat);
-      }
-    } else {
-      if (e.collects) bits.push(`收藏 ${e.collects}`);
-      if (e.comments) bits.push(`评论 ${e.comments}`);
-      if (e.kind === "person" && e.career.length)
-        bits.push(e.career.map(careerValueLabel).join("/"));
     }
     return bits;
   }
@@ -708,10 +777,11 @@ export class Drawer {
       return html`<section class="dossier-section"><h3>简介</h3>
         <div class="note">暂无简介</div></section>`;
 
-    const hasMore = cur.summary.text.length > SUMMARY_PREVIEW;
+    const text = decodeDisplayText(cur.summary.text);
+    const hasMore = text.length > SUMMARY_PREVIEW;
     const body = cur.summaryOpen
-      ? segmented(cur.summary.text, cur.summary.shown, "summary-more")
-      : html`${cur.summary.text.slice(0, SUMMARY_PREVIEW)}`;
+      ? segmented(text, cur.summary.shown, "summary-more")
+      : html`${text.slice(0, SUMMARY_PREVIEW)}`;
     const toggle = hasMore
       ? html`<button id="sum-toggle" class="text-action">
           ${cur.summaryOpen ? "收起简介" : "继续阅读"}
@@ -829,9 +899,17 @@ export class Drawer {
   }
 
   private renderRelations(cur: Current): string {
+    if (cur.factsTotal === 0)
+      return html`<div class="empty-state"><strong>暂无关联</strong></div>`;
+    if (cur.relationRankState === "loading")
+      return html`<div class="loading" aria-busy="true">正在加载关联…</div>`;
+    if (cur.relationRankState === "error")
+      return html`<div class="empty-state"><strong>关联暂时加载失败</strong>
+        <span>请重新选择此节点重试。</span></div>`;
     if (cur.relationsLoading)
-      return html`<div class="loading" aria-busy="true">正在准备关系名称…</div>`;
-    const groups = this.groupFacts(cur);
+      return html`<div class="loading" aria-busy="true">正在加载关联…</div>`;
+    const relationView = this.relationView(cur);
+    const groups = relationView.groups;
     const sections = new Map<string, { section: RelationshipSection; groups: FactGroup[] }>();
     for (const group of groups) {
       const bucket = sections.get(group.section.id) ?? {
@@ -872,25 +950,33 @@ export class Drawer {
         </details>`;
       })
       .join("");
-    const expand =
-      cur.factsNext !== null || (!cur.expanded && cur.factsTotal > shownCount)
+    const expand = cur.factsNext !== null
+      ? html`<button id="expand-rel" class="primary-action full-width">
+          继续加载 · ${cur.facts.length} / ${cur.factsTotal}
+        </button>`
+      : !cur.expanded && relationView.entryCount > shownCount
         ? html`<button id="expand-rel" class="primary-action full-width">
-            ${cur.expanded
-              ? `继续加载 · ${cur.facts.length} / ${cur.factsTotal}`
-              : `展开全部 ${cur.factsTotal} 条关联`}
+            显示全部 ${relationView.entryCount} 条关联
           </button>`
         : "";
-    if (!sectionHtml)
-      return html`<div class="empty-state"><strong>暂无可浏览关联</strong>
-        <span>未解析引用不会生成错误跳转。</span></div>`;
-    return html`<div class="relations-intro">按关系语义分区；选择任一条目即可沿图谱继续探索。</div>
-      ${raw(sectionHtml)}${raw(expand)}`;
+    if (!sectionHtml) {
+      const reason = cur.factsNext === null
+        ? html`<span>${relationView.unresolvedCount} 条关联未收录。</span>`
+        : "";
+      return html`<div class="empty-state"><strong>暂无可打开的关联</strong>
+        ${raw(reason)}${raw(expand)}</div>`;
+    }
+    const warning = relationView.unresolvedCount > 0
+      ? html`<div class="note relation-warning">
+          ${relationView.unresolvedCount} 条关联未收录
+        </div>`
+      : "";
+    return html`${raw(warning)}${raw(sectionHtml)}${raw(expand)}`;
   }
 
   private renderEpisodes(cur: Current): string {
-    if (cur.loading && cur.eps === null)
+    if (cur.eps === null)
       return html`<div class="loading" aria-busy="true">正在加载分集…</div>`;
-    if (cur.eps === null) return html`<div class="note">准备分集数据…</div>`;
     if (cur.eps.length === 0)
       return html`<div class="empty-state"><strong>没有分集记录</strong></div>`;
     const shown = cur.epsExpanded ? cur.eps : cur.eps.slice(0, EPS_SHOWN);
@@ -917,7 +1003,7 @@ export class Drawer {
       .join("");
     const issue = parsed.issue
       ? html`<div class="note" role="status">
-          无法按 Bangumi Wiki 语法整理第 ${parsed.issue.line} 行，原始资料仍完整保留。
+          第 ${parsed.issue.line} 行无法整理。
         </div>`
       : "";
     return html`
@@ -925,7 +1011,7 @@ export class Drawer {
         rows
           ? html`<div class="reference-heading">${parsed.template}</div>
               <dl class="reference-grid">${raw(rows)}</dl>`
-          : issue || html`<div class="note">未识别结构化字段，原始资料仍完整保留。</div>`,
+          : issue || html`<div class="note">未识别结构化字段。</div>`,
       )}
       <details class="source-disclosure"><summary>查看原始 Wiki 源码</summary>
         <pre class="infobox">${raw(
@@ -957,13 +1043,19 @@ export class Drawer {
     const sub = nameCn ? entity?.name ?? "" : "";
     const stats = this.statsOf(cur);
     const panel = this.renderPanel(cur);
+    const pinned = state.pinnedSelections.has(rank);
+    const pinUnavailableReason = !pinned && cur.relationRankState === "loading"
+      ? "加载完成后可固定"
+      : !pinned && cur.relationRankState === "error"
+        ? "暂时无法固定节点"
+        : null;
     return html`
       <header class="dossier-header">
-        ${raw(drawerTopActions(key, state.pinnedSelections.has(rank)))}
+        ${raw(drawerTopActions(key, pinned, pinUnavailableReason))}
         ${raw(drawerCover(key))}
-        <div class="eyebrow">${this.badge(cur)} · Bangumi #${eid(key)}</div>
-        <h2>${title}</h2>
-        ${raw(sub ? html`<div class="subtitle">${sub}</div>` : "")}
+        <div class="eyebrow">${decodeDisplayText(this.badge(cur))} · Bangumi #${eid(key)}</div>
+        <h2>${decodeDisplayText(title)}</h2>
+        ${raw(sub ? html`<div class="subtitle">${decodeDisplayText(sub)}</div>` : "")}
         ${raw(stats.length ? html`<div class="stats">${stats.join(" · ")}</div>` : "")}
       </header>
       ${raw(this.renderTabs(cur))}
@@ -978,6 +1070,11 @@ export class Drawer {
     `;
   }
 
+  private canTogglePin(cur: Current): boolean {
+    return state.pinnedSelections.has(cur.rank) ||
+      cur.relationRankState !== "loading" && cur.relationRankState !== "error";
+  }
+
   private episodeRow(cur: Current, e: EpisodeRecord): string {
     const desc = cur.descs.get(e.id);
     const toggle = e.hasDescription
@@ -988,13 +1085,17 @@ export class Drawer {
     const body =
       desc?.s === "ready"
         ? html`<div class="ep-body">${raw(
-            segmented(desc.text, desc.shown, `ep-more-${e.id}`),
+            segmented(
+              decodeDisplayText(desc.text),
+              desc.shown,
+              `ep-more-${e.id}`,
+            ),
           )}</div>`
         : desc?.s === "loading"
           ? html`<div class="ep-body">介绍加载中…</div>`
           : "";
     return html`<div class="ep" data-episode-row="${e.id}" tabindex="-1">
-      ${e.sort ?? ""}. ${e.nameCn || e.name}
+      ${e.sort ?? ""}. ${decodeDisplayText(e.nameCn || e.name)}
       <span class="ep-date">${e.airdate}</span>
       ${raw(toggle)} ${raw(body)}
     </div>`;
