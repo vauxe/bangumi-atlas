@@ -1153,7 +1153,11 @@ def expected_search_aliases(
 
     aliases: list[tuple[str, str]] = []
     seen_keys: set[str] = set()
-    for source in dict.fromkeys(text for text in (name_cn, name) if text):
+    sources = (
+        expected_display_text(name_cn),
+        expected_display_text(name),
+    )
+    for source in dict.fromkeys(text for text in sources if text):
         variants = [
             source,
             _oracle_opencc("t2s").convert(source),
@@ -1172,6 +1176,47 @@ def expected_search_aliases(
                 seen_keys.add(normalized)
                 aliases.append((normalized, matched))
     return aliases
+
+
+_EXPECTED_DISPLAY_REFERENCE = re.compile(
+    r"&(#(?:[xX][0-9a-fA-F]+|[0-9]+)|[A-Za-z][A-Za-z0-9]+);"
+)
+
+
+def expected_display_text(value: Any) -> str:
+    """Independently apply the display projection declared by the contract."""
+
+    contract = sr.SITE_CONTRACT["display_text"]
+    references = contract["named_references"]
+
+    def replace(match: re.Match[str]) -> str:
+        body = match.group(1)
+        if not body.startswith("#"):
+            replacement = references.get(body)
+            return (
+                replacement if isinstance(replacement, str) else match.group(0)
+            )
+        hexadecimal = len(body) > 1 and body[1] in "xX"
+        digits = body[2:] if hexadecimal else body[1:]
+        try:
+            code_point = int(digits, 16 if hexadecimal else 10)
+        except ValueError:
+            return match.group(0)
+        if (
+            code_point <= 0
+            or code_point > 0x10FFFF
+            or 0xD800 <= code_point <= 0xDFFF
+        ):
+            return match.group(0)
+        return chr(code_point)
+
+    decoded = "" if value is None else str(value)
+    for _pass in range(int(contract["decode_passes"])):
+        updated = _EXPECTED_DISPLAY_REFERENCE.sub(replace, decoded)
+        if updated == decoded:
+            break
+        decoded = updated
+    return decoded
 
 
 def expected_search_gram_bucket(
@@ -2208,8 +2253,8 @@ def verify_release(  # noqa: PLR0915
         int(artifact_files[name][0]) for name in fam["files"]
     )
 
-    # 成员候选索引覆盖 Episode 名称和合同允许全文查询的原文；原始
-    # infobox 仍在侧车中，但不得扩大全文索引或进入候选集。
+    # 成员候选索引覆盖 Episode 名称和合同允许全文查询的显示文本；
+    # 原始 infobox 仍在侧车中，但不得扩大全文索引或进入候选集。
     text_search_dir = load_idx("text.search.members")
     expected_members: list[list[Any]] = []
     expected_counts = np.zeros(sr.SEARCH_NGRAM_BUCKETS, dtype=np.uint32)
@@ -2236,7 +2281,7 @@ def verify_release(  # noqa: PLR0915
         buckets: set[int] = set()
         trigram_buckets: set[int] = set()
         for text in texts:
-            folded = sr.search_fold(text)
+            folded = sr.search_fold(expected_display_text(text))
             width = sr.SEARCH_NGRAM_WIDTH
             buckets.update(
                 expected_search_gram_bucket(folded[start : start + width])
@@ -2329,7 +2374,7 @@ def verify_release(  # noqa: PLR0915
     )
 
     check(
-        "文本散列候选与全部原文成员等价",
+        "文本散列候选与全部显示文本成员等价",
         all(
             text_search_postings_are_valid(
                 f"text.search.ngram-{shard}",
@@ -2344,7 +2389,7 @@ def verify_release(  # noqa: PLR0915
         ),
     )
     check(
-        "全文三元候选仅覆盖合同允许的原文成员",
+        "全文三元候选仅覆盖合同允许的显示文本成员",
         all(
             text_search_postings_are_valid(
                 f"text.search.trigram-{shard}",
@@ -2753,7 +2798,7 @@ def verify_release(  # noqa: PLR0915
                     nm[0], nm[1] or "", derived_charmap
                 )
             ],
-            nm[1] or nm[0],
+            expected_display_text(nm[1]) or expected_display_text(nm[0]),
             nm[2],
         ]
         for nm in names_by_rank

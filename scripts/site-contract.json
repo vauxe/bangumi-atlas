@@ -1,7 +1,23 @@
 {
   "schema": "structural-site-v1",
   "profile": "explorer-v1",
-  "schema_digest": "905833d67c9515777f5169a57fce2a9ec85ffb822db75f3b90f6201a32cb3570",
+  "schema_digest": "25ae02df062b3c05c98daaa6e2f7a6a56f81d1f8ed6116efac7f1d43d6ea8384",
+  "display_text": {
+    "decode_passes": 3,
+    "named_references": {
+      "amp": "&",
+      "apos": "'",
+      "quot": "\"",
+      "lt": "<",
+      "gt": ">",
+      "nbsp": " ",
+      "ldquo": "“",
+      "rdquo": "”",
+      "hellip": "…",
+      "ndash": "–",
+      "Eacute": "É"
+    }
+  },
   "rank": {
     "encoding": "u24le",
     "sentinel": 16777215

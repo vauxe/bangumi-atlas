@@ -72,7 +72,11 @@ test("installs one visible manager for cumulative retained-node expansion", () =
     /<aside id="pinned-manager"[^>]*aria-label="保留节点及其关系"[^>]*hidden/s,
   );
   assert.match(main, /new PinnedManager\(/);
-  assert.match(main, /nameOf:\s*\(rank\)\s*=>\s*names\.get\(rank\)/);
+  assert.match(
+    main,
+    /const displayName = \(rank: number\)[\s\S]*?decodeDisplayText\(name\)/,
+  );
+  assert.match(main, /nameOf:\s*displayName/);
   assert.match(main, /focus:\s*\(rank\)\s*=>[\s\S]*?select\(rank, "center"\)/);
   assert.match(main, /subscribe\([\s\S]*?pinnedManager\.sync\(\)/);
   assert.match(main, /drawer\.syncState\(\)/);

@@ -365,6 +365,20 @@ class RoutingContractTests(unittest.TestCase):
 
         self.assertEqual({alias[0] for alias in aliases}, {"沪", "滬"})
 
+    def test_verifier_derives_display_text_without_producer_helper(
+        self,
+    ) -> None:
+        with patch.object(
+            verify_site.sr,
+            "display_text",
+            return_value="wrong",
+        ):
+            text = verify_site.expected_display_text(
+                "Trick &amp;amp; Trap &Bass;"
+            )
+
+        self.assertEqual(text, "Trick & Trap &Bass;")
+
     def test_verifier_reuses_derived_alias_rows(self) -> None:
         alias_rows = [[[["hu", "沪"], ["滬", "滬"]], "沪", 1]]
 

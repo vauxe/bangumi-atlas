@@ -9,6 +9,7 @@ import {
   queryValueText,
   renderAnswer,
 } from "../src/query/answer-view";
+import { executeQuery, type QueryDataSource } from "../src/query/engine";
 import { MISSING } from "../src/query/value";
 import type { Mappings } from "../src/types";
 
@@ -120,6 +121,45 @@ test("renders structured tags with their names and counts", () => {
   );
 });
 
+test("passes display-ready archive values through unchanged", () => {
+  assert.equal(
+    queryValueText([{ name: "Chapter &lt; End", count: 2 }]),
+    "Chapter &lt; End（2）",
+  );
+  assert.equal(queryValueText({
+    kind: "entity",
+    owner: "subject",
+    ref: "subject:42",
+    fields: { name: "Rock &lt; Roll", nameCn: "" },
+  }), "Rock &lt; Roll");
+});
+
+test("keeps Values query strings unchanged", async () => {
+  const source: QueryDataSource = { scan: async function* () {} };
+  const result = await executeQuery({
+    schema: "atlas-query-document-v1",
+    root: "values",
+    parameters: {},
+    operators: {
+      values: {
+        kind: "values",
+        columns: ["text"],
+        rows: [["&lt;"], ["&amp;amp;amp;lt;"]],
+      },
+    },
+  }, {}, source, { pageSize: 20 });
+
+  assert.deepEqual(result.rows, [
+    { text: "&lt;" },
+    { text: "&amp;amp;amp;lt;" },
+  ]);
+  assert.equal(queryValueText(result.rows[0]?.text ?? null), "&lt;");
+  assert.equal(
+    queryValueText(result.rows[1]?.text ?? null),
+    "&amp;amp;amp;lt;",
+  );
+});
+
 test("uses an entity's readable name while retaining its stable ref elsewhere", () => {
   assert.equal(queryValueText({
     kind: "entity",
@@ -146,6 +186,17 @@ test("shows context only for full-text matches, not duplicate name matches", () 
     text: "机器人",
     snippet: "这是一个机器人的故事",
   }] }), "这是一个机器人的故事");
+});
+
+test("does not project an already-visible full-text snippet again", () => {
+  assert.equal(queryMatchSnippet({ result: [{
+    kind: "text-range",
+    ref: "subject:42",
+    field: "summary",
+    utf8Range: [0, 4],
+    text: "&lt;",
+    snippet: "&lt;",
+  }] }), "&lt;");
 });
 
 test("does not present one member snippet as context for an aggregate row", () => {

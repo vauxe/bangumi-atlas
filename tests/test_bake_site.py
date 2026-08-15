@@ -658,6 +658,35 @@ class SearchIndexTests(unittest.TestCase):
         )
         self.assertEqual(aliases[1][1:], ["虎伥", 3])
 
+    def test_search_index_uses_the_same_text_users_see(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory)
+            with patch.object(bake_site, "SITE", site):
+                bake_site.build_search_index(
+                    ["Trick &amp; Trap"],
+                    [""],
+                    [1],
+                )
+
+            index = bake_site.np.frombuffer(
+                (site / "search.alias.idx").read_bytes(), dtype="<u4"
+            )
+            pack = (site / "search.alias.pack").read_bytes()
+            rows = bake_site.orjson.loads(
+                gzip.decompress(pack[int(index[0]) : int(index[1])])
+            )
+
+        self.assertEqual(
+            rows,
+            [
+                [
+                    [["trick & trap", "Trick & Trap"]],
+                    "Trick & Trap",
+                    1,
+                ]
+            ],
+        )
+
     def test_search_tree_handles_long_shared_prefix_iteratively(self) -> None:
         shared = "a" * 1_100
         with tempfile.TemporaryDirectory() as directory:

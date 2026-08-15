@@ -1,6 +1,7 @@
 import type { EpisodeRecord, StructuralEntity } from "../types";
 import type { ProjectedEntity, TextSearchRow } from "../data";
 import { WeightedLru } from "../cache";
+import { decodeDisplayText } from "../html";
 import {
   fold,
   foldedUtf8Range,
@@ -367,12 +368,15 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
     const rows = await this.reader.textSearchRows?.(descriptor, signal);
     if (!rows) throw new TypeError("published text search index is unavailable");
     signal.throwIfAborted();
-    const matches = rows.filter((row): row is EntityTextSearchRow =>
-      row.owner !== "fact" &&
-      row.owner === owner &&
-      row.field === field &&
-      fold(row.text).includes(query)
-    );
+    const matches = rows.flatMap((row): EntityTextSearchRow[] => {
+      if (
+        row.owner === "fact" ||
+        row.owner !== owner ||
+        row.field !== field
+      ) return [];
+      const text = decodeDisplayText(row.text);
+      return fold(text).includes(query) ? [{ ...row, text }] : [];
+    });
     const weight = textRowsWeight(matches);
     if (weight <= TEXT_MATCH_CACHE_BUDGET)
       this.textMatches.set(cacheKey, matches, weight);
@@ -556,18 +560,22 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
           throw new TypeError(
             `search entity ${candidate.key} omitted its identity fields`,
           );
+        const visibleName = decodeDisplayText(name);
+        const visibleNameCn = decodeDisplayText(nameCn);
         const aliases: [string, string][] = [];
-        if (allowedFields.has("nameCn") && nameCn)
-          aliases.push([fold(nameCn), nameCn]);
-        if (allowedFields.has("name") && name)
-          aliases.push([fold(name), name]);
+        if (allowedFields.has("nameCn") && visibleNameCn)
+          aliases.push([fold(visibleNameCn), visibleNameCn]);
+        if (allowedFields.has("name") && visibleName)
+          aliases.push([fold(visibleName), visibleName]);
         const entry = matchingAliasEntry(
           query,
-          [aliases, nameCn || name, allowedKind],
+          [aliases, visibleNameCn || visibleName, allowedKind],
           candidate.rank,
         );
         if (!entry) return null;
-        const field: LookupField = entry[1] === nameCn ? "nameCn" : "name";
+        const field: LookupField = entry[1] === visibleNameCn
+          ? "nameCn"
+          : "name";
         const utf8Range = foldedUtf8Range(entry[1], query);
         if (!utf8Range)
           throw new TypeError("direct lookup match has no source range");
@@ -609,9 +617,11 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
         const nameCn = entity.kind === "subject"
           ? "fields" in entity ? entity.fields.nameCn : entity.nameCn
           : "";
-        const field: LookupField = entry[1] === name
+        const visibleName = decodeDisplayText(name);
+        const visibleNameCn = decodeDisplayText(nameCn);
+        const field: LookupField = entry[1] === visibleName
           ? "name"
-          : nameCn && entry[1] === nameCn
+          : visibleNameCn && entry[1] === visibleNameCn
             ? "nameCn"
             : "nameVariant";
         if (!allowedFields.has(field)) continue;
@@ -699,13 +709,14 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
                   !allowedFields.has(row.field) ||
                   seen.has(row.id)
                 ) continue;
-                const utf8Range = foldedUtf8Range(row.text, query);
+                const text = decodeDisplayText(row.text);
+                const utf8Range = foldedUtf8Range(text, query);
                 if (!utf8Range) continue;
                 seen.add(row.id);
                 verified.push({
                   id: row.id,
                   field: row.field,
-                  text: row.text,
+                  text,
                   utf8Range,
                   entity: row.entity,
                 });
@@ -836,9 +847,11 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
             : "";
           if (typeof entityName !== "string" || typeof entityNameCn !== "string")
             throw new TypeError(`search entity ${key} omitted its identity fields`);
-          const field: LookupField = entry[1] === entityName
+          const visibleName = decodeDisplayText(entityName);
+          const visibleNameCn = decodeDisplayText(entityNameCn);
+          const field: LookupField = entry[1] === visibleName
             ? "name"
-            : entityNameCn && entry[1] === entityNameCn
+            : visibleNameCn && entry[1] === visibleNameCn
               ? "nameCn"
               : "nameVariant";
           if (!allowedFields.has(field)) continue;
@@ -999,13 +1012,14 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
         for (const row of rows) {
           if (row.owner !== "fact" || row.field !== "summary" || seen.has(row.id))
             continue;
-          const range = foldedUtf8Range(row.text, query);
+          const text = decodeDisplayText(row.text);
+          const range = foldedUtf8Range(text, query);
           if (!range) continue;
           seen.add(row.id);
           yield {
             ref: `fact:${row.id}`,
             field: "summary",
-            text: row.text,
+            text,
             utf8Range: range,
           };
         }

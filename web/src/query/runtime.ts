@@ -2,8 +2,10 @@
  * 让编辑器、答案渲染与 Worker 客户端不阻塞星图首包解析。 */
 
 import type { Data } from "../data";
+import { decodeDisplayText } from "../html";
 import { loadRanksByKey, openSearchAliases } from "../loader";
 import { searchNameSuggestions } from "../search";
+import type { SearchResult } from "../search";
 import { notify, state, subscribe } from "../store";
 import type {
   EntityKind,
@@ -23,6 +25,7 @@ import {
   rankEntitySuggestions,
   type EntitySuggestion,
   type EntitySuggestionBatch,
+  type NameSuggestion,
 } from "./query-bar";
 import { QUERY_SECURITY_PROFILE } from "./security";
 import { QueryWorkbench } from "./workbench";
@@ -60,6 +63,40 @@ export interface InstalledQueryRuntime {
   focus(): void;
   /** Restore one opaque URL payload and return its canonical spelling. */
   restoreQuery(query: string | null): string | null;
+}
+
+export function mergePreparedNameSuggestions(
+  canvas: readonly SearchResult[],
+  episodes: readonly EntitySuggestion[],
+  contextByRank: ReadonlyMap<number, string>,
+): NameSuggestion[] {
+  const ownerOfKind = (["", "subject", "person", "character"] as const);
+  return [
+    ...canvas.map((item) => {
+      const owner = ownerOfKind[item.entityKind] as Owner;
+      const context = contextByRank.get(item.rank);
+      return {
+        key: `rank:${item.rank}`,
+        rank: item.rank,
+        owner,
+        label: item.display,
+        detail: context
+          ? `${OWNER_LABEL[owner]} · ${context}`
+          : OWNER_LABEL[owner],
+        ...(item.matched !== item.display
+          ? { match: item.matched }
+          : {}),
+      };
+    }),
+    ...episodes.map((item) => ({
+      key: item.ref,
+      ref: item.ref,
+      owner: item.owner,
+      label: item.label,
+      detail: item.detail,
+      ...(item.match ? { match: item.match } : {}),
+    })),
+  ].slice(0, 18);
 }
 
 export function installQueryRuntime(
@@ -117,11 +154,12 @@ export function installQueryRuntime(
     );
     const items = await Promise.all(result.rows.map(async (row, index) => {
       const ref = row.ref;
-      const name = typeof row.nameCn === "string" && row.nameCn
+      const projectedName = typeof row.nameCn === "string" && row.nameCn
         ? row.nameCn
         : row.name;
-      if (typeof ref !== "string" || typeof name !== "string") return null;
-      const match = Object.values(result.evidence[index] ?? {}).flat()
+      if (typeof ref !== "string" || typeof projectedName !== "string")
+        return null;
+      const projectedMatch = Object.values(result.evidence[index] ?? {}).flat()
         .find((item) => item.kind === "text-range")?.snippet;
       let detail = OWNER_LABEL[owner];
       if (owner === "episode" && typeof row.subjectRef === "string") {
@@ -129,15 +167,15 @@ export function installQueryRuntime(
         if (subjectRef.owner === "subject" && subjectRef.archiveId <= 0xffffff) {
           const subject = await data.entity((1 << 24) | subjectRef.archiveId, signal);
           if (subject?.kind === "subject")
-            detail = `${detail} · ${subject.nameCn || subject.name}`;
+            detail = `${detail} · ${decodeDisplayText(subject.nameCn || subject.name)}`;
         }
       }
       return {
         ref: ref as `${Owner}:${number}`,
         owner,
-        label: name,
+        label: projectedName,
         detail,
-        ...(match ? { match } : {}),
+        ...(projectedMatch ? { match: projectedMatch } : {}),
       } satisfies EntitySuggestion;
     }));
     signal.throwIfAborted();
@@ -252,14 +290,18 @@ export function installQueryRuntime(
       await names.load([rank]);
       return {
         ref: `${owner}:${key & 0xffffff}`,
-        label: names.get(rank) ?? `${owner} #${key & 0xffffff}`,
+        label: decodeDisplayText(
+          names.get(rank) ?? `${owner} #${key & 0xffffff}`,
+        ),
       };
     },
     resolveEntityLabel: async (ref) => {
       const parsed = parseEntityRef(ref);
       if (parsed.owner === "episode") {
         const episode = await data.episode(parsed.archiveId);
-        return episode?.name || `分集 #${parsed.archiveId}`;
+        return decodeDisplayText(
+          episode?.name || `分集 #${parsed.archiveId}`,
+        );
       }
       const kind = parsed.owner === "subject"
         ? 1
@@ -270,7 +312,9 @@ export function installQueryRuntime(
         throw new TypeError("实体不在当前数据版本中");
       const entity = await data.entity((kind << 24) | parsed.archiveId);
       if (!entity) throw new TypeError("实体不在当前数据版本中");
-      return entity.kind === "subject" ? entity.nameCn || entity.name : entity.name;
+      return decodeDisplayText(
+        entity.kind === "subject" ? entity.nameCn || entity.name : entity.name,
+      );
     },
     suggestEntities: suggestQueryEntities,
     suggestNames: async (text, owners, signal) => {
@@ -321,31 +365,7 @@ export function installQueryRuntime(
             contextByRank.set(...context.value);
         }
       }
-      const ownerOfKind = (["", "subject", "person", "character"] as const);
-      return [
-        ...canvas.map((item) => {
-          const owner = ownerOfKind[item.entityKind] as Owner;
-          const context = contextByRank.get(item.rank);
-          return {
-            key: `rank:${item.rank}`,
-            rank: item.rank,
-            owner,
-            label: item.display,
-            detail: context
-              ? `${OWNER_LABEL[owner]} · ${context}`
-              : OWNER_LABEL[owner],
-            ...(item.matched !== item.display ? { match: item.matched } : {}),
-          };
-        }),
-        ...episodes.map((item) => ({
-          key: item.ref,
-          ref: item.ref,
-          owner: item.owner,
-          label: item.label,
-          detail: item.detail,
-          ...(item.match ? { match: item.match } : {}),
-        })),
-      ].slice(0, 18);
+      return mergePreparedNameSuggestions(canvas, episodes, contextByRank);
     },
     suggestTagValues: (field, text, signal) =>
       data.suggestTagValues(field, text, { signal }),

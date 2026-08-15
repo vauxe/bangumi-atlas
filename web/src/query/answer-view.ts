@@ -12,6 +12,7 @@ import { isMissing, isTagValue } from "./value";
 import { MEDIA_NAMES } from "../types";
 import type { Mappings } from "../types";
 import { careerValueLabel } from "../value-labels";
+import { decodeDisplayText } from "../html";
 import {
   QUERY_CONTRACT,
   factFieldDefinition,
@@ -238,7 +239,7 @@ export function queryValueText(
   if (typeof value === "string") return readableRef(value);
   if (typeof value === "number" && context) {
     const mapped = mappedNumber(value, context);
-    if (mapped) return mapped;
+    if (mapped) return decodeDisplayText(mapped);
     const entityValue = entityEnumText(value, context);
     if (entityValue) return entityValue;
     const label = enumLabel(context);
@@ -251,6 +252,8 @@ function entityNames(
   originalValue: unknown,
   chineseValue: unknown,
 ): { primary: string; secondary?: string } | null {
+  // SiteQueryDataSource owns display_text projection. Names reaching the
+  // answer view are already visible query values and must pass through once.
   const original = typeof originalValue === "string" ? originalValue.trim() : "";
   const chinese = typeof chineseValue === "string" ? chineseValue.trim() : "";
   const primary = chinese || original;

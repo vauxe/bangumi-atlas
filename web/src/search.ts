@@ -50,7 +50,9 @@ export type SearchMatchKind = "exact" | "prefix" | "substring";
 
 export interface SearchResult {
   normalized: string;
+  /** 构建期已经应用 display_text 投影，消费者必须原样呈现。 */
   matched: string;
+  /** 构建期已经应用 display_text 投影，消费者必须原样呈现。 */
   display: string;
   rank: number;
   entityKind: EntityKind;
