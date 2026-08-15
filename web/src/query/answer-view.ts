@@ -11,7 +11,6 @@ import type { AnswerSpec } from "./bundle";
 import { isMissing, isTagValue } from "./value";
 import { MEDIA_NAMES } from "../types";
 import type { Mappings } from "../types";
-import { careerValueLabel } from "../value-labels";
 import { decodeDisplayText } from "../html";
 import {
   QUERY_CONTRACT,
@@ -25,6 +24,7 @@ import {
   FACT_LABEL,
   FIELD_LABEL,
   OWNER_LABEL,
+  enumValuesFor,
   factEnumValues,
 } from "./workbench-model";
 import {
@@ -131,25 +131,23 @@ function entityFieldUnavailable(context: ValueContext): boolean {
     !Object.hasOwn(QUERY_CONTRACT.owners[owner].fields, context.column);
 }
 
-function mappedNumber(value: number, context: ValueContext): string | null {
-  const { mappings } = context;
+function mappedEnumValue(
+  value: string | number,
+  context: ValueContext,
+): string | null {
   const semantic = valueSemantic(context);
-  if (!mappings || !semantic) return null;
+  if (!semantic) return null;
   const separator = semantic.indexOf(".");
   if (separator <= 0) return null;
   const scope = semantic.slice(0, separator);
   const field = semantic.slice(separator + 1);
-  let namespace: string | undefined;
-  if (Object.hasOwn(QUERY_CONTRACT.owners, scope))
-    namespace = QUERY_CONTRACT.owners[scope as Owner].fields[field]?.enum;
-  else if (Object.hasOwn(QUERY_CONTRACT.facts, scope))
-    namespace = factFieldDefinition(scope as QueryFactKind, field).enum;
-  if (!namespace) return null;
-  const code = String(value);
-  const mapped = namespace.startsWith("fact_labels.")
-    ? mappings.fact_labels[namespace.slice("fact_labels.".length)]?.[code]
-    : mappings[namespace as Exclude<keyof Mappings, "fact_labels" | "platform">]?.[code];
-  return mapped ?? null;
+  const values = Object.hasOwn(QUERY_CONTRACT.owners, scope)
+    ? enumValuesFor(scope as Owner, field, context.mappings)
+    : Object.hasOwn(QUERY_CONTRACT.facts, scope)
+      ? factEnumValues(scope as QueryFactKind, field, context.mappings)
+      : null;
+  const mapped = values?.[String(value)];
+  return mapped === undefined ? null : decodeDisplayText(mapped);
 }
 
 function enumLabel(context: ValueContext): string | null {
@@ -255,16 +253,16 @@ export function queryValueText(
   if (fact(value)) return FACT_LABEL[value.factKind] ?? value.factKind;
   if (path(value)) return `${value.cost} 跳路径`;
   if (typeof value === "boolean") return value ? "是" : "否";
+  if ((typeof value === "string" || typeof value === "number") && context) {
+    const mapped = mappedEnumValue(value, context);
+    if (mapped !== null) return mapped;
+  }
   if (
     typeof value === "string" && context?.column === "entityType" &&
     Object.hasOwn(OWNER_LABEL, value)
   ) return OWNER_LABEL[value as Owner];
-  if (typeof value === "string" && context && valueSemantic(context) === "person.career")
-    return careerValueLabel(value);
   if (typeof value === "string") return readableRef(value);
   if (typeof value === "number" && context) {
-    const mapped = mappedNumber(value, context);
-    if (mapped) return decodeDisplayText(mapped);
     const entityValue = entityEnumText(value, context);
     if (entityValue) return entityValue;
     const label = enumLabel(context);
