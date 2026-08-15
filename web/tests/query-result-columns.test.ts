@@ -43,21 +43,16 @@ test("offers every displayable column without exposing identity internals", () =
   assert.equal(choices.some(({ field }) => field === "subjectRef"), false);
 });
 
-test("turns a column selection into an identity-safe projection", () => {
-  assert.deepEqual(resultProjection(["subject"], ["score", "date"]), [
-    "ref", "name", "nameCn", "score", "date",
+test("keeps the executed projection separate from result-only column choices", () => {
+  assert.deepEqual(resultProjection(["subject"]), [
+    "ref", "name", "nameCn", "type", "date", "score", "rank",
   ]);
   assert.deepEqual(resultProjection([
     "subject", "person", "character",
-  ], ["score", "comments"]), [
-    "ref", "name", "nameCn", "score", "comments",
+  ]), ["ref", "name", "nameCn", "entityType"]);
+  assert.deepEqual(resultProjection(["person"]), [
+    "ref", "name", "type", "career", "comments", "collects",
   ]);
-  assert.deepEqual(resultProjection([
-    "subject", "person", "character",
-  ], ["entityType", "score"]), [
-    "ref", "name", "nameCn", "entityType", "score",
-  ]);
-  assert.deepEqual(resultProjection(["person"], []), ["ref", "name"]);
 });
 
 test("keeps compatible choices when the entity scope changes", () => {

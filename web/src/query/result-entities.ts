@@ -79,6 +79,18 @@ export function queryRowVisibleEntityRefs(row: QueryRow): QueryEntityRef[] {
   return [...refs];
 }
 
+/** The one entity represented by an entity-list row, if it is unambiguous. */
+export function queryRowPrimaryEntityRef(
+  row: QueryRow,
+  evidence?: RowEvidence,
+): QueryEntityRef | null {
+  if (typeof row.ref === "string" && ENTITY_REF.test(row.ref))
+    return row.ref as QueryEntityRef;
+  return queryRowVisibleEntityRefs(row).length
+    ? null
+    : projectedEntityRef(row, evidence);
+}
+
 export function queryRowEntityRefs(
   row: QueryRow,
   evidence?: RowEvidence,

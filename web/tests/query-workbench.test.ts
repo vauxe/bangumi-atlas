@@ -33,10 +33,65 @@ import {
   splitFactDiscriminatorCondition,
 } from "../src/query/workbench-model";
 import {
+  hydrateQueryResultColumns,
   mergeQueryResultRefs,
   queryHighlightStatus,
   queryWorkspaceVisibility,
 } from "../src/query/workbench";
+
+test("hydrates display columns without changing the executed result", () => {
+  const result = {
+    rows: [
+      { ref: "subject:1", name: "作品" },
+      { ref: "person:2", name: "人物" },
+    ],
+    evidence: [{}, {}],
+    columns: {
+      ref: { type: "entity-ref" as const },
+      name: { type: "string" as const },
+    },
+    totalMatches: 2,
+    visibleMatches: 2,
+    hasMore: false,
+    stability: "exact" as const,
+    queryDigest: "a".repeat(64),
+    releaseId: "b".repeat(64),
+    coverage: {
+      schema: "atlas-coverage-v1" as const,
+      atoms: ["owner:subject", "owner:person"],
+      digest: "c".repeat(64),
+    },
+    terminalEvidence: [],
+  };
+
+  const hydrated = hydrateQueryResultColumns(
+    result,
+    ["entityType", "score", "comments"],
+    [{
+      kind: "entity",
+      owner: "subject",
+      ref: "subject:1",
+      fields: { score: 8.8 },
+    }, {
+      kind: "entity",
+      owner: "person",
+      ref: "person:2",
+      fields: { comments: 12 },
+    }],
+  );
+
+  assert.deepEqual(hydrated.rows, [
+    { ref: "subject:1", name: "作品", entityType: "subject", score: 8.8, comments: null },
+    { ref: "person:2", name: "人物", entityType: "person", score: null, comments: 12 },
+  ]);
+  assert.deepEqual(hydrated.evidence[0]?.score, [{
+    kind: "entity-field",
+    ref: "subject:1",
+    field: "score",
+  }]);
+  assert.equal(Object.hasOwn(result.rows[0]!, "score"), false);
+  assert.equal(hydrated.queryDigest, result.queryDigest);
+});
 
 const workbenchSource = readFileSync("src/query/workbench.ts", "utf8");
 
@@ -47,6 +102,19 @@ test("changes the query draft without scheduling result execution", () => {
   )?.[0];
   assert.ok(draftChanged);
   assert.doesNotMatch(draftChanged, /setTimeout|runCurrent/);
+});
+
+test("keeps display-column loading inside its result card", () => {
+  const loadSection = workbenchSource.match(
+    /private async loadSection\([\s\S]*?\n  }(?=\n\n  private showError)/,
+  )?.[0];
+  assert.ok(loadSection);
+  const changeColumns = loadSection.match(
+    /const changeColumns = \(columns: readonly string\[\]\): void => \{[\s\S]*?\n      };/,
+  )?.[0];
+  assert.ok(changeColumns);
+  assert.doesNotMatch(changeColumns, /setStatus/);
+  assert.match(changeColumns, /aria-busy/);
 });
 
 test("collapses results without cancelling the query or hiding the way back", () => {
@@ -86,10 +154,10 @@ test("rescans buffered result refs only after a Worker page adds rows", () => {
   )?.[0];
   assert.ok(loadSection);
   const render = loadSection.match(
-    /const render = \(focusMore = false\): void => \{[\s\S]*?\n      };/,
+    /render = async \(focusMore = false\): Promise<void> => \{[\s\S]*?\n      };/,
   )?.[0];
   assert.ok(render);
-  assert.match(render, /const visible = revealQueryResult\(result, shown\)/);
+  assert.match(render, /const visible = revealQueryResult\(presentedResult \?\? result, shown\)/);
   const publishGuard = render.match(
     /if \(publishedRows !== result\.rows\.length\) \{[\s\S]*?\n        }/,
   )?.[0];

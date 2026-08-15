@@ -82,23 +82,12 @@ export function normalizeResultColumnSelection(
   return [...new Set(fields.filter((field) => available.has(field)))];
 }
 
-/** Converts editable columns into the complete projection consumed by the engine. */
+/** Complete baseline projection executed before result-only columns are chosen. */
 export function resultProjection(
   scope: readonly Owner[],
-  selection: readonly string[] | undefined,
 ): string[] {
-  const chosen = selection ?? defaultResultColumnSelection(scope);
-  const normalized = normalizeResultColumnSelection(scope, chosen);
-  const ignoredIdentity = new Set(RESULT_IDENTITY_FIELDS);
-  const unsupported = chosen.find((field) =>
-    !ignoredIdentity.has(field as typeof RESULT_IDENTITY_FIELDS[number]) &&
-    !normalized.includes(field)
-  );
-  if (unsupported) throw new TypeError(`当前实体范围不支持显示列：${unsupported}`);
-  if (new Set(chosen).size !== chosen.length)
-    throw new TypeError("显示列不能重复");
   return [
     ...identityProjection(scope),
-    ...normalized,
+    ...defaultResultColumnSelection(scope),
   ];
 }

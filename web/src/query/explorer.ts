@@ -482,10 +482,13 @@ export function compileExplorerQuery(draft: ExplorerQuery): QueryBundle {
           orderBy: draft.orderBy ?? [],
           limit,
         },
-        answer: {
-          shape: answerShape,
-          title: answerShape === "aggregate-table" ? "统计结果" : "探索结果",
-        },
+        answer: answerShape === "entity-list"
+          ? {
+              shape: answerShape,
+              title: "探索结果",
+              entityScope: [draft.owner],
+            }
+          : { shape: answerShape, title: "统计结果" },
         ...(Object.keys(parameters.values).length
           ? { parameterValues: parameters.values }
           : {}),

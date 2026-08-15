@@ -270,7 +270,7 @@ test("offers fields and only the necessary query modifiers in one picker", () =>
   const choices = queryAddChoices(draft);
 
   assert.deepEqual(new Set(choices.map(({ kind }) => kind)), new Set([
-    "condition", "relation", "fullText", "sort", "columns",
+    "condition", "relation", "fullText", "sort",
   ]));
   assert.ok(choices.some((choice) =>
     choice.kind === "condition" && choice.owners.includes("subject") && choice.field === "score"
@@ -312,15 +312,7 @@ test("offers fields and only the necessary query modifiers in one picker", () =>
       detail: "作品、人物或角色",
     }],
   );
-  assert.deepEqual(
-    choices.filter(({ kind }) => kind === "columns"),
-    [{
-      id: "columns",
-      kind: "columns",
-      label: "显示列",
-      detail: "",
-    }],
-  );
+  assert.equal(choices.some(({ label }) => label === "显示列"), false);
 });
 
 test("shows one flat, semantically unique condition list", () => {
@@ -775,7 +767,7 @@ test("edits the few relationship attributes as direct choices", () => {
 
 test("puts relationship meaning before the final apply action", () => {
   const editor = queryBarSource.match(
-    /private openRelationEditor\([\s\S]*?\n  }(?=\n\n  private openColumnsEditor)/,
+    /private openRelationEditor\([\s\S]*?\n  }(?=\n\n  private trackValueAutocomplete)/,
   )?.[0];
 
   assert.ok(editor);
@@ -908,7 +900,7 @@ test("does not offer singular fragments already represented by tokens", () => {
 
   assert.deepEqual(
     new Set(queryAddChoices(draft).map(({ kind }) => kind)),
-    new Set(["condition", "relation", "columns"]),
+    new Set(["condition", "relation"]),
   );
   assert.deepEqual(queryAddChoices({ kind: "list", allText: "星空" }), []);
 });

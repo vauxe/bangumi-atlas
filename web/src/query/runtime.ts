@@ -21,6 +21,7 @@ import {
 import { parseEntityRef, QUERY_CONTRACT, type Owner } from "./contract";
 import { decodeBundle, encodeShareableBundle } from "./bundle-url";
 import { compileExplorerQuery } from "./explorer";
+import type { EntityValue } from "./engine";
 import { mergeQueryHighlights } from "./highlights";
 import {
   rankEntitySuggestions,
@@ -29,6 +30,7 @@ import {
   type NameSuggestion,
 } from "./query-bar";
 import { QUERY_SECURITY_PROFILE } from "./security";
+import { SiteQueryDataSource } from "./site-source";
 import { QueryWorkbench } from "./workbench";
 import { OWNER_LABEL } from "./workbench-model";
 import { QueryWorkerClient } from "./worker-client";
@@ -113,6 +115,7 @@ export function installQueryRuntime(
     updateQueryUrl,
   } = dependencies;
   const searchAliases = openSearchAliases(manifest);
+  const resultSource = new SiteQueryDataSource(data);
   let queryClient: QueryWorkerClient | null = null;
   const client = (): QueryWorkerClient => {
     queryClient ??= new QueryWorkerClient(
@@ -372,6 +375,16 @@ export function installQueryRuntime(
     },
     releaseId: () => manifest.version,
     mappings: () => data.mappings(),
+    projectResultEntities: async (owner, refs, fields, signal) => {
+      const entities: EntityValue[] = [];
+      for await (const entity of resultSource.scanCandidates(
+        owner,
+        refs,
+        signal,
+        fields,
+      )) entities.push(entity);
+      return entities;
+    },
     onEntity: navigateEntity,
     onResultHighlights: highlightQueryResults,
     updateUrl: () => updateQueryUrl(currentQueryUrl(), false),

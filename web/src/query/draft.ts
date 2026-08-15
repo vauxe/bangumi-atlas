@@ -38,8 +38,6 @@ import { FIELD_LABEL, sameSortFieldSemantics } from "./workbench-model";
 import { OWNER_LABEL } from "./vocabulary";
 import {
   RESULT_ENTITY_TYPE_FIELD,
-  RESULT_IDENTITY_FIELDS,
-  normalizeResultColumnSelection,
   ownerSupportsResultField,
   resultProjection,
 } from "./result-columns";
@@ -95,8 +93,6 @@ export type ListQuery = Omit<
   "owner" | "aggregate" | "orderBy" | "fullText" | "columns"
 > & {
   scope: EntityScope;
-  /** Editable result columns. Entity identity is projected automatically. */
-  columns?: string[];
   fullText?: ScopedFullText;
   aggregate?: undefined;
   orderBy?: ScopedOrderTerm[];
@@ -136,7 +132,6 @@ export type QueryAction =
   | ({ type: "addRelation"; relation: ExplorerRelation } & OwnerTarget)
   | { type: "replaceRelation"; index: number; relation: ExplorerRelation }
   | { type: "removeRelation"; index: number }
-  | { type: "setColumns"; columns: string[] | undefined }
   | { type: "setOrder"; orderBy: ExplorerQuery["orderBy"] }
   | { type: "setLimit"; limit: number | undefined }
   | ({ type: "setAggregate"; aggregate: ExplorerAggregate } & OwnerTarget)
@@ -265,10 +260,7 @@ function conditionFields(condition: ExplorerCondition | undefined): string[] {
 }
 
 function queryFragmentLabels(query: ListQuery): string[] {
-  const fields = [
-    ...conditionFields(query.condition),
-    ...(query.columns ?? []),
-  ];
+  const fields = conditionFields(query.condition);
   const labels = fields.map((field) => FIELD_LABEL[field] ?? field);
   for (const order of query.orderBy ?? []) {
     const field = FIELD_LABEL[order.column] ?? order.column;
@@ -328,18 +320,8 @@ function orderByForScope(
   });
 }
 
-function columnsForScope(
-  query: ListQuery,
-  scope: EntityScope,
-): Pick<ListQuery, "columns"> {
-  return query.columns === undefined
-    ? {}
-    : { columns: normalizeResultColumnSelection(scope, query.columns) };
-}
-
 function listQueryForScope(query: ListQuery, scope: EntityScope): ListQuery {
-  const { columns: _columns, ...rest } = query;
-  return { ...rest, scope, ...columnsForScope(query, scope) };
+  return { ...query, scope };
 }
 
 function explorerOf(query: ListQuery, owner: Owner): ExplorerQuery {
@@ -348,7 +330,6 @@ function explorerOf(query: ListQuery, owner: Owner): ExplorerQuery {
     aggregate: _aggregate,
     orderBy: scopedOrderBy,
     fullText,
-    columns: _columns,
     ...rest
   } = query;
   const orderBy = (scopedOrderBy ?? []).flatMap((order) => {
@@ -359,7 +340,7 @@ function explorerOf(query: ListQuery, owner: Owner): ExplorerQuery {
   return {
     owner,
     ...rest,
-    columns: resultProjection(query.scope, query.columns).filter((field) =>
+    columns: resultProjection(query.scope).filter((field) =>
       field !== RESULT_ENTITY_TYPE_FIELD && ownerSupportsResultField(owner, field)
     ),
     ...(fullText
@@ -555,14 +536,6 @@ export function applyQueryAction(
         replaceAt(query.relations ?? [], action.index),
       ));
       break;
-    case "setColumns": {
-      const { columns: _previous, ...rest } = query;
-      result = replaceListQuery(current, {
-        ...rest,
-        ...(action.columns === undefined ? {} : { columns: [...action.columns] }),
-      });
-      break;
-    }
     case "setOrder": {
       const { orderBy: _previous, ...rest } = query;
       result = replaceListQuery(current, {
@@ -585,7 +558,6 @@ export function applyQueryAction(
         : current.query.scope.length === 1 ? current.query.scope[0] : undefined);
       if (!owner) throw new TypeError("请先选择要统计的实体类型");
       const {
-        columns: _columns,
         aggregate: _aggregate,
         orderBy: _orderBy,
         ...rest
@@ -663,7 +635,7 @@ function compileScopedList(query: ListQuery): QueryBundle {
   if (query.scope.length === 1)
     return compileExplorerQuery(explorerOf(query, query.scope[0]!));
 
-  const projection = resultProjection(query.scope, query.columns);
+  const projection = resultProjection(query.scope);
   const entityTypeVisible = projection.includes(RESULT_ENTITY_TYPE_FIELD);
   const visibleFields = projection.filter((field) =>
     field !== RESULT_ENTITY_TYPE_FIELD
@@ -767,7 +739,11 @@ function compileScopedList(query: ListQuery): QueryBundle {
       limit: query.limit ?? null,
     },
     ...(Object.keys(parameterValues).length ? { parameterValues } : {}),
-    answer: { shape: "entity-list", title: "全部匹配" },
+    answer: {
+      shape: "entity-list",
+      title: "全部匹配",
+      entityScope: [...query.scope],
+    },
   };
   return {
     schema: "atlas-query-bundle-v1",
@@ -868,7 +844,11 @@ function decompileScopedList(bundle: QueryBundle): QueryDraft | null {
             limit: null,
           },
           ...(section.parameterValues ? { parameterValues: section.parameterValues } : {}),
-          answer: { shape: "entity-list", title: "探索结果" },
+          answer: {
+            shape: "entity-list",
+            title: "探索结果",
+            entityScope: [owner],
+          },
         },
       },
     });
@@ -936,23 +916,13 @@ function decompileScopedList(bundle: QueryBundle): QueryDraft | null {
       })()
     : selection;
   const scope = normalizeEntityScope(owners);
-  const defaultProjection = resultProjection(scope, undefined);
-  const implicitColumns = canonicalJson(sharedFields) ===
-    canonicalJson(defaultProjection);
-  const selectedColumns = normalizeResultColumnSelection(
-    scope,
-    sharedFields.filter((field) =>
-      !RESULT_IDENTITY_FIELDS.includes(
-        field as typeof RESULT_IDENTITY_FIELDS[number],
-      )
-    ),
-  );
+  if (canonicalJson(sharedFields) !== canonicalJson(resultProjection(scope)))
+    return null;
   const candidate: QueryDraft = {
     kind: "list",
     query: {
       scope,
       ...scopedSelection,
-      ...(implicitColumns ? {} : { columns: selectedColumns }),
       ...(orderBy.length ? { orderBy } : {}),
       ...(section.query.limit === null || section.query.limit === undefined
         ? {}
@@ -977,10 +947,10 @@ export function queryDraftFromBundle(bundle: QueryBundle): QueryDraft | null {
       fullText,
       ...base
     } = restored;
+    if (!aggregate && columns !== undefined) return null;
     const query: ExplorerQuery = {
       owner,
       ...base,
-      ...(columns ? { columns } : {}),
       ...(fullText ? { fullText } : {}),
       ...(aggregate ? { aggregate } : {}),
       ...(relations?.length ? { relations } : {}),
@@ -994,11 +964,6 @@ export function queryDraftFromBundle(bundle: QueryBundle): QueryDraft | null {
           query: {
             ...base,
             scope: [owner],
-            ...(columns === undefined
-              ? {}
-              : {
-                  columns: normalizeResultColumnSelection([owner], columns),
-                }),
             ...(fullText
               ? {
                   fullText: {

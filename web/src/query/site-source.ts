@@ -571,6 +571,24 @@ export class SiteQueryDataSource implements QueryDataSource {
       if (parseEntityRef(ref).owner !== owner)
         throw new TypeError("candidate ref owner does not match its scan");
     if (!uniqueRefs.length) return;
+    if (owner === "episode" && this.reader.episode) {
+      const requested = new Set(fields);
+      for (const ref of uniqueRefs) {
+        signal?.throwIfAborted();
+        const episode = await this.reader.episode(parseEntityRef(ref).archiveId, signal);
+        if (!episode) continue;
+        const value = episodeValue(episode);
+        for (const field of Object.keys(value.fields))
+          if (!requested.has(field)) delete value.fields[field];
+        for (const field of requested) {
+          if (field === "ref" || field === "id") continue;
+          if (!Object.hasOwn(value.fields, field))
+            throw new TypeError(`SiteRelease projection omitted episode.${field}`);
+        }
+        yield value;
+      }
+      return;
+    }
     if (owner !== "episode" && this.reader.projectEntityCandidates) {
       const requested = new Set(fields);
       const physicalFields = physicalProjectionFields(owner, fields);
