@@ -154,6 +154,9 @@ kill %1
 
 以下开关供调试使用，发布路径只用 §3 的命令：
 
+- 只迭代布局或发布坐标：重跑 `bake_site.py` 后可用
+  `verify_site.py --geometry-only` 核对 manifest、rank 和最终几何，跳过未变的实体、事实、
+  文本与搜索投影。该模式不能代替正式发布的完整 `verify_site.py`。
 - 只重跑烘焙：`bake_site.py` + `verify_site.py` 复用现有 `data/parquet` 与
   `data/layout`，用于本地迭代烘焙逻辑。两者核对完整 Parquet generation 与布局 cache；
   任一来源、schema、文件或实现身份不一致即失败。

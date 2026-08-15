@@ -5,7 +5,8 @@
 字节,再做重复敏感、顺序无关的对账。任何不符以非零状态退出,
 阻断发布。只共享 scripts/site_release.py 的格式契约和
 scripts/world_scale.py 的确定性发布几何投影,不共享烘焙器的量化或
-字节装配逻辑。
+字节装配逻辑。--geometry-only 仅供布局迭代检查 manifest、几何和
+rank，不是正式发布门禁。
 """
 
 from __future__ import annotations
@@ -59,7 +60,7 @@ MAPPING_SNAPSHOT = ROOT / "data" / "mappings"
 failures: list[str] = []
 artifact_files: dict[str, list[Any]] = {}
 member_spans: dict[str, set[tuple[int, int]]] = defaultdict(set)
-MIN_NODE_CENTER_DISTANCE = 0.28
+MIN_NODE_CENTER_DISTANCE = 0.56
 VERIFY_BATCH_ROWS = 32_768
 SUBJECT_DATE_CODE_PATH = "subject-date-code.bin"
 SUBJECT_DATE_DICTIONARY_PATH = "subject-date-dictionary.json.gz"
@@ -442,6 +443,17 @@ def check(label: str, ok: bool, detail: str = "") -> None:
 
 def reconcile(label: str, expected: Any, actual: Any) -> None:
     check(label, expected == actual, f"expected {expected}, got {actual}")
+
+
+def finish_verification(started: float, passed_label: str) -> None:
+    elapsed = time.time() - started
+    if failures:
+        log(
+            f"FAILED: {len(failures)} 处不符 ({elapsed:,.0f}s): "
+            f"{failures[:10]}"
+        )
+        sys.exit(1)
+    log(f"{passed_label} passed in {elapsed:,.0f}s")
 
 
 def sha256_of(path: Path) -> str:
@@ -1064,11 +1076,11 @@ def build_expected_fact_store(
     )
 
 
-def find_position_overlap(
+def find_center_distance_violation(
     positions: np.ndarray,
     minimum_distance: float,
 ) -> tuple[int, int, float] | None:
-    """独立检查最终 float32 坐标，不复用烘焙器的格点逻辑。"""
+    """独立检查最终 float32 中心距，不复用格点分配逻辑。"""
 
     tree = cKDTree(positions)
     for start in range(0, len(positions), 100_000):
@@ -1273,7 +1285,10 @@ def expected_charmap() -> dict[str, str]:
 
 
 def verify_release(  # noqa: PLR0915
-    site_root: Path, input_identity: dict[str, Any]
+    site_root: Path,
+    input_identity: dict[str, Any],
+    *,
+    geometry_only: bool = False,
 ) -> None:
     global SITE, SITE_ROOT, artifact_files  # noqa: PLW0603
     SITE_ROOT = site_root.resolve()
@@ -1517,12 +1532,12 @@ def verify_release(  # noqa: PLR0915
         declared_distance,
     )
     violation = (
-        find_position_overlap(positions, MIN_NODE_CENTER_DISTANCE)
+        find_center_distance_violation(positions, MIN_NODE_CENTER_DISTANCE)
         if positions_finite
         else None
     )
     check(
-        "positions.bin 所有节点不重叠",
+        "positions.bin 节点中心距满足下限",
         positions_finite and violation is None,
         ""
         if violation is None
@@ -1569,6 +1584,10 @@ def verify_release(  # noqa: PLR0915
         )
         check("rank-by-key[key] = rank(全量)", ok_rank)
     del raw
+
+    if geometry_only:
+        finish_verification(t0, "verify_site: geometry checks")
+        return
 
     # ---- 词表 ----
     log("[3] 词表")
@@ -3329,14 +3348,7 @@ def verify_release(  # noqa: PLR0915
         f"codes {sorted(character_codes)}",
     )
 
-    elapsed = time.time() - t0
-    if failures:
-        log(
-            f"FAILED: {len(failures)} 处不符 ({elapsed:,.0f}s): "
-            f"{failures[:10]}"
-        )
-        sys.exit(1)
-    log(f"verify_site: all checks passed in {elapsed:,.0f}s")
+    finish_verification(t0, "verify_site: all checks")
 
 
 def main() -> None:
@@ -3346,6 +3358,11 @@ def main() -> None:
         type=Path,
         default=SITE_ROOT,
         help="staging site root (default: site)",
+    )
+    parser.add_argument(
+        "--geometry-only",
+        action="store_true",
+        help="verify manifest and geometry only; not a release gate",
     )
     args = parser.parse_args()
     site_root = args.site.resolve()
@@ -3358,7 +3375,11 @@ def main() -> None:
             layout_dir=LAYOUT_DIR,
             shape_digest=shape_digest(),
         )
-        verify_release(site_root, input_identity)
+        verify_release(
+            site_root,
+            input_identity,
+            geometry_only=args.geometry_only,
+        )
 
 
 if __name__ == "__main__":

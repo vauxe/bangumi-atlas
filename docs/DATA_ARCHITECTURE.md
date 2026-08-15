@@ -190,7 +190,7 @@ SiteRelease 能恢复类型化 Parquet 的字段语义，但不是原始快照�
 | `scripts/build_db.py` | 生成 Parquet，在临时路径 COPY 全量建库，完成后原子替换正式数据库 |
 | `scripts/verify_db.py` | 执行独立计数、全字段内容核验和查询冒烟测试 |
 | `scripts/layout.py` | 从 Parquet 生成 Canvas 3D 分层拓扑布局：最大分量形成 Leiden/UMAP 社区岛，小分量形成卫星岛，孤立节点形成外层球壳；UMAP 使用写入报告和 `shape_digest` 的 100-epoch 预算，所有随机算法播种，同一输入可复现 |
-| `scripts/bake_site.py` | 从 Parquet 和布局生成 SiteRelease 静态站点数据；先归一到 600 的名义世界尺度，再在最终 `float32` 坐标上全局消解节点重叠（中心距 `>= 0.28`）；消解后 bbox 可向外增长，不得再缩放 |
+| `scripts/bake_site.py` | 从 Parquet 和布局生成 SiteRelease 静态站点数据；先归一到 1200 的名义世界尺度，再在最终 `float32` 坐标上全局分离节点中心（中心距 `>= 0.56`）；分离后 bbox 可向外增长，不得再缩放 |
 | `scripts/verify_site.py` | 独立对账 SiteRelease 与 Parquet 的内容与门禁 |
 
 `build_db.py` 包含三个阶段：

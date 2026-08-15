@@ -53,7 +53,6 @@ from .site_contracts import (
 from .world_scale import (
     CANONICAL_WORLD_SPAN,
     MIN_NODE_CENTER_DISTANCE,
-    find_minimum_distance_violation,
     normalize_world_scale,
     separate_published_nodes,
 )
@@ -1549,22 +1548,15 @@ def bake_release(  # noqa: PLR0915
     coords_r = np.stack(
         [lay["x"][order], lay["y"][order], lay["z"][order]], axis=1
     )
-    # 全局去重叠会使用 O(n) 批量索引，先释放布局原始列和
+    # 全局中心分离会使用 O(n) 批量索引，先释放布局原始列和
     # 排序索引，避免与它们叠加在峰值内存中。
     del lay, order
     # 离线布局输出尺度任意;发布坐标归一到规范世界跨度,保证探索端
     # 聚焦层级、工作集字号和节点尺寸的绝对 zoom 语义
     coords_r, world_scale = normalize_world_scale(coords_r)
-    # 必须在最终世界尺度上解决物理重叠;若放在 layout.py 中,
-    # 此处的 600 跨度归一会再次缩小已经分开的中心距。
+    # 必须在最终世界尺度上分离节点中心;若放在 layout.py 中,
+    # 此处的规范跨度归一会再次缩小已经分开的中心距。
     coords_r, separation_report = separate_published_nodes(coords_r)
-    distance_violation = find_minimum_distance_violation(coords_r)
-    if distance_violation is not None:
-        bad_rank_a, bad_rank_b, bad_distance = distance_violation
-        sys.exit(
-            f"FAILED: 发布坐标 rank {bad_rank_a}/{bad_rank_b} 中心距 "
-            f"{bad_distance:.6f} < {MIN_NODE_CENTER_DISTANCE:g}"
-        )
     published_layout = {
         **layout_report,
         "minimum_node_center_distance": MIN_NODE_CENTER_DISTANCE,
@@ -1582,7 +1574,7 @@ def bake_release(  # noqa: PLR0915
         f"{CANONICAL_WORLD_SPAN:g}"
     )
     log(
-        f"全局物理去重叠: {separation_report.moved_nodes:,}/{n:,} "
+        f"全局中心分离: {separation_report.moved_nodes:,}/{n:,} "
         f"节点移动,最大位移 "
         f"{separation_report.max_displacement:.4f},"
         f"最小中心距 {MIN_NODE_CENTER_DISTANCE:g}"
@@ -1699,13 +1691,6 @@ def bake_release(  # noqa: PLR0915
         max_position_error = max(
             max_position_error,
             float(np.linalg.norm(delta, axis=1).max(initial=0.0)),
-        )
-    quantized_violation = find_minimum_distance_violation(decoded_positions)
-    if quantized_violation is not None:
-        bad_rank_a, bad_rank_b, bad_distance = quantized_violation
-        sys.exit(
-            f"FAILED: u16 坐标 rank {bad_rank_a}/{bad_rank_b} 中心距 "
-            f"{bad_distance:.6f} < {MIN_NODE_CENTER_DISTANCE:g}"
         )
     lo = [float(v) for v in decoded_positions.min(0)]
     hi = [float(v) for v in decoded_positions.max(0)]
