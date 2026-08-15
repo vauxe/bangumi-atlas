@@ -11,12 +11,12 @@ import numpy as np
 # 其语义依赖稳定的世界尺度;UMAP 等布局算法的输出尺度是任意的,
 # 发布前必须归一到规范跨度。
 CANONICAL_WORLD_SPAN = 1200.0
-MIN_NODE_CENTER_DISTANCE = 0.56
+MIN_NODE_CENTER_DISTANCE = 2.0
 
-# 发布点落在带小幅确定性扰动的三维网格上。网格间距比
-# 公开契约多 0.04，扰动后的理论下界仍比契约多 0.02。
-# 该余量与世界尺度同比扩大，最终 u16 解码坐标另行全量验证。
-_LATTICE_EXTRA_DISTANCE = 0.04
+# 发布点按直径 2 的虚拟节点碰撞；前端只借用中心，实际图形仍按
+# 当前缩放绘制。网格间距多出的 0.08 在确定性扰动后留下 0.04
+# 余量，可覆盖名义 1200 跨度下两个点的最坏 u16 量化收缩。
+_LATTICE_EXTRA_DISTANCE = 0.08
 _LATTICE_BITS = 21
 _LATTICE_BIAS = 1 << (_LATTICE_BITS - 1)
 _INITIAL_OFFSET_COUNT = 8192

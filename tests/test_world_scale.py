@@ -13,11 +13,11 @@ from scripts.world_scale import (
 
 
 class WorldScaleTests(unittest.TestCase):
-    def test_default_world_scale_reserves_more_space_between_nodes(
+    def test_default_world_scale_uses_virtual_large_nodes_for_separation(
         self,
     ) -> None:
         self.assertEqual(CANONICAL_WORLD_SPAN, 1200.0)
-        self.assertEqual(MIN_NODE_CENTER_DISTANCE, 0.56)
+        self.assertEqual(MIN_NODE_CENTER_DISTANCE, 2.0)
 
     def test_normalizes_the_largest_axis_span_to_the_canonical_span(
         self,
