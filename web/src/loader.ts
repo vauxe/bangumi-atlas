@@ -46,7 +46,6 @@ const EPISODE_SUBJECT_SENTINEL = 0xffffffff;
 const NAME_BLOCK_SIZE = 2_048;
 const MANIFEST_BYTE_CAP = 1_000_000;
 const SMALL_FILE_CAP = 16_000_000;
-const EDGE_FILE_CAP = 256_000_000;
 const RANK_INDEX_CAP = RANK_SENTINEL * 3 * 3;
 const RANK_LOOKUP_BLOCK_IDS = 4_096;
 const RANK_LOOKUP_MAX_BLOCKS = 16;
@@ -247,15 +246,6 @@ const episodeSubjects = new WeightedLru<number, number | null>(
   EPISODE_SUBJECT_CACHE_BUDGET,
 );
 const episodeSubjectLoads = new SharedAbortableMemo<number, number | null>();
-
-export function cacheUsage(): Record<CacheFamily, number> {
-  return {
-    names: caches.names.usedWeight,
-    structure: caches.structure.usedWeight,
-    search: caches.search.usedWeight,
-    text: caches.text.usedWeight,
-  };
-}
 
 export async function loadManifest(): Promise<Manifest> {
   const res = await fetchSite(`${BASE}/manifest.json`, { cache: "no-cache" });
@@ -802,17 +792,6 @@ export function openGeometry(manifest: Manifest): GeometryStream {
     ]).then(() => update());
   };
   return { geo, start };
-}
-
-export async function loadEdges(): Promise<Uint32Array> {
-  const buf = await loadPublishedBytes(
-    "edges.bin",
-    { priority: "low" } as RequestInit,
-    EDGE_FILE_CAP,
-  );
-  if (buf.byteLength % 8 !== 0)
-    throw new Error("edges.bin: byte length is not a u32 endpoint-pair array");
-  return new Uint32Array(buf.buffer);
 }
 
 /** 精确 Range 读取;总长度与 manifest 不符判定发布已被替换。

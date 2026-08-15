@@ -9,7 +9,6 @@ import {
   cruiseTarget,
   wheelDeltaToZoom,
   zoomTowardAnchor,
-  zoomWithoutRetarget,
 } from "../src/camera";
 import type { Bounds3D } from "../src/types";
 
@@ -327,20 +326,4 @@ test("cruise keeps advancing: toward the anchor, through it, then straight", () 
   assert.deepEqual(t, [0, 0, 9]);
   // 无锚点:沿视线直进
   assert.deepEqual(cruiseTarget([1, 2, 3], null, forward, 2), [1, 2, 5]);
-});
-
-test("blank-space wheel zoom preserves the current focus", () => {
-  const state = {
-    target: [12, -4, 8] as [number, number, number],
-    zoom: 3,
-    rotationX: 25,
-    rotationOrbit: 40,
-  };
-
-  const next = zoomWithoutRetarget(state, 100);
-  assert.deepEqual(next.target, state.target);
-  assert.notEqual(next.target, state.target);
-  assert.equal(next.rotationX, state.rotationX);
-  assert.equal(next.rotationOrbit, state.rotationOrbit);
-  assert.ok(next.zoom > state.zoom);
 });

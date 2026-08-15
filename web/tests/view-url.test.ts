@@ -31,3 +31,23 @@ test("parses view state without interpreting query documents", () => {
     query: "not-a-query",
   });
 });
+
+test("ignores retired view and filter parameters", () => {
+  assert.deepEqual(
+    decodeViewUrl("#n=16777258&r=123&q=path&f=33554439&fr=9"),
+    {
+      view: null,
+      key: 0x0100_002a,
+      rank: 123,
+      ortho: false,
+      query: null,
+    },
+  );
+  assert.deepEqual(decodeViewUrl("#y=2000-2030&m=1&t=2&s=85"), {
+    view: null,
+    key: null,
+    rank: null,
+    ortho: false,
+    query: null,
+  });
+});

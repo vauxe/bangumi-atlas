@@ -161,19 +161,6 @@ export class ReversibleCruise {
   }
 }
 
-/** deck 的滚轮曲线，但不把鼠标所在的空平面误当成新的关注点。 */
-export function zoomWithoutRetarget<T extends OrbitState>(
-  state: T,
-  delta: number,
-  speed = 0.01,
-): T {
-  return {
-    ...state,
-    target: [...state.target],
-    zoom: state.zoom + wheelDeltaToZoom(delta, speed),
-  };
-}
-
 /** 放大同时把枢轴向锚点三维收敛。缩放后 2^zoom·(anchor−target)
  * 不变，锚点被精确钉在原屏幕像素上；枢轴深度随之逼近真实内容，
  * 根治"枢轴平面之后的画面收敛成静止图"的深缩放停滞。 */

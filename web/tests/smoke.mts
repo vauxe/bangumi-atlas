@@ -52,7 +52,7 @@ console.log(
   `manifest ok: ${manifest.profile}, ${manifest.n_nodes.toLocaleString()} nodes,`,
   `${(manifest.total_bytes / 1e6).toFixed(0)}MB data`,
 );
-const names = openNames(manifest);
+openNames(manifest);
 const searchAliases = openSearchAliases(manifest);
 const data = new Data(manifest);
 await ensureRankIndex();

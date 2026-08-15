@@ -1,6 +1,8 @@
 import { canonicalJson } from "./canonical";
 import { QUERY_CONTRACT, type Owner, type QueryFactKind } from "./contract";
-import type { Expression, QueryDocument, QueryOperator } from "./document";
+import { operatorInputs } from "./document";
+import type { Expression, QueryDocument } from "./document";
+import { sha256Hex } from "../data-integrity";
 
 export interface CoverageSet {
   schema: "atlas-coverage-v1";
@@ -10,27 +12,6 @@ export interface CoverageSet {
 
 type BindingType = `entity:${Owner}` | `fact:${QueryFactKind}` | "value" | "path";
 type BindingSchema = Record<string, BindingType>;
-
-function inputs(operator: QueryOperator): string[] {
-  if (
-    operator.kind === "union" ||
-    operator.kind === "intersect" ||
-    operator.kind === "except"
-  )
-    return operator.branches.map((branch) => branch.input);
-  if (operator.kind === "exists" || operator.kind === "notExists")
-    return [operator.input, operator.match];
-  if (
-    operator.kind === "filter" ||
-    operator.kind === "project" ||
-    operator.kind === "matchFact" ||
-    operator.kind === "followRef" ||
-    operator.kind === "aggregate" ||
-    operator.kind === "path"
-  )
-    return [operator.input];
-  return [];
-}
 
 function addExpressionAtoms(
   expression: Expression,
@@ -67,9 +48,7 @@ function addExpressionAtoms(
 }
 
 async function digestAtoms(atoms: string[]): Promise<string> {
-  const bytes = new TextEncoder().encode(canonicalJson(atoms));
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-  return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return sha256Hex(canonicalJson(atoms));
 }
 
 export async function coverageFor(document: QueryDocument): Promise<CoverageSet> {
@@ -83,7 +62,7 @@ export async function coverageFor(document: QueryDocument): Promise<CoverageSet>
     const operator = document.operators[id];
     if (!operator) throw new TypeError(`query operator ${id} is missing`);
     visiting.add(id);
-    for (const input of inputs(operator)) schemaFor(input);
+    for (const input of operatorInputs(operator)) schemaFor(input);
     let schema: BindingSchema;
     switch (operator.kind) {
       case "scan":

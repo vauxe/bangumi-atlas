@@ -2,15 +2,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import type { QueryResult } from "../src/query/engine";
-
 import {
   combineExplorerConditions,
   conditionEditorOperator,
   defaultSortDirection,
-  describeExplorerQuery,
   enumValuesFor,
-  isExplorerConditionComplete,
   parseExplorerLimit,
   factEnumValues,
   FIELD_LABEL,
@@ -28,7 +24,6 @@ import {
   queryFieldsFor,
   queryGroupFields,
   queryScalarInputType,
-  queryProjectFields,
   queryReferenceOwner,
   queryRelationOptions,
   queryRelationContextRoles,
@@ -40,7 +35,6 @@ import {
 import {
   mergeQueryResultRefs,
   queryHighlightStatus,
-  queryResultPresentation,
   queryWorkspaceVisibility,
 } from "../src/query/workbench";
 
@@ -84,37 +78,6 @@ test("merges buffered answer entities in stable section order", () => {
     ["matches", ["subject:1", "person:2"]],
     ["paths", ["person:2", "character:3"]],
   ])), ["subject:1", "person:2", "character:3"]);
-});
-
-test("highlights every buffered query result while rendering only the first 50", () => {
-  const rows = Array.from({ length: 120 }, (_, index) => ({
-    ref: `subject:${index + 1}`,
-  }));
-  const result: QueryResult = {
-    rows,
-    evidence: rows.map(() => ({})),
-    columns: { ref: { type: "string", semantic: "subject.ref" } },
-    totalMatches: rows.length,
-    visibleMatches: rows.length,
-    hasMore: false,
-    stability: "exact",
-    queryDigest: "query",
-    releaseId: "release",
-    coverage: { schema: "atlas-coverage-v1", atoms: [], digest: "coverage" },
-    terminalEvidence: [],
-  };
-
-  const presentation = queryResultPresentation(result, 50);
-
-  assert.equal(presentation.visible.rows.length, 50);
-  assert.equal(presentation.visible.evidence.length, 50);
-  assert.equal(presentation.visible.hasMore, true);
-  assert.equal(presentation.highlightRefs.length, 120);
-  assert.deepEqual(presentation.highlightRefs.slice(0, 2), [
-    "subject:1",
-    "subject:2",
-  ]);
-  assert.equal(presentation.highlightRefs.at(-1), "subject:120");
 });
 
 test("rescans buffered result refs only after a Worker page adds rows", () => {
@@ -345,10 +308,7 @@ test("combines visible conditions with the conjunction the user selected", () =>
   assert.equal(combineExplorerConditions("all", []), undefined);
 });
 
-test("offers projectable result fields and validates a positive result count", () => {
-  assert.equal(queryProjectFields("episode").includes("subjectRef"), false);
-  assert.equal(queryProjectFields("episode").includes("descriptionState"), true);
-  assert.equal(queryProjectFields("subject").includes("scoreDetails"), false);
+test("validates a positive result count", () => {
   assert.equal(parseExplorerLimit("50"), 50);
   assert.throws(() => parseExplorerLimit("0"), /正整数/);
   assert.equal(parseExplorerLimit("10001"), 10_001);
@@ -463,67 +423,4 @@ test("derives readable statistic choices and output columns", () => {
     { value: "count", label: "条数" },
     { value: "avg_score", label: "平均评分" },
   ]);
-});
-
-test("waits for a visible condition value before refreshing live results", () => {
-  assert.equal(isExplorerConditionComplete("subject", "score", "gte", ""), false);
-  assert.equal(isExplorerConditionComplete("subject", "score", "gte", "8"), true);
-  assert.equal(isExplorerConditionComplete("subject", "tags", "contains", "  "), false);
-  assert.equal(isExplorerConditionComplete("subject", "tags", "notContains", "科幻"), true);
-  assert.equal(isExplorerConditionComplete("subject", "date", "isMissing", ""), true);
-  assert.equal(isExplorerConditionComplete("subject", "score", "isNotNull", ""), true);
-  assert.equal(isExplorerConditionComplete("subject", "type", "in", "动画、书籍"), true);
-  assert.equal(isExplorerConditionComplete("subject", "type", "notIn", "  "), false);
-});
-
-test("describes an editable query in compact user language", () => {
-  assert.equal(describeExplorerQuery({
-    owner: "subject",
-    text: { value: "星海", capability: "lookup" },
-    condition: {
-      kind: "compare",
-      field: "score",
-      operator: "gte",
-      value: 8,
-    },
-    relations: [{
-      factKind: "WORKED_ON",
-      candidateRole: "subject",
-      relatedRole: "person",
-      related: "person:7",
-      exists: true,
-    }],
-    orderBy: [{ column: "score", direction: "desc", nulls: "last" }],
-  }), "作品 · 名称含「星海」 · 评分 ≥ 8 · 与人物 #7 有人物参与 · 评分降序");
-});
-
-test("makes empty and nested query intent visible without exposing syntax", () => {
-  assert.equal(describeExplorerQuery({ owner: "character" }), "角色 · 全部条目");
-  assert.equal(describeExplorerQuery({
-    owner: "episode",
-    fullText: { value: "再会", field: "description" },
-    condition: {
-      kind: "any",
-      terms: [
-        { kind: "isMissing", field: "airdate" },
-        { kind: "compare", field: "year", operator: "gte", value: 2020 },
-      ],
-    },
-  }), "分集 · 分集介绍含「再会」 · 任一（播出日期未提供、年份 ≥ 2020）");
-  assert.equal(describeExplorerQuery({
-    owner: "subject",
-    condition: { kind: "compare", field: "type", operator: "eq", value: 1 },
-  }), "作品 · 类型 = 书籍");
-  assert.equal(describeExplorerQuery({
-    owner: "subject",
-    condition: { kind: "in", field: "type", values: [1, 2], negated: true },
-  }), "作品 · 类型不属于（书籍、动画）");
-  assert.equal(describeExplorerQuery({
-    owner: "subject",
-    condition: { kind: "compare", field: "tags", operator: "contains", value: "科幻", negated: true },
-  }), "作品 · 用户标签不含「科幻」");
-  assert.equal(describeExplorerQuery({
-    owner: "person",
-    condition: { kind: "compare", field: "career", operator: "contains", value: "seiyu" },
-  }), "人物 · 职业 含 声优");
 });

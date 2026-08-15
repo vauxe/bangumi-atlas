@@ -132,7 +132,6 @@ const removableToken: QueryToken = {
 
 const queryStyles = readFileSync("src/query/workbench.css", "utf8");
 const queryBarSource = readFileSync("src/query/query-bar.ts", "utf8");
-const mainSource = readFileSync("src/main.ts", "utf8");
 const queryRuntimeSource = readFileSync("src/query/runtime.ts", "utf8");
 
 const relationMappings: Mappings = {

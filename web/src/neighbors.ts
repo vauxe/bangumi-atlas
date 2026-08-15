@@ -110,19 +110,6 @@ export function factLabel(
   }
 }
 
-/** 定向事实中 self 的方向:1 = self 是源;-1 = self 是目标;
- * 参与型事实(WORKED_ON 等)视为无方向,返回 1。 */
-export function factDirection(fact: Fact, selfKey: number): 1 | -1 {
-  switch (fact.kind) {
-    case "RELATES_TO":
-    case "PERSON_REL":
-    case "CHARACTER_REL":
-      return fact.target === selfKey && fact.source !== selfKey ? -1 : 1;
-    default:
-      return 1;
-  }
-}
-
 export interface WorkingSet {
   ranks: number[];
   labels: string[];
@@ -233,31 +220,6 @@ export function relationNeighbors(
   }
   rel.sort(([a], [b]) => a - b);
   const selected = cap === undefined ? rel : rel.slice(0, cap);
-  return {
-    ranks: selected.map(([rank]) => rank),
-    labels: selected.map(([, label]) => label),
-  };
-}
-
-/** 全局最热的去重邻居;首个出现的关系标签作为主边标签。 */
-export function uniqueNeighbors(
-  facts: Fact[],
-  selfKey: number,
-  mappings: Mappings,
-  rankOf: (key: number) => number | null,
-  cap = 50,
-): WorkingSet {
-  const primary = new Map<number, string>();
-  for (const fact of facts)
-    for (const other of factOthers(fact, selfKey)) {
-      if (other === selfKey) continue;
-      const rank = rankOf(other);
-      if (rank !== null && !primary.has(rank))
-        primary.set(rank, factLabel(fact, selfKey, mappings));
-    }
-  const selected = [...primary]
-    .sort(([a], [b]) => a - b)
-    .slice(0, cap);
   return {
     ranks: selected.map(([rank]) => rank),
     labels: selected.map(([, label]) => label),

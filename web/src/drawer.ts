@@ -15,7 +15,7 @@ import type {
   ParsedInfoboxField,
   RelationshipSection,
 } from "./entity-presentation";
-import { decodeDisplayText, esc, html, raw } from "./html";
+import { decodeDisplayText, html, raw } from "./html";
 import type {
   RelationRankSource,
   ResolvedRelationRanks,

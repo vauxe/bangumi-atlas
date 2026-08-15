@@ -188,6 +188,27 @@ export type QueryOperator =
   | SetOperator
   | ExistsOperator;
 
+export function operatorInputs(operator: QueryOperator): string[] {
+  switch (operator.kind) {
+    case "union":
+    case "intersect":
+    case "except":
+      return operator.branches.map((branch) => branch.input);
+    case "exists":
+    case "notExists":
+      return [operator.input, operator.match];
+    case "filter":
+    case "project":
+    case "matchFact":
+    case "followRef":
+    case "aggregate":
+    case "path":
+      return [operator.input];
+    default:
+      return [];
+  }
+}
+
 export interface QueryDocument {
   schema: "atlas-query-document-v1";
   root: string;

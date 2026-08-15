@@ -4,7 +4,9 @@ import type {
   Mappings,
   Page,
   StructuralEntity,
+  StructuralOwner,
 } from "../types";
+import { ENTITY_KIND_BY_OWNER, ENTITY_OWNER_BY_KIND } from "../types";
 import type { ProjectedEntity, TextSearchRow } from "../data";
 import { decodeDisplayText } from "../html";
 import type { TextSearchMember } from "../loader";
@@ -19,7 +21,6 @@ import type {
 } from "./engine";
 import type { FullTextField, LookupField } from "./document";
 
-type StructuralOwner = Exclude<Owner, "episode">;
 const QUERY_SCAN_BATCH_SIZE = 4096;
 
 export interface SiteQueryReader {
@@ -120,23 +121,17 @@ export interface SiteQuerySearch {
   }>;
 }
 
-const KIND: Record<StructuralOwner, number> = {
-  subject: 1,
-  person: 2,
-  character: 3,
-};
-
 function keyFromRef(ref: `${Owner}:${number}`): number {
   const { owner, archiveId } = parseEntityRef(ref);
   if (owner === "episode")
     throw new TypeError("Episode does not use a structural EntityKey");
   if (archiveId > 0xffffff)
     throw new TypeError(`${ref} exceeds the current EntityKey width`);
-  return (KIND[owner] << 24) | archiveId;
+  return (ENTITY_KIND_BY_OWNER[owner] << 24) | archiveId;
 }
 
 function refFromKey(key: number): `${StructuralOwner}:${number}` {
-  const owner = (["", "subject", "person", "character"] as const)[key >>> 24];
+  const owner = ENTITY_OWNER_BY_KIND[key >>> 24];
   if (!owner) throw new TypeError(`invalid SiteRelease EntityKey ${key}`);
   return `${owner}:${key & 0xffffff}`;
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { UrlState } from "../src/url";
+import type { UrlState } from "../src/view-url";
 import {
   locateStableTarget,
   resolveUrlSelection,

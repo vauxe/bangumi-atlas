@@ -1,4 +1,13 @@
-import type { EpisodeRecord, StructuralEntity } from "../types";
+import type {
+  EpisodeRecord,
+  Manifest,
+  NameRow,
+  SearchAliases,
+  SearchEntry,
+  StructuralEntity,
+  StructuralOwner,
+} from "../types";
+import { ENTITY_KIND_BY_OWNER } from "../types";
 import type { ProjectedEntity, TextSearchRow } from "../data";
 import { WeightedLru } from "../cache";
 import { decodeDisplayText } from "../html";
@@ -21,22 +30,9 @@ import {
   matchingAliasEntry,
   type SearchEntryPage,
 } from "../search";
-import type {
-  EntityKind,
-  Manifest,
-  NameRow,
-  SearchAliases,
-  SearchEntry,
-} from "../types";
 import { QUERY_CONTRACT, type Owner, type QueryFactKind } from "./contract";
 import type { FullTextField, LookupField } from "./document";
 import type { SiteQueryReader, SiteQuerySearch } from "./site-source";
-
-const OWNER_KIND: Record<Exclude<Owner, "episode">, EntityKind> = {
-  subject: 1,
-  person: 2,
-  character: 3,
-};
 
 const TEXT_MEMBER_READ_CONCURRENCY = 6;
 const SEARCH_ENTITY_READ_CONCURRENCY = 6;
@@ -154,7 +150,7 @@ function textDescriptorMatches(
     return owner === "episode" && descriptor[0] === "episode-description";
   return owner !== "episode" &&
     descriptor[0] === "entity-summary" &&
-    descriptor[1] === OWNER_KIND[owner];
+    descriptor[1] === ENTITY_KIND_BY_OWNER[owner];
 }
 
 async function* resolveEpisodeIdentityCandidates(
@@ -288,7 +284,7 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
     readonly EpisodeIdentityCandidate[]
   >(EPISODE_IDENTITY_CACHE_BUDGET);
   private readonly structuralPrefetchThreshold: Record<
-    Exclude<Owner, "episode">,
+    StructuralOwner,
     number
   >;
 
@@ -303,7 +299,7 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
     );
     const blockSize = manifest.limits?.entity_block_ids;
     const counts = manifest.counts?.entities;
-    const threshold = (owner: Exclude<Owner, "episode">): number =>
+    const threshold = (owner: StructuralOwner): number =>
       Number.isSafeInteger(blockSize) && (blockSize ?? 0) > 0 &&
           Number.isSafeInteger(counts?.[owner])
         ? Math.max(1, Math.ceil((counts?.[owner] ?? 0) / (blockSize as number)))
@@ -330,7 +326,7 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
 
   private async structuralPage(
     query: string,
-    owner: Exclude<Owner, "episode">,
+    owner: StructuralOwner,
     cursor: number,
     signal: AbortSignal,
     acceptRank: (rank: number) => boolean,
@@ -433,7 +429,7 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
 
   private async *lookupRanks(
     query: string,
-    owner: Exclude<Owner, "episode">,
+    owner: StructuralOwner,
     allowedFields: ReadonlySet<LookupField>,
     entityFields: readonly string[],
     signal: AbortSignal,
@@ -443,7 +439,7 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
     text: string;
     utf8Range: [number, number];
   }> {
-    const allowedKind = OWNER_KIND[owner];
+    const allowedKind = ENTITY_KIND_BY_OWNER[owner];
     const identityOnly = Boolean(this.dependencies.nameRows) &&
       entityFields.every((field) =>
         field === "ref" ||
@@ -763,7 +759,7 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
       );
       return;
     }
-    const allowedKind = OWNER_KIND[owner];
+    const allowedKind = ENTITY_KIND_BY_OWNER[owner];
     const projectedFields = [...new Set([
       ...entityFields,
       "name",
@@ -950,12 +946,12 @@ export class SiteQuerySearchIndex implements SiteQuerySearch {
                 ? this.reader.episode?.(row.id, signal)
                 : this.reader.projectEntity
                   ? this.reader.projectEntity(
-                      (OWNER_KIND[row.owner] << 24) | row.id,
+                      (ENTITY_KIND_BY_OWNER[row.owner] << 24) | row.id,
                       entityFields,
                       signal,
                     )
                   : this.reader.entity(
-                      (OWNER_KIND[row.owner] << 24) | row.id,
+                      (ENTITY_KIND_BY_OWNER[row.owner] << 24) | row.id,
                       signal,
                     )
             ));

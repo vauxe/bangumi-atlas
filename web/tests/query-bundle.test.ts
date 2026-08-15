@@ -3,9 +3,12 @@ import { test } from "node:test";
 
 import {
   normalizeBundle,
-  queryBundleDigest,
   type QueryBundle,
 } from "../src/query/bundle";
+import {
+  decodeBundle,
+  encodeShareableBundle,
+} from "../src/query/bundle-url";
 import { QUERY_SECURITY_PROFILE } from "../src/query/security";
 
 test("bounds the number of independently executed bundle sections", () => {
@@ -35,7 +38,7 @@ test("bounds the number of independently executed bundle sections", () => {
   assert.throws(() => normalizeBundle(bundle), /too many sections/);
 });
 
-test("keeps typed parameter values with the section they execute", async () => {
+test("keeps typed parameter values with the section they execute", () => {
   const bundle: QueryBundle = {
     schema: "atlas-query-bundle-v1",
     release: { policy: "latest" },
@@ -85,8 +88,37 @@ test("keeps typed parameter values with the section they execute", async () => {
 
   const changed = structuredClone(bundle);
   changed.sections.results!.parameterValues!.minimum = 9;
-  assert.notEqual(
-    await queryBundleDigest(bundle),
-    await queryBundleDigest(changed),
-  );
+  assert.notDeepEqual(normalizeBundle(changed), normalized);
+
+  const encoded = encodeShareableBundle(bundle);
+  assert.ok(encoded);
+  assert.deepEqual(decodeBundle(encoded), normalized);
+});
+
+test("declines an oversized share URL without rejecting the local query", () => {
+  const bundle: QueryBundle = {
+    schema: "atlas-query-bundle-v1",
+    release: { policy: "latest" },
+    sections: {
+      results: {
+        query: {
+          schema: "atlas-query-document-v1",
+          root: "values",
+          parameters: {},
+          operators: {
+            values: {
+              kind: "values",
+              columns: ["value"],
+              rows: Array.from({ length: 1_000 }, (_, index) => [
+                `本地查询参数 ${index.toString().padStart(4, "0")} ${"内容".repeat(20)}`,
+              ]),
+            },
+          },
+        },
+        answer: { shape: "table", title: "结果" },
+      },
+    },
+  };
+
+  assert.equal(encodeShareableBundle(bundle), null);
 });

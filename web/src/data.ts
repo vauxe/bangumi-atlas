@@ -16,7 +16,11 @@ import type {
   StructuralEntity,
   TagVocabularyField,
 } from "./types";
-import { FACT_TAGS } from "./types";
+import {
+  ENTITY_KIND_BY_OWNER,
+  ENTITY_OWNER_BY_KIND,
+  FACT_TAGS,
+} from "./types";
 import { AsyncMemo } from "./async-memo";
 import {
   anchorForFact,
@@ -45,6 +49,11 @@ const PROJECTED_ENTITY_BATCH_SIZE = 4096;
 interface EntitiesIdx {
   width: number;
   k: Record<string, Loc4[]>;
+}
+
+interface EntityBlock {
+  i: number[];
+  r: unknown[][];
 }
 
 interface EpisodesIdx {
@@ -426,6 +435,22 @@ export class Data {
     return this.mappingsPromise;
   }
 
+  private async entityBlock(
+    range: Loc4,
+    signal?: AbortSignal,
+  ): Promise<EntityBlock> {
+    const block = await member<EntityBlock>(
+      "structure",
+      "entities.pack",
+      range[2],
+      range[3],
+      signal,
+    );
+    if (block.i.length !== block.r.length)
+      throw new Error("entities member ids and rows have different lengths");
+    return block;
+  }
+
   private vocabulary(family: VocabFamily): Promise<string[]> {
     return this.vocabFamilies.get(family, async () => {
       const idx = await loadGzJson<VocabIdx>("vocab.idx");
@@ -486,25 +511,34 @@ export class Data {
     return selected;
   }
 
+  private async selectedVocabularies(
+    ids: EntityVocabularyIds,
+    signal?: AbortSignal,
+  ): Promise<EntityVocab> {
+    const load = (family: VocabFamily): Promise<VocabularyValues> => {
+      const selected = ids[family];
+      return selected
+        ? this.selectedVocabulary(family, selected, signal)
+        : Promise.resolve(EMPTY_VOCABULARY);
+    };
+    const [career, metaTags, tags] = await Promise.all([
+      load("career"),
+      load("metaTags"),
+      load("tags"),
+    ]);
+    return { career, metaTags, tags };
+  }
+
   private async selectedEntityVocab(
     kind: number,
     tuple: unknown[],
     requested?: ReadonlySet<string>,
     signal?: AbortSignal,
   ): Promise<EntityVocab> {
-    const ids = entityVocabularyIds(kind, tuple, requested);
-    const [career, metaTags, tags] = await Promise.all([
-      ids.career
-        ? this.selectedVocabulary("career", ids.career, signal)
-        : Promise.resolve(EMPTY_VOCABULARY),
-      ids.metaTags
-        ? this.selectedVocabulary("metaTags", ids.metaTags, signal)
-        : Promise.resolve(EMPTY_VOCABULARY),
-      ids.tags
-        ? this.selectedVocabulary("tags", ids.tags, signal)
-        : Promise.resolve(EMPTY_VOCABULARY),
-    ]);
-    return { career, metaTags, tags };
+    return this.selectedVocabularies(
+      entityVocabularyIds(kind, tuple, requested),
+      signal,
+    );
   }
 
   private async selectedRowsVocab(
@@ -513,19 +547,10 @@ export class Data {
     requested?: ReadonlySet<string>,
     signal?: AbortSignal,
   ): Promise<EntityVocab> {
-    const ids = entityVocabularyIdsForRows(kind, tuples, requested);
-    const [career, metaTags, tags] = await Promise.all([
-      ids.career
-        ? this.selectedVocabulary("career", ids.career, signal)
-        : Promise.resolve(EMPTY_VOCABULARY),
-      ids.metaTags
-        ? this.selectedVocabulary("metaTags", ids.metaTags, signal)
-        : Promise.resolve(EMPTY_VOCABULARY),
-      ids.tags
-        ? this.selectedVocabulary("tags", ids.tags, signal)
-        : Promise.resolve(EMPTY_VOCABULARY),
-    ]);
-    return { career, metaTags, tags };
+    return this.selectedVocabularies(
+      entityVocabularyIdsForRows(kind, tuples, requested),
+      signal,
+    );
   }
 
   /** Broad scans eventually visit the whole owner domain, so they retain the
@@ -746,16 +771,10 @@ export class Data {
     const idx = await loadGzJson<EntitiesIdx>("entities.idx");
     const row = findRange(idx.k[String(kind)] ?? [], id);
     if (!row) return null;
-    const m = await member<{ i: number[]; r: unknown[][] }>(
-      "structure",
-      "entities.pack",
-      row[2],
-      row[3],
-      signal,
-    );
-    const pos = m.i.indexOf(id);
+    const block = await this.entityBlock(row, signal);
+    const pos = block.i.indexOf(id);
     if (pos < 0) return null;
-    const tup = m.r[pos];
+    const tup = block.r[pos];
     if (!tup) return null;
     const vocab = await this.selectedEntityVocab(kind, tup, undefined, signal);
     return this.decodeEntity(kind, id, tup, vocab);
@@ -790,7 +809,7 @@ export class Data {
       if (requested.has("nameCn") && kind === 1)
         fields.nameCn = name[1] ?? "";
       return {
-        kind: (["", "subject", "person", "character"] as const)[kind],
+        kind: ENTITY_OWNER_BY_KIND[kind],
         key,
         fields,
       };
@@ -798,13 +817,7 @@ export class Data {
     const idx = await loadGzJson<EntitiesIdx>("entities.idx");
     const row = findRange(idx.k[String(kind)] ?? [], id);
     if (!row) return null;
-    const block = await member<{ i: number[]; r: unknown[][] }>(
-      "structure",
-      "entities.pack",
-      row[2],
-      row[3],
-      signal,
-    );
+    const block = await this.entityBlock(row, signal);
     const pos = block.i.indexOf(id);
     if (pos < 0) return null;
     const tuple = block.r[pos];
@@ -824,7 +837,7 @@ export class Data {
     signal?: AbortSignal,
   ): Promise<void> {
     signal?.throwIfAborted();
-    const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
+    const kind = ENTITY_KIND_BY_OWNER[owner];
     const idx = await loadGzJson<EntitiesIdx>("entities.idx");
     const span = contiguousPackSpan(idx.k[String(kind)] ?? []);
     if (span) await prefetchPackRange("entities.pack", ...span, signal);
@@ -836,7 +849,7 @@ export class Data {
     signal?: AbortSignal,
     access: "stream" | "whole" = "whole",
   ): AsyncIterable<StructuralEntity> {
-    const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
+    const kind = ENTITY_KIND_BY_OWNER[owner];
     const [idx, vocab] = await Promise.all([
       loadGzJson<EntitiesIdx>("entities.idx"),
       this.fullEntityVocab(kind),
@@ -846,15 +859,7 @@ export class Data {
     if (span) await prefetchPackRange("entities.pack", ...span, signal);
     for (const row of ranges) {
       signal?.throwIfAborted();
-      const block = await member<{ i: number[]; r: unknown[][] }>(
-        "structure",
-        "entities.pack",
-        row[2],
-        row[3],
-        signal,
-      );
-      if (block.i.length !== block.r.length)
-        throw new Error("entities member ids and rows have different lengths");
+      const block = await this.entityBlock(row, signal);
       for (let index = 0; index < block.i.length; index++) {
         signal?.throwIfAborted();
         const id = block.i[index];
@@ -882,7 +887,7 @@ export class Data {
       )) yield* batch;
       return;
     }
-    const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
+    const kind = ENTITY_KIND_BY_OWNER[owner];
     const requested = new Set(fieldNames);
     const [idx, vocab] = await Promise.all([
       loadGzJson<EntitiesIdx>("entities.idx"),
@@ -890,15 +895,7 @@ export class Data {
     ]);
     for (const row of idx.k[String(kind)] ?? []) {
       signal?.throwIfAborted();
-      const block = await member<{ i: number[]; r: unknown[][] }>(
-        "structure",
-        "entities.pack",
-        row[2],
-        row[3],
-        signal,
-      );
-      if (block.i.length !== block.r.length)
-        throw new Error("entities member ids and rows have different lengths");
+      const block = await this.entityBlock(row, signal);
       for (let index = 0; index < block.i.length; index++) {
         signal?.throwIfAborted();
         const id = block.i[index];
@@ -933,7 +930,7 @@ export class Data {
       );
       return;
     }
-    const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
+    const kind = ENTITY_KIND_BY_OWNER[owner];
     const requested = new Set(fieldNames);
     const [idx, vocab] = await Promise.all([
       loadGzJson<EntitiesIdx>("entities.idx"),
@@ -944,15 +941,7 @@ export class Data {
     if (span) await prefetchPackRange("entities.pack", ...span, signal);
     for (const row of ranges) {
       signal?.throwIfAborted();
-      const block = await member<{ i: number[]; r: unknown[][] }>(
-        "structure",
-        "entities.pack",
-        row[2],
-        row[3],
-        signal,
-      );
-      if (block.i.length !== block.r.length)
-        throw new Error("entities member ids and rows have different lengths");
+      const block = await this.entityBlock(row, signal);
       let batch: ProjectedEntity[] = [];
       for (let index = 0; index < block.i.length; index++) {
         signal?.throwIfAborted();
@@ -985,7 +974,7 @@ export class Data {
   ): AsyncIterable<ProjectedEntity> {
     signal?.throwIfAborted();
     if (!keys.length) return;
-    const kind = owner === "subject" ? 1 : owner === "person" ? 2 : 3;
+    const kind = ENTITY_KIND_BY_OWNER[owner];
     const requested = new Set(fieldNames);
     if (
       this.queryNames?.read &&
@@ -1056,13 +1045,7 @@ export class Data {
           .slice(start, start + ENTITY_CANDIDATE_READ_CONCURRENCY)
           .map(async (range) => ({
             range,
-            block: await member<{ i: number[]; r: unknown[][] }>(
-              "structure",
-              "entities.pack",
-              range[2],
-              range[3],
-              signal,
-            ),
+            block: await this.entityBlock(range, signal),
           })),
       );
       signal?.throwIfAborted();
@@ -1083,8 +1066,6 @@ export class Data {
       for (const { range, block } of loaded) {
         const ids = rangeCandidates.get(range);
         if (!ids) throw new Error("candidate range lost its requested ids");
-        if (block.i.length !== block.r.length)
-          throw new Error("entities member ids and rows have different lengths");
         for (let index = 0; index < block.i.length; index++) {
           const id = block.i[index];
           const tuple = block.r[index];
@@ -1424,7 +1405,7 @@ export class Data {
         field: "summary" as const,
         text: String(block.t[index] ?? ""),
       }));
-    const owner = (["", "subject", "person", "character"] as const)[entityKind];
+    const owner = ENTITY_OWNER_BY_KIND[entityKind];
     if (!owner) throw new Error(`${family}: invalid entity kind ${entityKind}`);
     return block.i.map((id, index) => ({
       owner,

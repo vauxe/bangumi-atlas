@@ -13,6 +13,7 @@ import type {
   Manifest,
   Names,
 } from "../types";
+import { ENTITY_KIND_BY_OWNER, ENTITY_OWNER_BY_KIND } from "../types";
 import {
   ambiguousNameSuggestionRanks,
   projectedEntitySuggestionContext,
@@ -70,10 +71,9 @@ export function mergePreparedNameSuggestions(
   episodes: readonly EntitySuggestion[],
   contextByRank: ReadonlyMap<number, string>,
 ): NameSuggestion[] {
-  const ownerOfKind = (["", "subject", "person", "character"] as const);
   return [
     ...canvas.map((item) => {
-      const owner = ownerOfKind[item.entityKind] as Owner;
+      const owner = ENTITY_OWNER_BY_KIND[item.entityKind];
       const context = contextByRank.get(item.rank);
       return {
         key: `rank:${item.rank}`,
@@ -244,11 +244,7 @@ export function installQueryRuntime(
       await select(rank, "fly", true, episode.subject, episode.id);
       return;
     }
-    const kind = parsed.owner === "subject"
-      ? 1
-      : parsed.owner === "person"
-        ? 2
-        : 3;
+    const kind = ENTITY_KIND_BY_OWNER[parsed.owner];
     if (parsed.archiveId > 0xffffff)
       throw new TypeError(`${ref} 不能在当前星图中定位`);
     const key = (kind << 24) | parsed.archiveId;
@@ -285,7 +281,7 @@ export function installQueryRuntime(
       const key = state.selectionKey;
       const rank = state.selection;
       if (!key || rank === null) return null;
-      const owner = (["", "subject", "person", "character"] as const)[key >>> 24];
+      const owner = ENTITY_OWNER_BY_KIND[key >>> 24];
       if (!owner) return null;
       await names.load([rank]);
       return {
@@ -303,11 +299,7 @@ export function installQueryRuntime(
           episode?.name || `分集 #${parsed.archiveId}`,
         );
       }
-      const kind = parsed.owner === "subject"
-        ? 1
-        : parsed.owner === "person"
-          ? 2
-          : 3;
+      const kind = ENTITY_KIND_BY_OWNER[parsed.owner];
       if (parsed.archiveId > 0xffffff)
         throw new TypeError("实体不在当前数据版本中");
       const entity = await data.entity((kind << 24) | parsed.archiveId);
@@ -319,10 +311,7 @@ export function installQueryRuntime(
     suggestEntities: suggestQueryEntities,
     suggestNames: async (text, owners, signal) => {
       const canvasKinds = owners.flatMap((owner): EntityKind[] =>
-        owner === "subject" ? [1]
-          : owner === "person" ? [2]
-            : owner === "character" ? [3]
-              : []
+        owner === "episode" ? [] : [ENTITY_KIND_BY_OWNER[owner]]
       );
       const [canvas, episodes] = await Promise.all([
         canvasKinds.length

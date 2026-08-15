@@ -44,10 +44,6 @@ export class WeightedLru<K, V> {
     this.used = 0;
   }
 
-  get usedWeight(): number {
-    return this.used;
-  }
-
   private evict(): void {
     for (const [key, entry] of this.entries) {
       if (this.used <= this.budget) break;

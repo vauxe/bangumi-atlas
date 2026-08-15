@@ -32,7 +32,10 @@ export function assertContentRange(
     );
 }
 
-export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+export async function sha256Hex(source: Uint8Array | string): Promise<string> {
+  const bytes = typeof source === "string"
+    ? new TextEncoder().encode(source)
+    : source;
   const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
   return [...new Uint8Array(digest)]
     .map((value) => value.toString(16).padStart(2, "0"))

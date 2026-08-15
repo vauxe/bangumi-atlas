@@ -378,7 +378,6 @@
 .query-popover-back:hover,
 .query-popover-close:hover { background: var(--line); color: var(--ink); }
 
-.query-choice-list,
 .query-add-list,
 .query-name-suggestions,
 .query-entity-suggestions {
@@ -393,7 +392,6 @@
   align-content: start;
 }
 
-.query-choice,
 .query-add-choice,
 .query-name-suggestion,
 .query-entity-suggestion {
@@ -409,7 +407,6 @@
   text-align: left;
 }
 
-.query-choice span,
 .query-add-choice span,
 .query-name-suggestion span,
 .query-entity-suggestion span {
@@ -462,7 +459,6 @@
   white-space: nowrap;
 }
 
-.query-choice:hover,
 .query-add-choice:hover,
 .query-add-choice:focus-visible,
 .query-name-suggestion:hover,
