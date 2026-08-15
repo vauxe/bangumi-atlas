@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import re
 from functools import cache
 from pathlib import Path
 from typing import Any, Final
@@ -107,6 +108,50 @@ TEXT_FAMILIES = (
     "episode-description",
     "fact-summary",
 )
+
+DISPLAY_TEXT_DECODE_PASSES = int(
+    SITE_CONTRACT["display_text"]["decode_passes"]
+)
+DISPLAY_TEXT_NAMED_REFERENCES: dict[str, str] = dict(
+    SITE_CONTRACT["display_text"]["named_references"]
+)
+_DISPLAY_TEXT_REFERENCE = re.compile(
+    r"&(#(?:[xX][0-9a-fA-F]+|[0-9]+)|[A-Za-z][A-Za-z0-9]+);"
+)
+
+
+def _display_text_pass(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        body = match.group(1)
+        if not body.startswith("#"):
+            return DISPLAY_TEXT_NAMED_REFERENCES.get(body, match.group(0))
+        hexadecimal = len(body) > 1 and body[1] in "xX"
+        digits = body[2:] if hexadecimal else body[1:]
+        try:
+            code_point = int(digits, 16 if hexadecimal else 10)
+        except ValueError:
+            return match.group(0)
+        if (
+            code_point <= 0
+            or code_point > 0x10FFFF
+            or 0xD800 <= code_point <= 0xDFFF
+        ):
+            return match.group(0)
+        return chr(code_point)
+
+    return _DISPLAY_TEXT_REFERENCE.sub(replace, text)
+
+
+def display_text(value: Any) -> str:
+    """Project archive text into the literal text shown and searched."""
+
+    decoded = "" if value is None else str(value)
+    for _pass in range(DISPLAY_TEXT_DECODE_PASSES):
+        updated = _display_text_pass(decoded)
+        if updated == decoded:
+            break
+        decoded = updated
+    return decoded
 
 
 def release_limits(
@@ -560,7 +605,7 @@ def manifest_version(manifest_sans_version: dict[str, Any]) -> str:
 
 
 def schema_digest() -> str:
-    """实体、事实、文本引用和磁盘元组定义的摘要。"""
+    """实体、事实、显示文本和磁盘元组定义的摘要。"""
     digest = sha256_hex(
         canonical_json(
             {
@@ -570,6 +615,7 @@ def schema_digest() -> str:
                 "fact_attrs": FACT_ATTRS,
                 "rank_encoding": RANK_ENCODING,
                 "geometry": SITE_CONTRACT["geometry"],
+                "display_text": SITE_CONTRACT["display_text"],
             }
         )
     )

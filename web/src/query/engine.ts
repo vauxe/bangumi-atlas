@@ -214,6 +214,7 @@ export type Evidence =
       field: string;
       utf8Range: [number, number];
       text: string;
+      /** 查询数据源生成的可见片段，答案视图不得再次投影。 */
       snippet?: string;
     }
   | { kind: "path"; facts: `fact:${number}`[] }

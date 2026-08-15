@@ -819,7 +819,7 @@ def encode_delta_varints(values: Iterable[int]) -> bytes:
 
 
 class TextSearchBuilder:
-    """Hashed bigram postings over text members; source text verifies hits."""
+    """Hash visible text; projected source text verifies candidate hits."""
 
     def __init__(self) -> None:
         self.members: list[list[Any]] = []
@@ -849,7 +849,7 @@ class TextSearchBuilder:
         buckets: set[int] = set()
         trigram_buckets: set[int] = set()
         for text in texts:
-            folded = sr.search_fold(text)
+            folded = sr.search_fold(sr.display_text(text))
             buckets.update(
                 sr.search_gram_bucket(
                     folded[start : start + sr.SEARCH_NGRAM_WIDTH]
@@ -1239,8 +1239,10 @@ def build_search_index(
         if not sr.is_entity_kind(entity_kind):
             raise ValueError(f"unknown search entity kind {entity_kind}")
         kind = int(entity_kind)
-        display = str(cn_name or name)
-        aliases = sr.search_aliases(str(name), str(cn_name or ""))
+        visible_name = sr.display_text(name)
+        visible_name_cn = sr.display_text(cn_name)
+        display = visible_name_cn or visible_name
+        aliases = sr.search_aliases(visible_name, visible_name_cn)
         alias_rows.append([[list(alias) for alias in aliases], display, kind])
         rank_buckets = {
             sr.search_gram_bucket(
@@ -1345,11 +1347,13 @@ def build_search_index(
     aligned = zip(names, cn_names, entity_kinds, strict=True)
     for rank, (name, cn_name, entity_kind) in enumerate(aligned):
         kind = int(entity_kind)
-        display = str(cn_name or name)
+        visible_name = sr.display_text(name)
+        visible_name_cn = sr.display_text(cn_name)
+        display = visible_name_cn or visible_name
         entries.extend(
             (normalized, matched, rank, display, kind)
             for normalized, matched in sr.search_aliases(
-                str(name), str(cn_name or "")
+                visible_name, visible_name_cn
             )
         )
 

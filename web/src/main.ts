@@ -4,7 +4,7 @@
  * 悬停名字按需、稳定 150ms 才预取结构,不预取 Episode 或任何文本。 */
 
 import type { Data } from "./data";
-import { esc } from "./html";
+import { decodeDisplayText, esc } from "./html";
 import { createLazyDrawerRuntime } from "./lazy-drawer";
 import {
   loadGzJson,
@@ -77,6 +77,10 @@ async function boot(): Promise<void> {
   const gstream = openGeometry(manifest);
   const geo = gstream.geo;
   const names = openNames(manifest);
+  const displayName = (rank: number): string | null => {
+    const name = names.get(rank);
+    return name === null ? null : decodeDisplayText(name);
+  };
 
   const drawerElement = $("#drawer");
   const drawerReopen = $<HTMLButtonElement>("#drawer-reopen");
@@ -95,7 +99,7 @@ async function boot(): Promise<void> {
     });
   });
   const pinnedManager = new PinnedManager($("#pinned-manager"), {
-    nameOf: (rank) => names.get(rank),
+    nameOf: displayName,
     typeOf: (rank) =>
       TYPE_NAMES[etype(geo.key[rank] ?? 0)] ?? "节点",
     loadNames: (ranks) => names.load(ranks),
@@ -195,7 +199,7 @@ async function boot(): Promise<void> {
           }).catch(() => undefined);
         }, HOVER_PREFETCH_MS);
       }
-      const name = names.get(rank);
+      const name = displayName(rank);
       showTooltip(
         name ?? "…",
         nodeContext(rank),
@@ -208,7 +212,7 @@ async function boot(): Promise<void> {
             const hovered = hoveredNode;
             if (!hovered || hovered.rank !== rank) return;
             showTooltip(
-              names.get(rank) ?? `#${rank}`,
+              displayName(rank) ?? `#${rank}`,
               nodeContext(rank),
               hovered.x,
               hovered.y,
@@ -227,7 +231,7 @@ async function boot(): Promise<void> {
     },
     onViewChange: replaceUrl,
     // 近场动态标签:冷区(如孤立外环)凑近时按需补载名字
-    nameOf: (rank) => names.get(rank),
+    nameOf: displayName,
     loadNames: (ranks) => names.load(ranks),
   });
   // ---- 几何流:场景已就绪,首块回调即可渲染 ----

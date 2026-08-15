@@ -99,6 +99,40 @@ test("maps the existing complete structural entity to query fields", async () =>
   }]);
 });
 
+test("projects archive text once when it enters the query runtime", async () => {
+  const encodedSubject: StructuralEntity = {
+    ...subject,
+    name: "Rock &amp;amp; Roll",
+    nameCn: "Trick &amp; Trap",
+    metaTags: ["Chapter &ndash; One", "&amp;amp;amp;lt;"],
+    tags: [["A &amp; B", 2]],
+  };
+  const reader: SiteQueryReader = {
+    entities: async function* () {
+      yield encodedSubject;
+    },
+    entity: async () => encodedSubject,
+    mappings: async () => mappings,
+    factsFor: async () => ({ items: [], total: 0, next: null }),
+  };
+  const source = new SiteQueryDataSource(reader);
+  const rows = [];
+
+  for await (const entity of source.scan("subject")) rows.push(entity);
+
+  assert.deepEqual({
+    name: rows[0]?.fields.name,
+    nameCn: rows[0]?.fields.nameCn,
+    metaTags: rows[0]?.fields.metaTags,
+    tags: rows[0]?.fields.tags,
+  }, {
+    name: "Rock & Roll",
+    nameCn: "Trick & Trap",
+    metaTags: ["Chapter – One", "&lt;"],
+    tags: [{ name: "A & B", count: 2 }],
+  });
+});
+
 test("normalizes unavailable Subject score and rank at the query boundary", async () => {
   const unavailableMetrics: StructuralEntity = {
     ...subject,
@@ -271,7 +305,7 @@ test("uses the query projection reader when scan fields are known", async () => 
       yield {
         kind: "subject",
         key: key(1, 3),
-        fields: { name: "原名", score: 8.5 },
+        fields: { name: "原&amp;名", score: 8.5 },
       };
     },
     entity: async () => subject,
@@ -291,7 +325,7 @@ test("uses the query projection reader when scan fields are known", async () => 
     kind: "entity",
     owner: "subject",
     ref: "subject:3",
-    fields: { name: "原名", score: 8.5 },
+    fields: { name: "原&名", score: 8.5 },
   });
 });
 

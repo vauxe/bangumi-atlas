@@ -230,7 +230,10 @@ Release 内稳定。完全相同的事实只保存一次，源重复数 `multipl
 - Subject、Person、Character 的简介、Episode 的分集介绍和 `VOICE_CREDIT.summary` 进入全文查询。
 - 原始 infobox 不进入筛选或全文查询，只作详情证据；展示使用锁定版本的 Bangumi 官方 `@bgm38/wiki` 解析器，
   失败时显示转义原文。
-- 全文索引只产生候选，Worker 必须读取权威原文复核；结果返回命中字段、范围和有界片段。
+- 名称和全文搜索统一使用 `site-contract.json` 的 `display_text` 投影；权威原文不改写，
+  Worker 读取原文后应用同一投影复核，`SiteQueryDataSource` 在归档字段进入查询运行时时投影一次；
+  过滤、集合、聚合和答案渲染不得再次投影。`Values` 与查询字面量保持原样，全文结果返回
+  用户可见文字中的命中字段、范围和有界片段。
 - Tag 保留 `{name, count}`，评分分布保留十个来源票数，不把结构值字符串化。
 - 普通比较遇到 `null` 或 `MISSING` 得到 unknown；筛选只保留 true。“为空”和“未提供”保持不同语义。
 - 名称包含与全文匹配至少需要两个规范化字符；精确实体引用和 FactRef 不受此限制。

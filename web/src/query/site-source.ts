@@ -6,12 +6,14 @@ import type {
   StructuralEntity,
 } from "../types";
 import type { ProjectedEntity, TextSearchRow } from "../data";
+import { decodeDisplayText } from "../html";
 import type { TextSearchMember } from "../loader";
 import type { Owner, QueryFactKind } from "./contract";
 import { parseEntityRef, parseFactRef } from "./contract";
 import type {
   EntityValue,
   FactValue,
+  FieldValue,
   QueryDataSource,
   ScanAccess,
 } from "./engine";
@@ -173,6 +175,31 @@ function subjectMetric(
   return value;
 }
 
+/** SiteRelease keeps archive bytes intact. Query runtime values cross the
+ * display_text boundary here exactly once, before filtering, grouping,
+ * unions, pagination, suggestions, and answer rendering can copy them. */
+function displayFieldValue(value: FieldValue): FieldValue {
+  if (typeof value === "string") return decodeDisplayText(value);
+  if (!Array.isArray(value)) return value;
+  return value.map((item) => {
+    if (typeof item === "string") return decodeDisplayText(item);
+    if (typeof item === "object" && item !== null)
+      return { ...item, name: decodeDisplayText(item.name) };
+    return item;
+  });
+}
+
+function displayFields(
+  fields: Record<string, FieldValue>,
+): Record<string, FieldValue> {
+  return Object.fromEntries(
+    Object.entries(fields).map(([name, value]) => [
+      name,
+      displayFieldValue(value),
+    ]),
+  );
+}
+
 function entityValue(
   entity: StructuralEntity,
   mappings: Mappings | null = null,
@@ -184,7 +211,7 @@ function entityValue(
       kind: "entity",
       owner: "subject",
       ref,
-      fields: {
+      fields: displayFields({
         name: entity.name,
         nameCn: entity.nameCn,
         type: entity.type,
@@ -208,7 +235,7 @@ function entityValue(
         hasSummary: entity.hasSummary,
         summaryState: entity.hasSummary ? "HAS" : "EMPTY",
         hasInfobox: entity.hasInfobox,
-      },
+      }),
     };
   }
   if (entity.kind === "person")
@@ -216,7 +243,7 @@ function entityValue(
       kind: "entity",
       owner: "person",
       ref,
-      fields: {
+      fields: displayFields({
         name: entity.name,
         type: personType(entity.type),
         career: entity.career,
@@ -225,13 +252,13 @@ function entityValue(
         hasSummary: entity.hasSummary,
         summaryState: entity.hasSummary ? "HAS" : "EMPTY",
         hasInfobox: entity.hasInfobox,
-      },
+      }),
     };
   return {
     kind: "entity",
     owner: "character",
     ref,
-    fields: {
+    fields: displayFields({
       name: entity.name,
       role: entity.role,
       comments: entity.comments,
@@ -239,7 +266,7 @@ function entityValue(
       hasSummary: entity.hasSummary,
       summaryState: entity.hasSummary ? "HAS" : "EMPTY",
       hasInfobox: entity.hasInfobox,
-    },
+    }),
   };
 }
 
@@ -299,7 +326,7 @@ function projectedEntityValue(
     kind: "entity",
     owner: entity.kind,
     ref: refFromKey(entity.key),
-    fields,
+    fields: displayFields(fields),
   };
 }
 
@@ -322,7 +349,7 @@ function episodeValue(episode: EpisodeRecord): EntityValue {
     kind: "entity",
     owner: "episode",
     ref: `episode:${episode.id}`,
-    fields: {
+    fields: displayFields({
       name: episode.name,
       nameCn: episode.nameCn,
       subjectRef: refFromKey(episode.subject),
@@ -334,7 +361,7 @@ function episodeValue(episode: EpisodeRecord): EntityValue {
       type: episode.type,
       hasDescription: episode.hasDescription,
       descriptionState: episode.hasDescription ? "HAS" : "EMPTY",
-    },
+    }),
   };
 }
 
@@ -366,19 +393,25 @@ function factValue(fact: Fact): FactValue {
       return {
         ...base,
         roles: { source: refFromKey(fact.source), target: refFromKey(fact.target) },
-        fields: { relationType: fact.relationType, sortOrder: fact.sortOrder },
+        fields: displayFields({
+          relationType: fact.relationType,
+          sortOrder: fact.sortOrder,
+        }),
       };
     case "WORKED_ON":
       return {
         ...base,
         roles: { person: refFromKey(fact.person), subject: refFromKey(fact.subject) },
-        fields: { position: fact.position, appearEps: fact.appearEps },
+        fields: displayFields({
+          position: fact.position,
+          appearEps: fact.appearEps,
+        }),
       };
     case "APPEARS_IN":
       return {
         ...base,
         roles: { character: refFromKey(fact.character), subject: refFromKey(fact.subject) },
-        fields: { type: fact.type, sortOrder: fact.sortOrder },
+        fields: displayFields({ type: fact.type, sortOrder: fact.sortOrder }),
       };
     case "VOICE_CREDIT":
       return {
@@ -388,22 +421,22 @@ function factValue(fact: Fact): FactValue {
           character: refFromKey(fact.character),
           subjectContext: refFromKey(fact.subjectContext),
         },
-        fields: {
+        fields: displayFields({
           type: fact.type,
           hasSummary: fact.hasSummary,
           summaryState: fact.hasSummary ? "HAS" : "EMPTY",
-        },
+        }),
       };
     case "PERSON_REL":
     case "CHARACTER_REL":
       return {
         ...base,
         roles: { source: refFromKey(fact.source), target: refFromKey(fact.target) },
-        fields: {
+        fields: displayFields({
           relationType: fact.relationType,
           spoiler: fact.spoiler,
           ended: fact.ended,
-        },
+        }),
       };
   }
 }

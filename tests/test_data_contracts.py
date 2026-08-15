@@ -20,6 +20,20 @@ from scripts.site_contracts import (
 
 
 class SiteReleaseContractTests(unittest.TestCase):
+    def test_display_text_decodes_only_declared_character_references(
+        self,
+    ) -> None:
+        self.assertEqual(
+            sr.display_text(
+                "Trick &amp; Trap &amp;quot;双重&amp;quot; &#x1f49a;"
+            ),
+            'Trick & Trap "双重" 💚',
+        )
+        self.assertEqual(
+            sr.display_text("Chapter 1 &ndash; End &Bass; &hl;"),
+            "Chapter 1 – End &Bass; &hl;",
+        )
+
     def test_entity_key_packs_kind_and_source_id(self) -> None:
         self.assertEqual(sr.entity_key(1, 42), (1 << 24) | 42)
         self.assertEqual(sr.entity_key(3, 0), 3 << 24)

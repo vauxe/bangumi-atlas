@@ -238,8 +238,8 @@ JSON 使用无额外空白的 UTF-8 编码；gzip 固定 `mtime=0`。相同 sche
 | `search.alias.idx` / `search.alias.pack` | 按 rank 保存构建期派生的完整搜索别名，供子串候选最终确认 |
 | `search.idx-{0..15}.json.gz` / `search.pack` | 按首字符稳定分片的自适应前缀目录、完整叶和内部节点的有界建议投影 |
 | `search.ngram.idx-{0..15}.json.gz` / `search.ngram.pack` | 按桶号稳定分片的二元字符散列目录，到严格递增 VisualRank posting 的有界成员 |
-| `text.search.members` / `text.search.ngram-{0..15}.idx/.pack` | 按桶号分片的正文二元字符候选到权威文本成员；命中仍须读取原文复核 |
-| `text.search.trigram-{0..15}.idx/.pack` | 必需的全文三元字符候选分片；仅缩小成员集合，不替代原文复核 |
+| `text.search.members` / `text.search.ngram-{0..15}.idx/.pack` | 按桶号分片的正文二元字符候选到权威文本成员；命中仍须读取原文并投影复核 |
+| `text.search.trigram-{0..15}.idx/.pack` | 必需的全文三元字符候选分片；仅缩小成员集合，不替代投影复核 |
 | `edges.bin` | 仅用于全局语境的抽样骨架，不是事实权威 |
 
 `explorer-v1` 使用下列初始分块；范围边界和 gzip 参数都写入 manifest，客户端不能猜测：
@@ -272,8 +272,16 @@ JSON 使用无额外空白的 UTF-8 编码；gzip 固定 `mtime=0`。相同 sche
 上限后继续按有界批次扫描，直到候选耗尽或未扫描 rank 的最佳可能分数也不能进入 top-K；
 DOM 始终保持固定上限。
 
-搜索语义在构建期一次确定：`charmap.json` 覆盖固定 Unicode 版本中全部非恒等 casefold，
-并由 `limits.search_fold` 标识版本；每个 `name_cn`、`name` 分别生成原文、简体、繁体，
+搜索语义在构建期一次确定。名称和正文先应用 `site-contract.json` 声明的
+`display_text` 投影：解码数值字符引用和明确列出的标准命名引用，最多处理三层编码，
+未知的站点自定义写法保持原样；权威 pack 中的原文不改写。浏览器展示、索引构建、
+运行时复核和独立验证器必须实现同一合同，因此用户看到的文字就是可搜索文字。
+该投影有固定深度且不是幂等操作：每个原始值只能在首次消费边界投影一次；搜索条目、
+建议和查询证据中的已投影文本由后续层原样传递，不能再次投影。查询路径由
+`SiteQueryDataSource` 在原始 SiteRelease 字段进入 QueryRuntime 时完成投影；过滤、集合、
+聚合、建议和答案视图只传递运行时值。`Values` 与查询字面量不是归档文本，必须原样保留。
+随后 `charmap.json` 覆盖固定 Unicode 版本中全部非恒等 casefold，
+并由 `limits.search_fold` 标识版本；每个 `name_cn`、`name` 分别生成当前字形、简体、繁体，
 含日文脚本时再分别生成日文新旧字形。转换只作用于完整原字符串，彼此不串联；规范化后
 按值去重。索引、别名块、客户端查询和独立验证器共用这份结果，运行时不调用 OpenCC，
 也不依赖宿主 Unicode 版本。Unicode 15.0 casefold 表作为受版本控制的构建输入，单码点
@@ -282,7 +290,8 @@ DOM 始终保持固定上限。
 正文查询同时发布成员级二元与三元字符 posting。恰好两个规范化码点使用二元 posting，
 三个及以上码点使用三元 posting 交集；两者的目录和 pack 均按桶号对 16 分片，避免单一
 文件增长逼近物理上限，也让浏览器只下载命中的目录分片。二元与三元分片共同构成
-`full-text-v1` 的当前发布合同。任一候选最终都必须回读 `text.idx` 指向的权威原文确认。
+`full-text-v1` 的当前发布合同。任一候选最终都必须回读 `text.idx` 指向的权威原文，
+应用相同 `display_text` 投影后确认。
 
 所有 Range 点查成员同时受压缩和解压尺寸约束：压缩后不超过 256,000 字节，
 解压后不超过 2,000,000 字节；任一上限触发时，构建在稳定身份边界继续细分。
@@ -328,7 +337,7 @@ Manifest 至少包含：
 | `profile` | `explorer-v1` |
 | `version` | 对除自身外的规范 manifest 内容求 SHA-256 得到的内容身份 |
 | `source` | `dump_version`、原始归档摘要、Parquet generation、布局输入/实现/产物摘要 |
-| `schema_digest` | 实体、事实、文本引用和磁盘元组定义的摘要；客户端必须匹配 |
+| `schema_digest` | 实体、事实、显示文本投影和磁盘元组定义的摘要；客户端必须匹配 |
 | `field_policy` | 每个源字段的 `core`、`sidecar` 或 `omitted` 决策 |
 | `mapping_digests` | 显示映射输入及 `mappings.json` 的摘要 |
 | `vocab_digests` | 精确词表内容及其 ID 分配的摘要 |
@@ -470,8 +479,8 @@ Data 用 Promise memo 合并进行中的相同请求；请求完成后只进入�
 时，完整 pack 只进入另一个以 `limits.pack_cap` 为总预算的 LRU，不能随访问过的文件数
 永久增长。manifest 只能降低缓存与成员预算，不能把它们提高到客户端编译上限之外。
 
-长文本以及从 Wiki AST 得到的展示值都按普通文本转义，不能作为 HTML 或 Wiki 标记
-执行。存储值始终完整；浏览器只把 summary、Episode description 和事实备注纳入
+长文本以及从 Wiki AST 得到的展示值先按 `display_text` 投影，再按普通文本转义，
+不能作为 HTML 或 Wiki 标记执行。存储值始终完整；浏览器只把 summary、Episode description 和事实备注纳入
 `atlas-query-v1` 全文索引，`infobox` 仅在资料视图中按需解释。DOM 对超长内容分段渲染。
 
 ## 8. 构建与验证
@@ -508,11 +517,11 @@ Data 用 Promise memo 合并进行中的相同请求；请求完成后只进入�
   不存在客户端不会读取的终端分页。
 - 子串索引的每个散列桶与全部规范化名称重算结果一致，桶内 `u24` VisualRank 严格递增，
   桶到成员、成员偏移、首尾 rank 和计数覆盖完整 gzip 成员 pack。
-- 正文二元候选的 16 个分片覆盖 Episode 名称与全部允许全文查询的原文成员；三元候选的
+- 正文二元候选的 16 个分片覆盖 Episode 名称与全部允许全文查询的显示文本成员；三元候选的
   16 个分片只覆盖允许的全文字段。两者都独立重算每桶计数、顺序、摘要、成员边界和 pack
   终点。
-- 完整 Unicode casefold 表、每个 rank 的构建期别名及前缀/子串两类索引均由原始名称
-  独立重算；简繁与日文转换不能串联成虚假等价。
+- `display_text` 由合同独立重算；完整 Unicode casefold 表、每个 rank 的构建期别名及
+  前缀/子串两类索引均由显示名称独立重算；简繁与日文转换不能串联成虚假等价。
 - `subject-query-columns-v1/v2` 的源 ID 到 rank 映射完整且单射；名称、类型、日期、年份、
   评分、Bangumi 排名和 NSFW 值按查询空值语义与 Subject Parquet 独立逐项对账，字典码、
   源 ID 空洞和 `0 → null` 均须验证；无法无损编码时禁止发布能力。

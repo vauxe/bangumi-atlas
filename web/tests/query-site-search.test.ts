@@ -1006,6 +1006,125 @@ test("looks up Episode names through published identity members without a global
   }]);
 });
 
+test("matches and returns the decoded Episode identity shown to users", async () => {
+  const descriptor = ["episode-identity", 0, 0, 10, 20] as unknown as TextSearchMember;
+  const episode = {
+    id: 20,
+    subject: key(1, 3),
+    name: "Trick &amp; Trap",
+    nameCn: "",
+    airdate: "2024-01-01",
+    disc: 1,
+    duration: "24m",
+    sort: 1,
+    type: 0,
+    hasDescription: false,
+  };
+  const reader: SiteQueryReader = {
+    entities: async function* () {},
+    episode: async (id) => id === episode.id ? episode : null,
+    entity: async () => null,
+    factsFor: async () => ({ items: [], total: 0, next: null }),
+    textSearchRows: async () => [{
+      owner: "episode",
+      id: episode.id,
+      field: "name",
+      text: episode.name,
+    }] as never,
+  };
+  const search = new SiteQuerySearchIndex(reader, {} as Manifest, {
+    normalize: async () => "trick & trap",
+    page: async () => ({ entries: [], next: null, scannedThroughRank: -1 }),
+    keys: async () => new Uint32Array(),
+    textPage: async () => ({
+      members: [descriptor],
+      next: null,
+      totalCandidates: 1,
+    }),
+  });
+
+  const results = [];
+  for await (const hit of search.lookup("Trick & Trap", "episode", ["name"]))
+    results.push(hit);
+
+  assert.deepEqual(results, [{
+    entity: episode,
+    field: "name",
+    text: "Trick & Trap",
+    utf8Range: [0, 12],
+  }]);
+});
+
+test("verifies a decoded structural identity against its raw entity", async () => {
+  const encodedSubject = {
+    ...subject,
+    name: "Trick &amp; Trap",
+  };
+  const keys = new Uint32Array([encodedSubject.key]);
+  const reader: SiteQueryReader = {
+    entities: async function* () {},
+    entity: async (entityKey) =>
+      entityKey === encodedSubject.key ? encodedSubject : null,
+    factsFor: async () => ({ items: [], total: 0, next: null }),
+  };
+  const search = new SiteQuerySearchIndex(reader, {} as Manifest, {
+    normalize: async () => "trick & trap",
+    page: async () => ({
+      entries: [["trick & trap", "Trick & Trap", 0, "Trick & Trap", 1]],
+      next: null,
+      scannedThroughRank: 0,
+    }),
+    keys: async () => keys,
+  });
+
+  const results = [];
+  for await (const hit of search.lookup("Trick & Trap", "subject", ["name"]))
+    results.push(hit);
+
+  assert.deepEqual(results, [{
+    entity: encodedSubject,
+    field: "name",
+    text: "Trick & Trap",
+    utf8Range: [0, 12],
+  }]);
+});
+
+test("matches full text through the same decoded display projection", async () => {
+  const descriptor: TextSearchMember = ["entity-summary", 1, 0, 10, 20];
+  const reader: SiteQueryReader = {
+    entities: async function* () {},
+    entity: async (entityKey) => entityKey === subject.key ? subject : null,
+    factsFor: async () => ({ items: [], total: 0, next: null }),
+    textSearchRows: async () => [{
+      owner: "subject",
+      id: 3,
+      field: "summary",
+      text: "Rock &amp; Roll",
+    }],
+  };
+  const search = new SiteQuerySearchIndex(reader, {} as Manifest, {
+    normalize: async () => "rock & roll",
+    page: async () => ({ entries: [], next: null, scannedThroughRank: -1 }),
+    keys: async () => new Uint32Array(),
+    fullTextPage: async () => ({
+      members: [descriptor],
+      next: null,
+      totalCandidates: 1,
+    }),
+  });
+
+  const results = [];
+  for await (const hit of search.fullText("Rock & Roll", "subject", "summary"))
+    results.push(hit);
+
+  assert.deepEqual(results, [{
+    entity: subject,
+    field: "summary",
+    text: "Rock & Roll",
+    utf8Range: [0, 11],
+  }]);
+});
+
 test("reuses the authoritative Episode decoded with an identity member", async () => {
   const descriptor = ["episode-identity", 0, 0, 10, 20] as unknown as TextSearchMember;
   const episode = {
