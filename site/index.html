@@ -8,10 +8,10 @@
 <!-- atlas:initial-modulepreloads:start -->
 <link rel="modulepreload" href="app.js">
 <link rel="modulepreload" href="chunks/chunk-U6UUEJQK.js">
-<link rel="modulepreload" href="chunks/chunk-BL4VSXHP.js">
-<link rel="modulepreload" href="chunks/chunk-IVLY7DLN.js">
-<link rel="modulepreload" href="chunks/chunk-MPSVVPUN.js">
-<link rel="modulepreload" href="chunks/chunk-N2NTOGKJ.js">
+<link rel="modulepreload" href="chunks/chunk-F4H3JROB.js">
+<link rel="modulepreload" href="chunks/chunk-77S3QO3O.js">
+<link rel="modulepreload" href="chunks/chunk-33DS7GZJ.js">
+<link rel="modulepreload" href="chunks/chunk-RTGEU2XL.js">
 <link rel="modulepreload" href="chunks/chunk-VC46IEJQ.js">
 <!-- atlas:initial-modulepreloads:end -->
 <link rel="icon" href="data:,">
@@ -55,6 +55,17 @@ html, body { margin: 0; height: 100%; background: var(--surface);
 #map { position: fixed; inset: 0; }
 #hud { position: fixed; bottom: 12px; right: 12px; color: var(--ink-2);
   font-family: monospace; z-index: 5; pointer-events: none; }
+#hud[data-state="error"] { top: calc(var(--query-occupied-bottom) + 10px); bottom: auto;
+  right: calc(var(--occupied-right) + var(--page-inset));
+  max-width: min(560px, max(0px, calc(
+    100dvw - var(--occupied-right) - var(--query-shell-width) -
+    var(--page-inset) - var(--page-inset) - var(--page-inset)
+  ))); overflow-wrap: anywhere; color: var(--ink); text-align: right; }
+body:has(#drawer.open) #hud[data-state="error"] { max-width: max(0px, calc(
+  100dvw - var(--occupied-right) - var(--page-inset) - var(--page-inset)
+)); }
+body:has(#drawer.open):has(.query-workspace:not([hidden]))
+  #hud[data-state="error"] { opacity: 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0;
   margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0);
   white-space: nowrap; border: 0; }

@@ -40,7 +40,10 @@ test("renders a non-blocking query launcher before the runtime is installed", ()
   assert.doesNotMatch(page, /<link[^>]+href="query\.css"/);
   assert.match(main, /link\.href = "query\.css"/);
   assert.match(main, /queryLoader\.addEventListener\("click", activateQueryRuntime\)/);
-  assert.match(main, /queryLoader\.replaceWith\(\$\("#query-workbench"\)\)/);
+  assert.match(
+    main,
+    /const queryPanel = \$\("#query-workbench"\);\s*queryLoader\.replaceWith\(queryPanel\)/,
+  );
   assert.match(main, /appliedHash === "#query-dock"/);
   assert.match(main, /queryRuntime\.activate\(\{ focus: true \}\)/);
   assert.match(
@@ -80,6 +83,63 @@ test("installs one visible manager for cumulative retained-node expansion", () =
   assert.match(main, /focus:\s*\(rank\)\s*=>[\s\S]*?select\(rank, "center"\)/);
   assert.match(main, /subscribe\([\s\S]*?pinnedManager\.sync\(\)/);
   assert.match(main, /drawer\.syncState\(\)/);
+});
+
+test("keeps a fatal scene failure in the unoccupied map area", () => {
+  const main = readFileSync("src/main.ts", "utf8");
+  const page = readFileSync("../site/index.html", "utf8");
+  const layoutOwner = page.match(/(?:^|\n)body\s*\{(?<body>[^}]*)\}/s)
+    ?.groups?.body ?? "";
+  const queryDock = page.match(/#query-dock\s*\{(?<body>[^}]*)\}/s)
+    ?.groups?.body ?? "";
+  const errorHud = page.match(
+    /#hud\[data-state="error"\]\s*\{(?<body>[^}]*)\}/s,
+  )?.groups?.body ?? "";
+  const drawerErrorHud = page.match(
+    /body:has\(#drawer\.open\)\s+#hud\[data-state="error"\]\s*\{(?<body>[^}]*)\}/s,
+  )?.groups?.body ?? "";
+  const coveredErrorHud = page.match(
+    /body:has\(#drawer\.open\):has\(\.query-workspace:not\(\[hidden\]\)\)\s+#hud\[data-state="error"\]\s*\{(?<body>[^}]*)\}/s,
+  )?.groups?.body ?? "";
+
+  assert.match(main, /let sceneFailureMessage: string \| null = null/);
+  assert.match(
+    main,
+    /onError: \(error\) => \{[\s\S]*?sceneFailureMessage = [\s\S]*?hud\.dataset\.state = "error";[\s\S]*?hud\.textContent = sceneFailureMessage;/,
+  );
+  assert.match(
+    main,
+    /const updateGeometryHud = \(message: string\): void => \{[\s\S]*?if \(sceneFailureMessage === null\) hud\.textContent = message;/,
+  );
+  assert.match(main, /gstream\.start\(\(loaded\) => \{[\s\S]*?updateGeometryHud\(/);
+  assert.match(main, /geoDone\.then\(\(\) => \{[\s\S]*?updateGeometryHud\(""\)/);
+  assert.match(layoutOwner, /--query-shell-width:\s*min\(/);
+  assert.match(
+    layoutOwner,
+    /--query-occupied-bottom:\s*calc\(var\(--page-inset\)\s*\+\s*48px\)/,
+  );
+  assert.match(queryDock, /width:\s*var\(--query-shell-width\)/);
+  assert.match(
+    errorHud,
+    /top:\s*calc\(var\(--query-occupied-bottom\)\s*\+\s*10px\)/,
+  );
+  assert.match(errorHud, /bottom:\s*auto/);
+  assert.match(errorHud, /right:\s*calc\(var\(--occupied-right\)/);
+  assert.match(errorHud, /max-width:[^;]*var\(--query-shell-width\)/s);
+  assert.match(errorHud, /overflow-wrap:\s*anywhere/);
+  assert.match(
+    drawerErrorHud,
+    /max-width:[^;]*100dvw\s*-\s*var\(--occupied-right\)[^;]*var\(--page-inset\)[^;]*var\(--page-inset\)/s,
+  );
+  assert.match(coveredErrorHud, /opacity:\s*0/);
+  assert.match(
+    main,
+    /const observeQueryOccupancy = \(panel: HTMLElement\): void => \{[\s\S]*?querySelector<HTMLElement>\("\.query-compose"\)[\s\S]*?getBoundingClientRect\(\)\.bottom[\s\S]*?--query-occupied-bottom[\s\S]*?new ResizeObserver\(sync\)[\s\S]*?observe\(compose\)/,
+  );
+  assert.match(
+    main,
+    /queryLoader\.replaceWith\(queryPanel\);[\s\S]*?observeQueryOccupancy\(queryPanel\)/,
+  );
 });
 
 test("starts node details before waiting for the complete relation fan", () => {

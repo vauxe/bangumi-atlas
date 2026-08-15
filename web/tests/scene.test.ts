@@ -349,6 +349,7 @@ test("keeps query results in the base layer without color or outline overlays", 
   try {
     state.queryResultRanks = Uint32Array.of(0, 1);
     const scene = Object.assign(Object.create(Scene.prototype), {
+      deckReady: true,
       styled: 2,
       queryResultMask: new Uint8Array(2),
       queryResultMaskSource: new Uint32Array(),
@@ -426,6 +427,33 @@ test("selects the clicked context node without cycling overlapping candidates", 
   }
 });
 
+test("defers every layer render until deck viewports are initialized", () => {
+  let viewportReads = 0;
+  let propWrites = 0;
+  const scene = Object.assign(Object.create(Scene.prototype), {
+    deckReady: false,
+    scheduleNearbyLabels: () => undefined,
+    deck: {
+      getViewports: () => {
+        viewportReads++;
+        throw new Error("view manager is not ready");
+      },
+      setProps: () => propWrites++,
+    },
+  }) as Scene;
+
+  assert.doesNotThrow(() => scene.render());
+  assert.equal(viewportReads, 0);
+  assert.equal(propWrites, 0);
+
+  let renders = 0;
+  Reflect.set(scene, "render", () => renders++);
+  const handleLoad = Reflect.get(scene, "handleDeckLoad") as () => void;
+  handleLoad.call(scene);
+  assert.equal(Reflect.get(scene, "deckReady"), true);
+  assert.equal(renders, 1);
+});
+
 test("loads and draws nearby names only while no working set is selected", async () => {
   const previousSelection = state.selection;
   const previousPinned = new Set(state.pinnedSelections);
@@ -449,6 +477,7 @@ test("loads and draws nearby names only while no working set is selected", async
       ],
     };
     const scene = Object.assign(Object.create(Scene.prototype), {
+      deckReady: true,
       geo: {
         positions: new Float32Array([0, 0, 0, 1, 0, 0, -3, 0, 0]),
         loaded: 3,
@@ -555,6 +584,7 @@ test("rebuilds nearby label layout after a resize with the same ranks", () => {
       project: () => [200, 200],
     };
     const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
+      deckReady: true,
       geo: {
         positions: new Float32Array([0, 0, 0]),
         loaded: 1,
