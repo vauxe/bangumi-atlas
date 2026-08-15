@@ -1,7 +1,7 @@
 # 前端性能
 
-本文只记录长期有效的性能边界和关键设计取舍，不保存某次 SiteRelease 的哈希、数据量、
-机器耗时、请求数或测试计数。历史测量由 Git 记录；可重复的测量入口保留在 `web/bench/`。
+本文只记录长期有效的性能边界和关键设计取舍，不保存单次发布的测量结果；可重复的测量
+入口保留在 `web/bench/`。
 
 查询结果语义见 [静态查询能力设计](QUERY_CAPABILITY_DESIGN.md)，发布格式与独立验证见
 [结构化站点数据设计](STRUCTURAL_SITE_DATA_DESIGN.md)。性能优化不能改变这两份合同。
@@ -25,17 +25,9 @@ GitHub Pages 没有查询后端，因此 SiteRelease 同时提供稳定身份索
 查询列投影、关系邻接和长文本成员目录。客户端用 HTTP Range 与有界缓存只读取当前操作
 需要的成员；不支持 Range 时只能在同一缓存预算内回退，不能把整包下载当作性能保证。
 
-前缀、子串和正文索引均按 manifest 声明分片。分片用于减少候选工作量，不是新的数据
-权威；散列碰撞、别名和正文命中都必须读取规范字段确认。
-
-稳定键反查按连续源 ID 的定长块执行 Range 点查。单节点深链、当前选择及其少量未解析
-邻居不再推测下载完整 `rank-by-key.bin`；跨块数量超过有界阈值时才回退整索引，避免把
-大量离散往返误当成节省流量。
-
-`full-text-v1` 同时包含成员级二元与三元字符候选。恰好两个规范化码点的查询使用二元候选，
-三个及以上码点使用三元候选；两套目录与 pack 都按桶号对 16 分片，因此浏览器只读取查询
-实际命中的目录分片，且每个物理 pack 保留增长余量。所有分片都是当前 GitHub Pages 发布
-的必需产物，并在 manifest 边界校验完整性；两条路径都必须回到权威原文执行最终包含判断。
+名称和正文索引只缩小候选集合，最终命中仍由规范字段确认。稳定键反查优先点查连续 ID
+块，离散块过多时才回退整索引，避免用大量往返换取很小的字节节省。分片、成员和 pack
+布局以 [SiteRelease 合同](STRUCTURAL_SITE_DATA_DESIGN.md) 为准。
 
 ### 主线程工作与可见结果有界
 
@@ -108,20 +100,7 @@ GitHub Pages 没有查询后端，因此 SiteRelease 同时提供稳定身份索
 
 ## 验证与复现
 
-前端门禁：
-
-```sh
-npm --prefix web test
-npm --prefix web run check
-npm --prefix web run build
-```
-
-真实 SiteRelease 冒烟需要先启动支持 Range 的本地服务：
-
-```sh
-npm --prefix web run serve:smoke
-npm --prefix web run smoke
-```
+构建、类型检查、SiteRelease 验证和 HTTP smoke 命令见 [BUILD.md](BUILD.md)。
 
 隔离基准：
 
@@ -135,11 +114,7 @@ npm --prefix web run bench:frontend -- search-substring
 ```
 
 比较前后版本时必须使用同一 SiteRelease、查询、缓存状态、运行次数和 CPU/网络条件，并先
-确认完整结果摘要一致。发布数据合同另由下列命令验证：
-
-```sh
-UV_CACHE_DIR=/tmp/uv-cache NO_COLOR=1 uv run --frozen python -m scripts.verify_site
-```
+确认完整结果摘要一致。
 
 ## 尚不能由本地基准证明的事项
 
