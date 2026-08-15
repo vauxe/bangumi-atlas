@@ -6,18 +6,17 @@ from dataclasses import dataclass
 from math import sqrt
 
 import numpy as np
-from scipy.spatial import cKDTree
 
 # 探索端的聚焦层级、工作集字号和节点尺寸按绝对 zoom 调参,
 # 其语义依赖稳定的世界尺度;UMAP 等布局算法的输出尺度是任意的,
 # 发布前必须归一到规范跨度。
-CANONICAL_WORLD_SPAN = 600.0
-MIN_NODE_CENTER_DISTANCE = 0.28
+CANONICAL_WORLD_SPAN = 1200.0
+MIN_NODE_CENTER_DISTANCE = 0.56
 
 # 发布点落在带小幅确定性扰动的三维网格上。网格间距比
-# 公开契约多 0.02，扰动后的理论下界仍比契约多 0.01，足以
-# 覆盖 float32 在 600 左右世界尺度上的量化误差。
-_LATTICE_EXTRA_DISTANCE = 0.02
+# 公开契约多 0.04，扰动后的理论下界仍比契约多 0.02。
+# 该余量与世界尺度同比扩大，最终 u16 解码坐标另行全量验证。
+_LATTICE_EXTRA_DISTANCE = 0.04
 _LATTICE_BITS = 21
 _LATTICE_BIAS = 1 << (_LATTICE_BITS - 1)
 _INITIAL_OFFSET_COUNT = 8192
@@ -247,30 +246,3 @@ def separate_published_nodes(
         placement_clearance=clearance,
         assignment_rounds=assignment_rounds,
     )
-
-
-def find_minimum_distance_violation(
-    coordinates: np.ndarray,
-    minimum_distance: float = MIN_NODE_CENTER_DISTANCE,
-) -> tuple[int, int, float] | None:
-    """Return the first pair below the global center-distance contract."""
-
-    _require_coordinate_matrix(coordinates)
-    if not np.isfinite(coordinates).all():
-        raise ValueError("coordinates must be finite")
-    if not np.isfinite(minimum_distance) or minimum_distance <= 0:
-        raise ValueError("minimum_distance must be positive and finite")
-
-    published = np.asarray(coordinates, dtype="<f4")
-    tree = cKDTree(published)
-    for start in range(0, len(published), 100_000):
-        end = min(start + 100_000, len(published))
-        distance, neighbor = tree.query(published[start:end], k=2, workers=1)
-        nearest = distance[:, 1]
-        local = int(np.argmin(nearest))
-        if float(nearest[local]) < minimum_distance:
-            index = start + local
-            other = int(neighbor[local, 1])
-            first, second = sorted((index, other))
-            return first, second, float(nearest[local])
-    return None

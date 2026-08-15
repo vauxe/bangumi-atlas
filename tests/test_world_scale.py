@@ -7,13 +7,18 @@ import numpy as np
 from scripts.world_scale import (
     CANONICAL_WORLD_SPAN,
     MIN_NODE_CENTER_DISTANCE,
-    find_minimum_distance_violation,
     normalize_world_scale,
     separate_published_nodes,
 )
 
 
 class WorldScaleTests(unittest.TestCase):
+    def test_default_world_scale_reserves_more_space_between_nodes(
+        self,
+    ) -> None:
+        self.assertEqual(CANONICAL_WORLD_SPAN, 1200.0)
+        self.assertEqual(MIN_NODE_CENTER_DISTANCE, 0.56)
+
     def test_normalizes_the_largest_axis_span_to_the_canonical_span(
         self,
     ) -> None:
@@ -71,7 +76,6 @@ class WorldScaleTests(unittest.TestCase):
         self.assertGreaterEqual(
             report.placement_clearance, MIN_NODE_CENTER_DISTANCE
         )
-        self.assertIsNone(find_minimum_distance_violation(separated))
 
     def test_separation_is_deterministic_and_keeps_anchor_moves_local(
         self,
@@ -94,26 +98,8 @@ class WorldScaleTests(unittest.TestCase):
         anchor_moves = np.linalg.norm(
             first[:4].astype(np.float64) - coords[:4], axis=1
         )
-        self.assertLess(float(anchor_moves.max()), 0.27)
+        self.assertLess(float(anchor_moves.max()), MIN_NODE_CENTER_DISTANCE)
         self.assertEqual(first_report, second_report)
-
-    def test_independent_validator_finds_a_physical_overlap(self) -> None:
-        overlapping = np.array(
-            [[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [2.0, 0.0, 0.0]],
-            dtype="<f4",
-        )
-        clear = np.array(
-            [[0.0, 0.0, 0.0], [0.28, 0.0, 0.0], [2.0, 0.0, 0.0]],
-            dtype="<f4",
-        )
-
-        violation = find_minimum_distance_violation(overlapping)
-
-        self.assertIsNotNone(violation)
-        assert violation is not None
-        self.assertEqual(violation[:2], (0, 1))
-        self.assertAlmostEqual(violation[2], 0.1)
-        self.assertIsNone(find_minimum_distance_violation(clear))
 
 
 if __name__ == "__main__":

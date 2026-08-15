@@ -31,6 +31,14 @@ class InputGenerationTests(unittest.TestCase):
             finally:
                 events.append("lock-exit")
 
+        def verify(
+            _site: Path,
+            _identity: dict[str, str],
+            *,
+            geometry_only: bool,
+        ) -> None:
+            events.append(f"verify:{geometry_only}")
+
         with tempfile.TemporaryDirectory() as directory:
             site = Path(directory) / "site"
             with (
@@ -46,16 +54,47 @@ class InputGenerationTests(unittest.TestCase):
                 patch.object(
                     verify_site,
                     "verify_release",
-                    side_effect=lambda _site, _identity: events.append(
-                        "verify"
-                    ),
+                    side_effect=verify,
                 ),
                 patch("sys.argv", ["verify_site.py", "--site", str(site)]),
             ):
                 verify_site.main()
 
         self.assertEqual(
-            events, ["lock-enter", "validate", "verify", "lock-exit"]
+            events,
+            ["lock-enter", "validate", "verify:False", "lock-exit"],
+        )
+
+    def test_main_forwards_explicit_geometry_only_scope(self) -> None:
+        @contextmanager
+        def lock(_parquet: Path):
+            yield
+
+        identity = {"parquet_generation": "v1"}
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory) / "site"
+            with (
+                patch.object(verify_site, "parquet_layout_lock", lock),
+                patch.object(
+                    verify_site,
+                    "require_current_release_inputs",
+                    return_value=identity,
+                ),
+                patch.object(verify_site, "verify_release") as verify_release,
+                patch(
+                    "sys.argv",
+                    [
+                        "verify_site.py",
+                        "--site",
+                        str(site),
+                        "--geometry-only",
+                    ],
+                ),
+            ):
+                verify_site.main()
+
+        verify_release.assert_called_once_with(
+            site.resolve(), identity, geometry_only=True
         )
 
 
@@ -233,6 +272,36 @@ class ExpectedFactStoreTests(unittest.TestCase):
 
 
 class RoutingContractTests(unittest.TestCase):
+    def test_independent_validator_finds_center_distance_violation(
+        self,
+    ) -> None:
+        overlapping = np.array(
+            [[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            dtype="<f4",
+        )
+        clear = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [verify_site.MIN_NODE_CENTER_DISTANCE, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+            ],
+            dtype="<f4",
+        )
+
+        violation = verify_site.find_center_distance_violation(
+            overlapping, verify_site.MIN_NODE_CENTER_DISTANCE
+        )
+
+        self.assertIsNotNone(violation)
+        assert violation is not None
+        self.assertEqual(violation[:2], (0, 1))
+        self.assertAlmostEqual(violation[2], 0.1)
+        self.assertIsNone(
+            verify_site.find_center_distance_violation(
+                clear, verify_site.MIN_NODE_CENTER_DISTANCE
+            )
+        )
+
     def test_text_posting_decoder_rejects_noncanonical_values(self) -> None:
         self.assertEqual(
             verify_site.decode_delta_posting(
@@ -695,7 +764,7 @@ class RoutingContractTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(projection["isolated"], [1, 0, 0])
         np.testing.assert_allclose(
-            projection["position"][:, 0], [300.0, 600.0, 0.0], atol=0.2
+            projection["position"][:, 0], [600.0, 1200.0, 0.0], atol=0.2
         )
         self.assertEqual(
             verify_site.expected_year_range(
