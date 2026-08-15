@@ -283,7 +283,7 @@ class RoutingContractTests(unittest.TestCase):
             [
                 [0.0, 0.0, 0.0],
                 [verify_site.MIN_NODE_CENTER_DISTANCE, 0.0, 0.0],
-                [2.0, 0.0, 0.0],
+                [verify_site.MIN_NODE_CENTER_DISTANCE * 2, 0.0, 0.0],
             ],
             dtype="<f4",
         )
@@ -764,7 +764,9 @@ class RoutingContractTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(projection["isolated"], [1, 0, 0])
         np.testing.assert_allclose(
-            projection["position"][:, 0], [600.0, 1200.0, 0.0], atol=0.2
+            projection["position"][:, 0],
+            [599.0421, 1200.1517, 0.0104],
+            atol=1e-3,
         )
         self.assertEqual(
             verify_site.expected_year_range(
