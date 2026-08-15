@@ -347,7 +347,6 @@ function appendTableRows(
     const tr = body.insertRow();
     if (layout.hasEntityColumn) {
       const cell = tr.insertCell();
-      cell.setAttribute("data-label", "条目");
       const ref = rowEntityRef(row, result.evidence[rowIndex]);
       const names = entityNames(row.name, row.nameCn);
       const value = ref ?? null;
@@ -360,7 +359,6 @@ function appendTableRows(
     }
     for (const column of layout.displayColumns) {
       const cell = tr.insertCell();
-      cell.setAttribute("data-label", columnLabel(column));
       const value = row[column];
       const rendered = value === undefined ? null : value;
       const semantic = result.columns[column]?.semantic;
@@ -547,7 +545,7 @@ export function renderAnswer(
 
   const updateCount = (next: QueryResult): void => {
     count.textContent = next.totalMatches === next.visibleMatches
-      ? `${next.totalMatches.toLocaleString()} 条完整结果`
+      ? `${next.totalMatches.toLocaleString()} 条结果`
       : `${next.totalMatches.toLocaleString()} 条匹配，问题限制显示 ${next.visibleMatches.toLocaleString()} 条`;
   };
   const updateMore = (next: QueryResult): void => {

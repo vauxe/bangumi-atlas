@@ -701,6 +701,9 @@ test("keeps the query button as the only way to execute a full name query", () =
 
   assert.ok(renderer);
   assert.doesNotMatch(renderer, /activateSubmit|查看全部匹配|query-view-all/);
+  assert.match(renderer, /empty\.textContent = "没有名称建议"/);
+  assert.match(renderer, /hint\.textContent = "名称至少需要两个字"/);
+  assert.doesNotMatch(renderer, /可点击查询|再输入一个字即可查询完整结果/);
   assert.doesNotMatch(queryStyles, /\.query-view-all/);
 });
 
@@ -1022,9 +1025,9 @@ test("keeps the name input and query action in one command group", () => {
   );
 });
 
-test("does not maintain a separate viewport-specific query UI", () => {
+test("uses one query layout without width-specific branches", () => {
   assert.doesNotMatch(queryStyles, /@media\s*\(max-width:/);
-  assert.match(queryStyles, /@container\s*\(max-width:\s*34rem\)/);
+  assert.doesNotMatch(queryStyles, /@container\s*\(max-width:/);
 });
 
 test("lets add choices choose columns from their readable content width", () => {

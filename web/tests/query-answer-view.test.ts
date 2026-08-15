@@ -430,6 +430,41 @@ test("keeps an evidence-backed entity clickable after choosing display columns",
   }
 });
 
+test("uses one direct result count without restating completeness", () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    createElement: (tag: string) => new FakeElement(tag.toUpperCase()),
+  } as unknown as Document;
+  try {
+    const container = new FakeElement();
+    renderAnswer(
+      container as unknown as HTMLElement,
+      { shape: "table", title: "查询结果" },
+      {
+        rows: [],
+        evidence: [],
+        columns: {},
+        totalMatches: 1,
+        visibleMatches: 1,
+        hasMore: false,
+        stability: "exact",
+        queryDigest: "a".repeat(64),
+        releaseId: "b".repeat(64),
+        coverage: {
+          schema: "atlas-coverage-v1",
+          atoms: [],
+          digest: "c".repeat(64),
+        },
+        terminalEvidence: [],
+      },
+    );
+
+    assert.equal(container.children[1]?.textContent, "1 条结果");
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
 test("appends newly revealed rows without rebuilding the existing table", () => {
   const originalDocument = globalThis.document;
   let created = 0;
@@ -607,17 +642,37 @@ test("keeps result links readable", () => {
   assert.match(styles, /\.query-entity-link\s*\{[^}]*text-align:\s*left;/s);
 });
 
-test("adapts result cards to the answer workspace instead of the viewport", () => {
+test("keeps names from squeezing the other result columns", () => {
   const styles = readFileSync("src/query/workbench.css", "utf8");
 
   assert.match(
     styles,
-    /\.query-workspace\s*\{[^}]*width:\s*100%;[^}]*container-type:\s*inline-size;/s,
+    /\.query-table\s*\{[^}]*table-layout:\s*fixed;/s,
   );
   assert.match(
     styles,
-    /@container\s*\(max-width:\s*34rem\)\s*\{[\s\S]*?\.query-table tbody tr:not\(\.query-match-row\)/s,
+    /\.query-table th\s*\{[^}]*width:\s*8rem;/s,
   );
+  assert.match(
+    styles,
+    /\.query-entity-table th:first-child\s*\{[^}]*width:\s*16rem;/s,
+  );
+  assert.match(
+    styles,
+    /\.query-table td\s*\{[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/s,
+  );
+});
+
+test("keeps one table layout without narrow-screen card metadata", () => {
+  const styles = readFileSync("src/query/workbench.css", "utf8");
+  const source = readFileSync("src/query/answer-view.ts", "utf8");
+  const design = readFileSync("../docs/QUERY_CAPABILITY_DESIGN.md", "utf8");
+
+  assert.doesNotMatch(styles, /container-type:\s*inline-size/);
+  assert.doesNotMatch(styles, /@container\s*\(max-width:/);
+  assert.doesNotMatch(source, /["']data-label["']/);
+  assert.match(design, /结果始终使用表格/);
+  assert.doesNotMatch(design, /转换为卡片/);
 });
 
 test("keeps result tables for reading instead of duplicating the query editor", () => {

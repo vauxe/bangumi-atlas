@@ -495,14 +495,13 @@ async function boot(): Promise<void> {
 
   // ---- 画布操作提示 ----
   const hint = $("#hint");
-  let hintState = "";
+  let hintState: boolean | null = null;
   const updateHint = (): void => {
     const selected = state.selection !== null;
-    const pinned = state.pinnedSelections.size;
-    const next = `${selected}:${pinned}`;
-    if (next === hintState) return;
-    hintState = next;
-    hint.textContent = interactionHint(selected, pinned);
+    if (selected === hintState) return;
+    hintState = selected;
+    hint.textContent = interactionHint(selected);
+    hint.hidden = hint.textContent.length === 0;
   };
   updateHint();
   subscribe(updateHint);
@@ -572,7 +571,7 @@ async function boot(): Promise<void> {
   };
   $("#dice").addEventListener("click", rollDice);
 
-  // ---- 键盘快捷键 ----
+  // ---- 标准关闭键；不注册会误触的全局字母快捷键 ----
   document.addEventListener("keydown", (ev) => {
     const target = ev.target;
     if (
@@ -581,17 +580,6 @@ async function boot(): Promise<void> {
       target instanceof HTMLSelectElement ||
       (target instanceof HTMLElement && target.isContentEditable)
     ) return;
-    const k = ev.key.toLowerCase();
-    if (k === "t") {
-      scene.topView();
-    }
-    if (k === "r") {
-      scene.home();
-    }
-    if (k === "s") {
-      ev.preventDefault();
-      void queryRuntime.activate({ focus: true }).catch(() => undefined);
-    }
     if (ev.key === "Escape" && state.selection !== null) deselect(true);
   });
 

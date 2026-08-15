@@ -95,11 +95,13 @@ const ENTITY_SUGGESTION_RENDER_BATCH = 80;
 
 export interface SelectedQueryEntity {
   ref: EntityRef;
+  /** 提供方已经完成显示文本投影，消费者不得再次投影。 */
   label: string;
 }
 
 export interface EntitySuggestion extends SelectedQueryEntity {
   owner: Owner;
+  /** 与 label 相同，均为已经准备好的显示文本。 */
   detail?: string;
   match?: string;
 }
@@ -1739,13 +1741,13 @@ export class QueryBar {
     if (!items.length) {
       const empty = document.createElement("p");
       empty.className = "query-popover-empty";
-      empty.textContent = `没有名称建议；可点击查询查找“${text}”`;
+      empty.textContent = "没有名称建议";
       body.append(empty);
     }
     if (literalCount(text) < QUERY_CONTRACT.search.lookup.minNormalizedCharacters) {
       const hint = document.createElement("p");
       hint.className = "query-popover-hint";
-      hint.textContent = "再输入一个字即可查询完整结果";
+      hint.textContent = "名称至少需要两个字";
       body.append(hint);
     }
     this.syncActiveName(

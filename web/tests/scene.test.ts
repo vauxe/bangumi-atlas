@@ -22,46 +22,63 @@ const projectedCommonPixels = (
   maxPixels: number,
 ): number => Math.min(Math.max(value * 2 ** zoom, minPixels), maxPixels);
 
-test("keeps one desktop graph interaction model and documents its controls", () => {
+test("keeps graph controls in one passive line with direct wording", () => {
   const sceneSource = readFileSync("src/scene.ts", "utf8");
   const mainSource = readFileSync("src/main.ts", "utf8");
+  const searchSource = readFileSync("src/search.ts", "utf8");
   const pageSource = readFileSync("../site/index.html", "utf8");
+  const frontendSource = `${mainSource}\n${sceneSource}\n${searchSource}`;
+  const legend = pageSource.slice(
+    pageSource.indexOf('<div id="legend"'),
+    pageSource.indexOf('<div id="tooltip"'),
+  );
+  const legendCss = pageSource.match(/#legend\s*\{(?<body>[^}]*)\}/s)
+    ?.groups?.body ?? "";
+  const legendStatusCss = pageSource.match(
+    /\.legend-status\s*\{(?<body>[^}]*)\}/s,
+  )?.groups?.body ?? "";
 
   assert.doesNotMatch(sceneSource, /addEventListener\(\s*["']dblclick["']/);
   assert.doesNotMatch(mainSource, /双击/);
-  for (const operation of [
-    "拖动平移",
-    "右键拖动旋转",
-    "滚轮缩放",
-    "单击查看",
-    "S 搜索",
-    "T 俯视",
-    "R 复位",
-  ]) assert.match(`${mainSource}\n${sceneSource}`, new RegExp(operation));
+  assert.match(legend, /作品/);
+  assert.match(legend, /人物/);
+  assert.match(legend, /角色/);
+  assert.match(
+    legend,
+    /拖动平移 · 右键旋转 · 滚轮缩放 · 单击选中 · 空白取消选中/,
+  );
+  assert.doesNotMatch(legend, /details|summary|操作说明|连续点击/);
+  assert.match(legendCss, /pointer-events:\s*none/);
+  assert.match(legendCss, /color:\s*var\(--ink-2\)/);
+  assert.doesNotMatch(legendStatusCss, /color:/);
+  assert.match(legendCss, /flex-wrap:\s*nowrap/);
+  assert.match(legendCss, /overflow:\s*hidden/);
+  assert.doesNotMatch(frontendSource, /[STR] (?:搜索|俯视|复位)/);
+  assert.doesNotMatch(frontendSource, /if \(k === ["'][str]["']\)/);
+  assert.doesNotMatch(frontendSource, /key\.toLowerCase\(\) === ["'][str]["']/);
+  assert.doesNotMatch(frontendSource, /const k = ev\.key\.toLowerCase\(\)/);
   assert.doesNotMatch(sceneSource, /touchRotate/);
   assert.doesNotMatch(mainSource, /coarsePointer|\(pointer:\s*coarse\)/);
   assert.doesNotMatch(pageSource, /@media\s*\(max-width:/);
-  assert.equal(
-    interactionHint(true, 0),
-    "拖动平移 · 右键拖动旋转 · 滚轮缩放 · 单击查看 · S 搜索 · T 俯视 · R 复位 · 图钉逐步保留节点和边 · Esc 关闭当前查看",
+  assert.match(pageSource, /aria-label="节点图例"/);
+  assert.match(
+    pageSource,
+    /id="drawer-reopen"[^>]*aria-label="打开详情"/s,
   );
+  assert.match(pageSource, /id="hint"[^>]*aria-live="polite"/);
   assert.equal(
-    interactionHint(false, 0),
-    "拖动平移 · 右键拖动旋转 · 滚轮缩放 · 单击查看 · S 搜索 · T 俯视 · R 复位",
+    interactionHint(true),
+    "Esc 取消选中",
   );
-  assert.equal(
-    interactionHint(false, 2),
-    "拖动平移 · 右键拖动旋转 · 滚轮缩放 · 单击查看 · S 搜索 · T 俯视 · R 复位 · 已保留 2 个节点及其关系",
-  );
-  assert.equal(
-    interactionHint(true, 2),
-    "拖动平移 · 右键拖动旋转 · 滚轮缩放 · 单击查看 · S 搜索 · T 俯视 · R 复位 · Esc 关闭当前查看 · 已保留 2 个节点及其关系",
-  );
+  assert.equal(interactionHint(false), "");
+  assert.doesNotMatch(sceneSource, /已固定 \$\{pinnedCount\}/);
 });
 
 test("keeps the desktop shell fluid without resolution-specific breakpoints", () => {
   const pageSource = readFileSync("../site/index.html", "utf8");
   const root = pageSource.match(/:root\s*\{(?<body>[^}]*)\}/s)
+    ?.groups?.body ?? "";
+  const layoutOwner = pageSource.match(/(?:^|\n)body\s*\{(?<body>[^}]*)\}/s)
     ?.groups?.body ?? "";
   const drawerOpen = pageSource.match(
     /body:has\(#drawer\.open\)\s*\{(?<body>[^}]*)\}/s,
@@ -81,9 +98,10 @@ test("keeps the desktop shell fluid without resolution-specific breakpoints", ()
     /grid-template-columns:\s*minmax\(0,\s*var\(--query-max-width\)\)\s+var\(--floating-action-size\)/,
   );
   assert.match(
-    queryDock,
+    layoutOwner,
     /100dvw\s*-\s*var\(--occupied-right\)\s*-\s*var\(--page-inset\)\s*-\s*var\(--page-inset\)/,
   );
+  assert.match(queryDock, /width:\s*var\(--query-shell-width\)/);
   assert.match(drawer, /width:\s*var\(--drawer-width\)/);
   assert.match(legend, /100dvw\s*-\s*var\(--occupied-right\)/);
   assert.doesNotMatch(pageSource, /@media\s*\([^)]*(?:width|resolution)/);
@@ -356,6 +374,53 @@ test("keeps query results in the base layer without color or outline overlays", 
       [...(Reflect.get(scene, "queryResultMask") as Uint8Array)],
       [255, 255],
     );
+  } finally {
+    state.queryResultRanks = previous;
+  }
+});
+
+test("selects the clicked context node without cycling overlapping candidates", () => {
+  const previous = state.queryResultRanks;
+  const picked: (number | null)[] = [];
+  let multiplePickCalls = 0;
+  let rendered: { id: string; props: Record<string, unknown> }[] = [];
+  try {
+    state.queryResultRanks = new Uint32Array();
+    const scene = Object.assign(Object.create(Scene.prototype), {
+      deckReady: true,
+      styled: 2,
+      queryResultMask: new Uint8Array(2),
+      queryResultMaskSource: new Uint32Array(),
+      gpu: null,
+      contextData: null,
+      contextLength: -1,
+      buildContextData: () => ({ length: 2, attributes: {} }),
+      nearbyLabelLayers: () => [],
+      workingSetLayers: () => [],
+      anchorFlash: null,
+      cb: {
+        onHover: () => undefined,
+        onPick: (rank: number | null) => picked.push(rank),
+      },
+      deck: {
+        setProps: (props: { layers: typeof rendered }) => {
+          rendered = props.layers;
+        },
+        pickMultipleObjects: () => {
+          multiplePickCalls++;
+          return [{ index: 8 }];
+        },
+      },
+    }) as Scene;
+    scene.render();
+    const click = rendered[0]?.props.onClick as (
+      info: { index: number; x: number; y: number },
+    ) => boolean;
+
+    assert.equal(click({ index: 7, x: 12, y: 20 }), true);
+    assert.equal(click({ index: 7, x: 12, y: 20 }), true);
+    assert.deepEqual(picked, [7, 7]);
+    assert.equal(multiplePickCalls, 0);
   } finally {
     state.queryResultRanks = previous;
   }

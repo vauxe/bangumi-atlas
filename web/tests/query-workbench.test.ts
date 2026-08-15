@@ -150,8 +150,8 @@ test("requests complete highlights only for the initial section execution", () =
 });
 
 test("labels retained graph highlights as previous results after query edits", () => {
-  assert.equal(queryHighlightStatus(25, true), "图上 25 个当前结果");
-  assert.equal(queryHighlightStatus(25, false), "图上 25 个上次结果");
+  assert.equal(queryHighlightStatus(25, true), "");
+  assert.equal(queryHighlightStatus(25, false), "图中仍显示上次结果");
   assert.equal(queryHighlightStatus(0, false), "");
 });
 
