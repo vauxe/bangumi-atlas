@@ -25,6 +25,7 @@ import {
   splitFactDiscriminatorCondition,
 } from "./workbench-model";
 import type { Mappings } from "../types";
+import { normalizeResultColumnSelection } from "./result-columns";
 
 export type QueryTokenTarget =
   | { type: "head" }
@@ -319,11 +320,17 @@ function listTokens(
     ));
   }
 
-  if (draft.kind === "list" && query.columns?.length) {
+  if (draft.kind === "list" && query.columns !== undefined) {
+    const columns = normalizeResultColumnSelection(
+      draft.query.scope,
+      query.columns,
+    );
     result.push(token(
       "columns",
       "shape",
-      `显示${query.columns.map((field) => FIELD_LABEL[field] ?? field).join("、")}`,
+      columns.length
+        ? `显示${columns.map((field) => FIELD_LABEL[field] ?? field).join("、")}`
+        : "仅显示条目",
       { type: "columns" },
       true,
     ));

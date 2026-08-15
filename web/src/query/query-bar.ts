@@ -46,7 +46,6 @@ import {
 import {
   AGGREGATE_FUNCTION_LABEL,
   COMMON_FIELDS,
-  DEFAULT_RESULT_FIELDS,
   defaultSortDirection,
   enumValuesFor,
   FACT_FIELD_LABEL,
@@ -65,7 +64,6 @@ import {
   queryFilterFields,
   queryFieldsFor,
   queryGroupFields,
-  queryProjectFields,
   queryReferenceOwner,
   queryRelationOptions,
   queryRelationContextRoles,
@@ -78,6 +76,11 @@ import {
   sameSortFieldSemantics,
   splitFactDiscriminatorCondition,
 } from "./workbench-model";
+import {
+  defaultResultColumnSelection,
+  normalizeResultColumnSelection,
+  resultColumnChoices,
+} from "./result-columns";
 import type { AggregateFunction } from "./document";
 import {
   attachValueAutocomplete,
@@ -293,6 +296,7 @@ export type QueryAddChoice =
     }
   | QueryAddChoiceBase & { kind: "relation"; owner?: Owner }
   | QueryAddChoiceBase & { kind: "fullText" }
+  | QueryAddChoiceBase & { kind: "columns" }
   | QueryAddChoiceBase & { kind: "sort" };
 
 function orderedFields(owner: Owner, fields: string[]): string[] {
@@ -660,6 +664,13 @@ export function queryAddChoices(draft: QueryDraft): QueryAddChoice[] {
     kind: "relation",
     label: "按关联筛选",
     detail: "作品、人物或角色",
+  });
+
+  if (query.columns === undefined) choices.push({
+    id: "columns",
+    kind: "columns",
+    label: "显示列",
+    detail: "",
   });
 
   if (!query.orderBy?.length && querySortChoicesForScope(query.scope).length)
@@ -1670,6 +1681,8 @@ export class QueryBar {
       this.openRelationEditor(undefined, undefined, choice.owner, backToAdd);
     } else if (choice.kind === "fullText") {
       this.openBodyTextEditor(backToAdd);
+    } else if (choice.kind === "columns") {
+      this.openColumnsEditor(backToAdd);
     } else if (choice.kind === "sort") {
       this.openSortEditor(backToAdd);
     }
@@ -2813,49 +2826,53 @@ export class QueryBar {
     else openRelationPicker(back);
   }
 
-  private openColumnsEditor(targetOwner?: Owner): void {
+  private openColumnsEditor(back?: () => void): void {
     const query = draftQuery(this.history.current);
     if (!query || this.history.current.kind !== "list") return;
-    const owner = targetOwner ?? draftOwner(this.history.current);
-    if (!owner) {
-      this.options.reportError(new TypeError("请先选择显示列适用的实体类型"));
-      return;
-    }
-    const fields = queryProjectFields(owner);
-    const defaults = DEFAULT_RESULT_FIELDS[owner].filter((field) => fields.includes(field));
-    const chosen = new Set(query.columns ?? defaults);
-    this.openPanel("显示哪些信息", (body) => {
+    const scope = draftScope(this.history.current);
+    if (!scope) return;
+    const choices = resultColumnChoices(scope);
+    const chosen = new Set(normalizeResultColumnSelection(
+      scope,
+      query.columns ?? defaultResultColumnSelection(scope),
+    ));
+    this.openPanel("显示列", (body) => {
+      const hint = document.createElement("p");
+      hint.className = "query-popover-hint";
+      hint.textContent = "条目固定显示";
       const grid = document.createElement("div");
       grid.className = "query-checkbox-grid";
-      for (const field of fields) {
+      for (const choice of choices) {
+        const { field } = choice;
+        const baseLabel = FIELD_LABEL[field] ?? field;
+        const label = sameOwnerScope(choice.owners, scope)
+          ? baseLabel
+          : `${baseLabel}（仅${ownerListLabel(choice.owners)}）`;
         const control = input(FIELD_LABEL[field] ?? field, "checkbox");
         control.checked = chosen.has(field);
         control.addEventListener("change", () => {
           if (control.checked) chosen.add(field);
           else chosen.delete(field);
         });
-        grid.append(labeled(FIELD_LABEL[field] ?? field, control));
+        grid.append(labeled(label, control));
       }
       const actions = document.createElement("footer");
-      const reset = button("使用默认", "query-secondary");
+      const reset = button("恢复默认", "query-secondary");
       reset.addEventListener("click", () => {
-        this.commitPanelAction({ type: "setColumns", columns: undefined, owner });
+        this.commitPanelAction({ type: "setColumns", columns: undefined });
       });
       const save = button("应用", "query-primary");
       save.addEventListener("click", () => {
-        if (!chosen.size) {
-          this.options.reportError(new TypeError("至少选择一项显示信息"));
-          return;
-        }
         this.commitPanelAction({
           type: "setColumns",
-          columns: fields.filter((field) => chosen.has(field)),
-          owner,
+          columns: choices
+            .map(({ field }) => field)
+            .filter((field) => chosen.has(field)),
         });
       });
       actions.append(reset, save);
-      body.append(grid, actions);
-    });
+      body.append(hint, grid, actions);
+    }, "editor", back);
   }
 
   private trackValueAutocomplete(cleanup: () => void): () => void {

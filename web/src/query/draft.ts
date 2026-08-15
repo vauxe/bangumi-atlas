@@ -35,6 +35,13 @@ import {
 } from "./recipes";
 import { FIELD_LABEL, sameSortFieldSemantics } from "./workbench-model";
 import { OWNER_LABEL } from "./vocabulary";
+import {
+  RESULT_ENTITY_TYPE_FIELD,
+  RESULT_IDENTITY_FIELDS,
+  normalizeResultColumnSelection,
+  ownerSupportsResultField,
+  resultProjection,
+} from "./result-columns";
 
 export type EntityRef = `${Owner}:${number}`;
 
@@ -84,9 +91,11 @@ export function normalizeFullTextValue(value: string): string {
 
 export type ListQuery = Omit<
   ExplorerQuery,
-  "owner" | "aggregate" | "orderBy" | "fullText"
+  "owner" | "aggregate" | "orderBy" | "fullText" | "columns"
 > & {
   scope: EntityScope;
+  /** Editable result columns. Entity identity is projected automatically. */
+  columns?: string[];
   fullText?: ScopedFullText;
   aggregate?: undefined;
   orderBy?: ScopedOrderTerm[];
@@ -126,7 +135,7 @@ export type QueryAction =
   | ({ type: "addRelation"; relation: ExplorerRelation } & OwnerTarget)
   | { type: "replaceRelation"; index: number; relation: ExplorerRelation }
   | { type: "removeRelation"; index: number }
-  | ({ type: "setColumns"; columns: string[] | undefined } & OwnerTarget)
+  | { type: "setColumns"; columns: string[] | undefined }
   | { type: "setOrder"; orderBy: ExplorerQuery["orderBy"] }
   | { type: "setLimit"; limit: number | undefined }
   | ({ type: "setAggregate"; aggregate: ExplorerAggregate } & OwnerTarget)
@@ -318,12 +327,22 @@ function orderByForScope(
   });
 }
 
+function columnsForScope(
+  query: ListQuery,
+  scope: EntityScope,
+): Pick<ListQuery, "columns"> {
+  return query.columns === undefined
+    ? {}
+    : { columns: normalizeResultColumnSelection(scope, query.columns) };
+}
+
 function explorerOf(query: ListQuery, owner: Owner): ExplorerQuery {
   const {
     scope: _scope,
     aggregate: _aggregate,
     orderBy: scopedOrderBy,
     fullText,
+    columns: _columns,
     ...rest
   } = query;
   const orderBy = (scopedOrderBy ?? []).flatMap((order) => {
@@ -334,6 +353,9 @@ function explorerOf(query: ListQuery, owner: Owner): ExplorerQuery {
   return {
     owner,
     ...rest,
+    columns: resultProjection(query.scope, query.columns).filter((field) =>
+      field !== RESULT_ENTITY_TYPE_FIELD && ownerSupportsResultField(owner, field)
+    ),
     ...(fullText
       ? { fullText: { ...fullText, field: fullTextField(owner) } }
       : {}),
@@ -393,18 +415,29 @@ export function applyQueryAction(
     if (draft.kind !== "list" || !draft.query)
       throw new TypeError("只有实体列表可以选择多个实体类型");
     const scope = normalizeEntityScope(action.scope);
-    const { orderBy: _previous, ...query } = draft.query;
+    const { orderBy: _previous, columns: _columns, ...query } = draft.query;
     const orderBy = orderByForScope(draft.query, scope);
     return checked({
       kind: "list",
-      query: { ...query, scope, ...(orderBy.length ? { orderBy } : {}) },
+      query: {
+        ...query,
+        scope,
+        ...columnsForScope(draft.query, scope),
+        ...(orderBy.length ? { orderBy } : {}),
+      },
     });
   }
   if (action.type === "setOwner") {
     if (draft.kind === "aggregate")
       return checked({ kind: "aggregate", query: { ...draft.query, owner: action.owner } });
-    if (draft.kind === "list" && draft.query)
-      return checked({ kind: "list", query: { ...draft.query, scope: [action.owner] } });
+    if (draft.kind === "list" && draft.query) {
+      const scope: EntityScope = [action.owner];
+      const { columns: _columns, ...query } = draft.query;
+      return checked({
+        kind: "list",
+        query: { ...query, scope, ...columnsForScope(draft.query, scope) },
+      });
+    }
     return defaultQueryDraft(action.owner);
   }
   if (action.type === "setList") {
@@ -417,14 +450,20 @@ export function applyQueryAction(
         query: { ...query, scope: [action.owner ?? draft.query.owner] },
       });
     }
-    if (draft.kind === "list" && draft.query)
+    if (draft.kind === "list" && draft.query) {
+      const scope = action.owner
+        ? [action.owner] as EntityScope
+        : draft.query.scope;
+      const { columns: _columns, ...query } = draft.query;
       return checked({
         kind: "list",
         query: {
-          ...draft.query,
-          ...(action.owner ? { scope: [action.owner] as EntityScope } : {}),
+          ...query,
+          scope,
+          ...columnsForScope(draft.query, scope),
         },
       });
+    }
     return defaultQueryDraft(action.owner ?? DEFAULT_ENTITY_SCOPE);
   }
 
@@ -519,7 +558,7 @@ export function applyQueryAction(
       const { columns: _previous, ...rest } = query;
       result = replaceListQuery(current, {
         ...rest,
-        ...(action.columns?.length ? { columns: [...action.columns] } : {}),
+        ...(action.columns === undefined ? {} : { columns: [...action.columns] }),
       });
       break;
     }
@@ -567,8 +606,6 @@ export function applyQueryAction(
   }
   return checked(result);
 }
-
-const MULTI_SCOPE_FIELDS = ["ref", "name", "nameCn"] as const;
 
 function prefixedOperator(operator: QueryOperator, prefix: string): QueryOperator {
   const id = (value: string): string => `${prefix}${value}`;
@@ -625,11 +662,12 @@ function compileScopedList(query: ListQuery): QueryBundle {
   if (query.scope.length === 1)
     return compileExplorerQuery(explorerOf(query, query.scope[0]!));
 
-  const visibleFields = [...new Set([
-    ...MULTI_SCOPE_FIELDS,
-    ...(query.columns ?? []),
-  ])];
-  const visible = new Set(visibleFields);
+  const projection = resultProjection(query.scope, query.columns);
+  const entityTypeVisible = projection.includes(RESULT_ENTITY_TYPE_FIELD);
+  const visibleFields = projection.filter((field) =>
+    field !== RESULT_ENTITY_TYPE_FIELD
+  );
+  const visible = new Set(projection);
   const sorts = (query.orderBy ?? []).map((order) => {
     const owners = scopedOrderOwners(order, query.scope);
     const output = owners.length === query.scope.length
@@ -641,8 +679,9 @@ function compileScopedList(query: ListQuery): QueryBundle {
     throw new TypeError("排序字段不能重复");
   const hiddenSorts = sorts.filter(({ output }) => !visible.has(output));
   const outputFields = [
-    ...visibleFields,
+    ...projection,
     ...hiddenSorts.map(({ output }) => output),
+    ...(!entityTypeVisible ? [RESULT_ENTITY_TYPE_FIELD] : []),
   ];
   const operators: Record<string, QueryOperator> = {};
   const parameters: Record<string, ParameterType> = {};
@@ -651,13 +690,9 @@ function compileScopedList(query: ListQuery): QueryBundle {
 
   query.scope.forEach((owner, index) => {
     const prefix = `scope${index}-`;
-    const hasNameCn = Object.hasOwn(
-      QUERY_CONTRACT.owners[owner].fields,
-      "nameCn",
+    const ownerVisibleFields = visibleFields.filter((field) =>
+      ownerSupportsResultField(owner, field)
     );
-    const ownerVisibleFields = hasNameCn
-      ? visibleFields
-      : visibleFields.filter((field) => field !== "nameCn");
     const ownerFields = [...new Set([
       ...ownerVisibleFields,
       ...sorts
@@ -679,12 +714,19 @@ function compileScopedList(query: ListQuery): QueryBundle {
       kind: "project",
       input: `${prefix}${branch.query.root}`,
       columns: [
-        ...visibleFields.map((field) => ({
-          name: field,
-          value: field === "nameCn" && !hasNameCn
-            ? { kind: "literal" as const, value: null }
-            : { kind: "column" as const, name: field },
-        })),
+        ...projection.map((field) =>
+          field === RESULT_ENTITY_TYPE_FIELD
+            ? {
+                name: field,
+                value: { kind: "literal" as const, value: owner },
+              }
+            : {
+                name: field,
+                value: !ownerSupportsResultField(owner, field)
+                  ? { kind: "literal" as const, value: null }
+                  : { kind: "column" as const, name: field },
+              }
+        ),
         ...hiddenSorts.map((sort) => ({
           name: sort.output,
           value: sort.owners.includes(owner)
@@ -692,15 +734,18 @@ function compileScopedList(query: ListQuery): QueryBundle {
             : { kind: "literal" as const, value: null },
           hidden: true,
         })),
-        {
-          name: "entityType",
-          value: { kind: "literal" as const, value: owner },
-        },
+        ...(!entityTypeVisible
+          ? [{
+              name: RESULT_ENTITY_TYPE_FIELD,
+              value: { kind: "literal" as const, value: owner },
+              hidden: true as const,
+            }]
+          : []),
       ],
     };
     branches.push({
       input: shaped,
-      columns: [...outputFields, "entityType"].map((field) => ({
+      columns: outputFields.map((field) => ({
         output: field,
         input: field,
       })),
@@ -792,7 +837,9 @@ function decompileScopedList(bundle: QueryBundle): QueryDraft | null {
   for (const branch of root.branches) {
     const outer = section.query.operators[branch.input];
     if (outer?.kind !== "project") return null;
-    const ownerColumn = outer.columns.find((column) => column.name === "entityType");
+    const ownerColumn = outer.columns.find((column) =>
+      column.name === RESULT_ENTITY_TYPE_FIELD
+    );
     const owner = ownerColumn?.value.kind === "literal" &&
         typeof ownerColumn.value.value === "string" &&
         ENTITY_SCOPE_ORDER.includes(ownerColumn.value.value as Owner)
@@ -800,14 +847,15 @@ function decompileScopedList(bundle: QueryBundle): QueryDraft | null {
       : null;
     if (!owner || owners.includes(owner)) return null;
     const fields = outer.columns
-      .filter((column) => column.name !== "entityType" && !column.hidden)
+      .filter((column) => !column.hidden)
       .map((column) =>
-        column.value.kind === "column" && column.value.name === column.name
+        column.name === RESULT_ENTITY_TYPE_FIELD && column === ownerColumn
           ? column.name
-          : column.name === "nameCn" &&
-              column.value.kind === "literal" &&
+          : column.value.kind === "column" && column.value.name === column.name
+          ? column.name
+          : column.value.kind === "literal" &&
               column.value.value === null &&
-              !Object.hasOwn(QUERY_CONTRACT.owners[owner].fields, "nameCn")
+              !ownerSupportsResultField(owner, column.name)
             ? column.name
           : null
       );
@@ -899,14 +947,24 @@ function decompileScopedList(bundle: QueryBundle): QueryDraft | null {
         return { ...selection, fullText: scopedFullText };
       })()
     : selection;
-  const implicitColumns = sharedFields.length === MULTI_SCOPE_FIELDS.length &&
-    sharedFields.every((field, index) => field === MULTI_SCOPE_FIELDS[index]);
+  const scope = normalizeEntityScope(owners);
+  const defaultProjection = resultProjection(scope, undefined);
+  const implicitColumns = canonicalJson(sharedFields) ===
+    canonicalJson(defaultProjection);
+  const selectedColumns = normalizeResultColumnSelection(
+    scope,
+    sharedFields.filter((field) =>
+      !RESULT_IDENTITY_FIELDS.includes(
+        field as typeof RESULT_IDENTITY_FIELDS[number],
+      )
+    ),
+  );
   const candidate: QueryDraft = {
     kind: "list",
     query: {
-      scope: normalizeEntityScope(owners),
+      scope,
       ...scopedSelection,
-      ...(implicitColumns ? {} : { columns: sharedFields }),
+      ...(implicitColumns ? {} : { columns: selectedColumns }),
       ...(orderBy.length ? { orderBy } : {}),
       ...(section.query.limit === null || section.query.limit === undefined
         ? {}
@@ -923,6 +981,7 @@ export function queryDraftFromBundle(bundle: QueryBundle): QueryDraft | null {
   if (restored) {
     const {
       owner,
+      columns,
       orderBy,
       relations,
       limit,
@@ -933,6 +992,7 @@ export function queryDraftFromBundle(bundle: QueryBundle): QueryDraft | null {
     const query: ExplorerQuery = {
       owner,
       ...base,
+      ...(columns ? { columns } : {}),
       ...(fullText ? { fullText } : {}),
       ...(aggregate ? { aggregate } : {}),
       ...(relations?.length ? { relations } : {}),
@@ -946,6 +1006,11 @@ export function queryDraftFromBundle(bundle: QueryBundle): QueryDraft | null {
           query: {
             ...base,
             scope: [owner],
+            ...(columns === undefined
+              ? {}
+              : {
+                  columns: normalizeResultColumnSelection([owner], columns),
+                }),
             ...(fullText
               ? {
                   fullText: {

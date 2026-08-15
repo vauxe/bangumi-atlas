@@ -98,8 +98,34 @@ interface ValueContext {
   mappings?: Mappings;
 }
 
+function valueSemantic(context: ValueContext): string | undefined {
+  if (context.semantic) return context.semantic;
+  const ref = context.row.ref;
+  if (typeof ref !== "string") return undefined;
+  const separator = ref.indexOf(":");
+  const owner = ref.slice(0, separator) as Owner;
+  return separator > 0 && Object.hasOwn(QUERY_CONTRACT.owners, owner) &&
+      Object.hasOwn(QUERY_CONTRACT.owners[owner].fields, context.column)
+    ? `${owner}.${context.column}`
+    : undefined;
+}
+
+function entityFieldUnavailable(context: ValueContext): boolean {
+  const ref = context.row.ref;
+  if (typeof ref !== "string") return false;
+  const separator = ref.indexOf(":");
+  const owner = ref.slice(0, separator) as Owner;
+  if (separator <= 0 || !Object.hasOwn(QUERY_CONTRACT.owners, owner)) return false;
+  const knownEntityField = Object.values(QUERY_CONTRACT.owners).some(({ fields }) =>
+    Object.hasOwn(fields, context.column)
+  );
+  return knownEntityField &&
+    !Object.hasOwn(QUERY_CONTRACT.owners[owner].fields, context.column);
+}
+
 function mappedNumber(value: number, context: ValueContext): string | null {
-  const { mappings, semantic } = context;
+  const { mappings } = context;
+  const semantic = valueSemantic(context);
   if (!mappings || !semantic) return null;
   const separator = semantic.indexOf(".");
   if (separator <= 0) return null;
@@ -119,7 +145,7 @@ function mappedNumber(value: number, context: ValueContext): string | null {
 }
 
 function enumLabel(context: ValueContext): string | null {
-  const semantic = context.semantic;
+  const semantic = valueSemantic(context);
   if (!semantic) return null;
   const separator = semantic.indexOf(".");
   if (separator <= 0) return null;
@@ -218,6 +244,8 @@ export function queryValueText(
   context?: ValueContext,
 ): string {
   if (isMissing(value)) return "未提供";
+  if (value === null && context && entityFieldUnavailable(context))
+    return "不适用";
   if (value === null) return "未记录";
   if (value === "" || Array.isArray(value) && !value.length) return "暂无内容";
   if (Array.isArray(value))
@@ -234,7 +262,7 @@ export function queryValueText(
     typeof value === "string" && context?.column === "entityType" &&
     Object.hasOwn(OWNER_LABEL, value)
   ) return OWNER_LABEL[value as Owner];
-  if (typeof value === "string" && context?.semantic === "person.career")
+  if (typeof value === "string" && context && valueSemantic(context) === "person.career")
     return careerValueLabel(value);
   if (typeof value === "string") return readableRef(value);
   if (typeof value === "number" && context) {
@@ -319,7 +347,10 @@ interface RenderedTable {
 }
 
 function tableLayout(result: QueryResult): TableLayout {
-  const columns = [...new Set(result.rows.flatMap((row) => Object.keys(row)))];
+  const columns = [...new Set([
+    ...Object.keys(result.columns),
+    ...result.rows.flatMap((row) => Object.keys(row)),
+  ])];
   const hasEntityColumn = result.rows.some((row, index) =>
     rowEntityRef(row, result.evidence[index]) !== null
   );
