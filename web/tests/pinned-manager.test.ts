@@ -118,16 +118,16 @@ test("renders a visible, keyboard-operable retained-node collection", () => {
     { rank: 9, name: "节点九", type: "角色", current: true },
   ], true);
 
-  assert.match(markup, /已保留\s*<strong[^>]*>2<\/strong>\s*个/);
+  assert.match(markup, /已固定\s*<strong[^>]*>2<\/strong>\s*个节点/);
   assert.match(markup, /aria-expanded="true"/);
   assert.match(markup, /id="pinned-panel"/);
   assert.doesNotMatch(markup, /id="pinned-panel"[^>]*hidden/);
   assert.match(markup, /&lt;节点七&gt;/);
   assert.match(markup, /作品/);
-  assert.match(markup, /查看中/);
+  assert.match(markup, /已选中/);
   assert.match(markup, /aria-current="true"/);
-  assert.match(markup, /aria-label="取消保留 节点九"/);
-  assert.match(markup, />全部清除</);
+  assert.match(markup, /aria-label="取消固定 节点九"/);
+  assert.match(markup, />全部取消固定</);
 });
 
 test("focuses, removes, and clears retained nodes from one manager", () => {

@@ -11,7 +11,7 @@ export interface State {
   selectionKey: number | null;
   /** 用户显式保留的根节点;与当前详情选择分离,仅在本次页面会话保留。 */
   pinnedSelections: Set<number>;
-  /** 每个保留根节点提交时的完整一跳边扇；按根节点归属以支持逐个撤销。 */
+  /** 每个固定根节点提交时的完整一跳边扇；按根节点归属以支持逐个撤销。 */
   pinnedWorkingSets: Map<number, PinnedWorkingSet>;
   neighbors: number[]; // 当前选中节点的全部可解析关系对端 ranks
   /** 与 neighbors 对齐的解码关系显示文本(工作集边 tooltip 用);
@@ -86,7 +86,7 @@ export function removePinnedSelection(rank: number): boolean {
   return true;
 }
 
-/** 清空保留集合不改变当前焦点，避免用户丢失正在查看的上下文。 */
+/** 清空固定节点集合不改变当前焦点，避免用户丢失正在查看的上下文。 */
 export function clearPinnedSelections(): boolean {
   if (!state.pinnedSelections.size) return false;
   state.pinnedSelections = new Set();

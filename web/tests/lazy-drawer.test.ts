@@ -20,7 +20,7 @@ function deferred<T>(): {
 function fakeDrawer(events: string[]): DrawerRuntime {
   return {
     show: async (rank, key, relationRanks, episodeId) => {
-      const resolved = [...relationRanks]
+      const resolved = [...await Promise.resolve(relationRanks)]
         .map(([relationKey, relationRank]) => `${relationKey}=${relationRank}`)
         .join(",");
       events.push(`show:${rank}:${key}:${resolved}:${episodeId ?? ""}`);

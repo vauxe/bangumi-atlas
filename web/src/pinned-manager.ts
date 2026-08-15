@@ -34,15 +34,15 @@ export function pinnedManagerMarkup(
       ${raw(item.current ? 'aria-current="true"' : "")}
     >
       <span class="pinned-name">${item.name}</span>
-      <small>${item.type}${item.current ? " · 查看中" : ""}</small>
+      <small>${item.type}${item.current ? " · 已选中" : ""}</small>
     </button>
     <button
       class="pinned-remove"
       type="button"
       data-pinned-action="remove"
       data-rank="${item.rank}"
-      aria-label="取消保留 ${item.name}"
-      title="取消保留"
+      aria-label="取消固定 ${item.name}"
+      title="取消固定"
     >×</button>
   </li>`).join("");
   return html`<button
@@ -57,18 +57,18 @@ export function pinnedManagerMarkup(
       <path d="M9 3h6l-1 5 3 3v2H7v-2l3-3-1-5Z"></path>
       <path d="M12 13v8"></path>
     </svg>
-    <span aria-live="polite">已保留 <strong>${items.length}</strong> 个</span>
+    <span aria-live="polite">已固定 <strong>${items.length}</strong> 个节点</span>
   </button>
   <div id="pinned-panel" class="pinned-panel"${raw(expanded ? "" : " hidden")}>
     <header>
-      <strong>保留的节点与关系</strong>
+      <strong>固定节点</strong>
       <button
         type="button"
         class="pinned-clear"
         data-pinned-action="clear"
-      >全部清除</button>
+      >全部取消固定</button>
     </header>
-    <ul aria-label="已保留节点及其关系">${raw(rows)}</ul>
+    <ul aria-label="固定节点">${raw(rows)}</ul>
   </div>`;
 }
 
@@ -187,7 +187,7 @@ export class PinnedManager {
       },
       (error: unknown) => {
         if (this.loadingKey === loadingKey) this.loadingKey = "";
-        this.deps.reportError("保留节点名称加载", error);
+        this.deps.reportError("固定节点名称加载", error);
       },
     );
   }

@@ -69,7 +69,7 @@ test("installs one visible manager for cumulative retained-node expansion", () =
 
   assert.match(
     page,
-    /<aside id="pinned-manager"[^>]*aria-label="保留节点及其关系"[^>]*hidden/s,
+    /<aside id="pinned-manager"[^>]*aria-label="固定节点"[^>]*hidden/s,
   );
   assert.match(main, /new PinnedManager\(/);
   assert.match(
@@ -82,23 +82,27 @@ test("installs one visible manager for cumulative retained-node expansion", () =
   assert.match(main, /drawer\.syncState\(\)/);
 });
 
-test("starts drawer preparation before waiting for complete relation data", () => {
+test("starts node details before waiting for the complete relation fan", () => {
   const main = readFileSync("src/main.ts", "utf8");
   const selectStart = main.indexOf("async function select(");
   const selectEnd = main.indexOf("\n  function deselect", selectStart);
   const select = main.slice(selectStart, selectEnd);
-  const prepare = select.indexOf("drawer.prepare()");
   const detailReads = select.indexOf("allRelationFacts(data, key");
-  const publishRelations = select.indexOf("state.neighbors = nb.ranks");
   const show = select.indexOf("drawer.show(");
+  const awaitRelations = select.indexOf(
+    "const resolvedRelationData = await relationData",
+  );
+  const publishRelations = select.indexOf("state.neighbors = nb.ranks");
 
   assert.ok(selectStart >= 0 && selectEnd > selectStart);
-  assert.ok(prepare >= 0, "selection should eagerly prepare the drawer chunk");
-  assert.ok(prepare < detailReads, "drawer preparation should overlap relation reads");
+  assert.ok(detailReads >= 0, "selection should load every relation page");
+  assert.ok(show > detailReads, "details should share the relation task");
   assert.ok(
-    show > publishRelations,
-    "drawer content should wait for the complete relation state",
+    show < awaitRelations,
+    "node details must start before the complete relation fan resolves",
   );
+  assert.ok(publishRelations > awaitRelations);
+  assert.match(select, /drawer\.show\([\s\S]*?relationRanksPromise/);
 });
 
 test("does not speculatively download the complete reverse index", () => {
@@ -112,8 +116,8 @@ test("builds the selected-node working set from every fact page", () => {
   const sparseRankLookup = main.indexOf("loadRanksByKey(", completeFacts);
   const buildWorkingSet = main.indexOf("relationNeighbors(", completeFacts);
   const showDrawer = main.indexOf(
-    "drawer.show(rank, key, neighborRanks",
-    buildWorkingSet,
+    "drawer.show(",
+    completeFacts,
   );
 
   assert.ok(completeFacts >= 0, "selection must request every fact page");
@@ -123,8 +127,8 @@ test("builds the selected-node working set from every fact page", () => {
   );
   assert.ok(buildWorkingSet > completeFacts);
   assert.ok(
-    showDrawer > buildWorkingSet,
-    "drawer must reuse the complete selected-node rank resolution",
+    showDrawer > completeFacts && showDrawer < buildWorkingSet,
+    "drawer should receive the pending complete rank resolution immediately",
   );
   assert.doesNotMatch(
     main.slice(buildWorkingSet, buildWorkingSet + 500),
