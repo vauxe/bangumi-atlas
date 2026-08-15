@@ -172,6 +172,12 @@ async function boot(): Promise<void> {
     if (next !== null) history.pushState(null, "", next);
   };
 
+  // 场景失败是终态；后续几何进度不能把用户可见的诊断清空。
+  let sceneFailureMessage: string | null = null;
+  const updateGeometryHud = (message: string): void => {
+    if (sceneFailureMessage === null) hud.textContent = message;
+  };
+
   // ---- 场景先建,确保首块几何到达即可渲染 ----
   const scene: Scene = new Scene($<HTMLDivElement>("#map"), geo, manifest.bbox, {
     onPick: (rank) => {
@@ -233,6 +239,15 @@ async function boot(): Promise<void> {
     // 近场动态标签:冷区(如孤立外环)凑近时按需补载名字
     nameOf: displayName,
     loadNames: (ranks) => names.load(ranks),
+    onError: (error) => {
+      console.error("星图渲染失败", error);
+      const detail = `${error.name} ${error.message}`.toLowerCase();
+      sceneFailureMessage = /webgl|gpu|device|context/.test(detail)
+        ? "当前浏览器无法启动 3D 星图，请启用 WebGL 或更换浏览器或设备"
+        : "星图渲染失败，请刷新页面重试";
+      hud.dataset.state = "error";
+      hud.textContent = sceneFailureMessage;
+    },
   });
   // ---- 几何流:场景已就绪,首块回调即可渲染 ----
   let geometryComplete = false;
@@ -242,17 +257,18 @@ async function boot(): Promise<void> {
       ? (fn: () => void) => requestIdleCallback(fn, { timeout: 4000 })
       : (fn: () => void) => setTimeout(fn, 1500);
   const geoDone = gstream.start((loaded) => {
-    hud.textContent =
+    updateGeometryHud(
       loaded === manifest.n_nodes
         ? ""
-        : `渲染 ${loaded.toLocaleString()} / ${manifest.n_nodes.toLocaleString()} 节点`;
+        : `渲染 ${loaded.toLocaleString()} / ${manifest.n_nodes.toLocaleString()} 节点`,
+    );
     scene.geometryGrew();
   });
 
   runTask(
     geoDone.then(() => {
       geometryComplete = true;
-      hud.textContent = "";
+      updateGeometryHud("");
       scene.geometryGrew();
       // 稳定 key 未解析时挂起整个 URL；全量就绪后从原 URL 重试。
       const hash = pendingUrlHash;
@@ -431,6 +447,19 @@ async function boot(): Promise<void> {
     queryStyles = tracked;
     return tracked;
   };
+  let queryOccupancyObserver: ResizeObserver | null = null;
+  const observeQueryOccupancy = (panel: HTMLElement): void => {
+    const compose = panel.querySelector<HTMLElement>(".query-compose");
+    if (compose === null) return;
+    const sync = (): void => {
+      const bottom = Math.ceil(compose.getBoundingClientRect().bottom);
+      document.body.style.setProperty("--query-occupied-bottom", `${bottom}px`);
+    };
+    queryOccupancyObserver?.disconnect();
+    queryOccupancyObserver = new ResizeObserver(sync);
+    queryOccupancyObserver.observe(compose);
+    sync();
+  };
   let installedQueryRuntime: {
     restoreQuery(query: string | null): string | null;
   } | null = null;
@@ -459,7 +488,9 @@ async function boot(): Promise<void> {
         },
       });
       // 原位替换以保持“查询 → 骰子”的视觉与键盘顺序。
-      queryLoader.replaceWith($("#query-workbench"));
+      const queryPanel = $("#query-workbench");
+      queryLoader.replaceWith(queryPanel);
+      observeQueryOccupancy(queryPanel);
       return installed;
     },
     onActivating: () => {

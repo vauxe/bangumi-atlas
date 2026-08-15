@@ -357,6 +357,8 @@ export interface SceneCallbacks {
   /** 近场动态标签:同步读已载名字 / 批量补载缺失名字。 */
   nameOf?: (rank: number) => string | null;
   loadNames?: (ranks: number[]) => Promise<void>;
+  /** GPU / 图层运行时错误必须进入页面可见错误通道。 */
+  onError?: (error: Error) => void;
 }
 
 export class Scene {
@@ -395,6 +397,8 @@ export class Scene {
   private anchorFlashRaf = 0;
   private nearbyRanks: number[] = [];
   private nearbyTimer: ReturnType<typeof setTimeout> | null = null;
+  /** onLoad 才表示 ViewManager 已建立，Deck 公共视口方法才可调用。 */
+  private deckReady = false;
 
   constructor(
     parent: HTMLDivElement,
@@ -450,7 +454,11 @@ export class Scene {
         };
         this.contextLength = -1; // 重建 contextData,切换到 GPU 缓冲
         this.syncGpu();
-        this.render();
+      },
+      onLoad: () => this.handleDeckLoad(),
+      onError: (error) => {
+        if (this.cb.onError) this.cb.onError(error);
+        else console.error("星图渲染失败", error);
       },
       onViewStateChange: (change) => this.handleViewStateChange(change),
       onClick: (info: { layer: unknown }) => {
@@ -464,6 +472,13 @@ export class Scene {
     canvas?.setAttribute("aria-label", "Bangumi 关系星图");
     // 右键负责轨道旋转；拦掉浏览器菜单，避免松手时打断操作。
     parent.addEventListener("contextmenu", (ev) => ev.preventDefault());
+    this.render();
+  }
+
+  private handleDeckLoad(): void {
+    this.deckReady = true;
+    this.scheduleNearbyLabels();
+    // 合并设备初始化、首批几何、URL 选中和查询恢复期间积累的最新状态。
     this.render();
   }
 
@@ -531,6 +546,7 @@ export class Scene {
   }
 
   private refreshNearbyLabels(): void {
+    if (!this.deckReady) return;
     const viewport = this.deck.getViewports()[0];
     const project = (position: [number, number, number]): [number, number] => {
       const projected = viewport?.project(position) as number[] | undefined;
@@ -558,6 +574,7 @@ export class Scene {
   }
 
   private nearbyLabelLayers(): unknown[] {
+    if (!this.deckReady) return [];
     const { nameOf } = this.cb;
     if (hasWorkingSet() || !nameOf || !this.nearbyRanks.length)
       return [];
@@ -615,7 +632,7 @@ export class Scene {
       c.at = now;
       return c.rank >= 0 ? this.posOf(c.rank) : null;
     }
-    if (this.camera.ortho || !this.geo.loaded) return null;
+    if (!this.deckReady || this.camera.ortho || !this.geo.loaded) return null;
     const viewport = this.deck.getViewports()[0];
     if (!viewport) return null;
     const ray = cursorRay(viewport, px, py);
@@ -1385,6 +1402,7 @@ export class Scene {
   }
 
   render(): void {
+    if (!this.deckReady) return;
     this.syncQueryResultMask();
     const layers: unknown[] = [
       new ScatterplotLayer({
