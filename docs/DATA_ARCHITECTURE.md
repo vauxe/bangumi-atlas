@@ -1,14 +1,10 @@
 # 数据管道与图模型
 
-本文说明如何将 [bangumi/Archive](https://github.com/bangumi/Archive)
-的每周数据快照转换为共享 Parquet 投影、可查询的 LadybugDB 数据库和静态探索器数据。
-构建步骤见 [BUILD.md](BUILD.md)，前端见
-[EXPLORER_ARCHITECTURE.md](EXPLORER_ARCHITECTURE.md)。数据版本、规模和耗时只记录在
-生成产物与构建日志中，不在设计文档中维护。
-
-站点数据层（SiteRelease：结构核心 + 按需长文本侧车）的完整格式契约与
-容量预算见
-[结构化站点数据与按需长文本设计](STRUCTURAL_SITE_DATA_DESIGN.md)。
+本文说明如何将 [bangumi/Archive](https://github.com/bangumi/Archive) 的每周快照转换为
+Parquet、LadybugDB 和 SiteRelease。操作步骤见 [BUILD.md](BUILD.md)，前端边界见
+[EXPLORER_ARCHITECTURE.md](EXPLORER_ARCHITECTURE.md)，SiteRelease 格式见
+[STRUCTURAL_SITE_DATA_DESIGN.md](STRUCTURAL_SITE_DATA_DESIGN.md)。数据版本、规模和耗时只
+记录在生成产物与构建日志中。
 
 ## 1. 架构概览
 
@@ -83,7 +79,7 @@ flowchart LR
 | `episode.sort` 包含极端值和小数 | 使用浮点列保存，不做破坏性修正 |
 | 音乐类作品没有 platform 命名空间 | `platform` 保持为空，不计为解码失败 |
 | 官方文档遗漏部分关系枚举值 | 使用公开 API 验证后的映射，并保留关系原始码 |
-| 历史枚举码无法解码 | 由验证器维护显式基线；基线增长会产生警告 |
+| 历史枚举码无法解码 | 显式基线内仅报告信息；出现新码或数量增长时阻断构建 |
 | 离线枚举快照来源不明或文件混用 | manifest 固定 `bangumi/common` commit 和逐文件 SHA-256；校验失败时阻断构建 |
 | `person-relations` 出现未知端点类型 | 阻断构建；先定义端点实体和关系表，不能跳过 |
 | Subject/Person/Character ID 超过 24 bit | 阻断 Parquet generation；升级 EntityKey 格式，不能转 `uint32` 后截断 |
@@ -167,50 +163,29 @@ Parquet 是面向建图的类型化投影，不能反向还原为原始 JSONL。
 - `site/data` 是 SiteRelease：结构核心保留类型化 Parquet 的全部实体、事实和分集
   字段语义，简介、`infobox`、分集介绍等长字符串进入按需文本侧车。Episode 仍不进入
   Canvas；字段级 core/sidecar 策略由 manifest `field_policy` 声明。
-- `edges.bin` 是全局语境用的抽样骨架；完整的类型化事实通过 `facts.pack` 按需读取。
 
 SiteRelease 能恢复类型化 Parquet 的字段语义，但不是原始快照的字节级副本；重新解释
 数据仍以原始快照为准。站点格式与浏览器契约由
 [STRUCTURAL_SITE_DATA_DESIGN.md](STRUCTURAL_SITE_DATA_DESIGN.md) 定义。
 
-节点的主要查询字段：
-
-| 节点 | 主要字段 |
-|---|---|
-| `Subject` | 名称、类型、平台原始码与名称、日期、评分、排名、收藏状态、标签、简介、infobox |
-| `Person` | 名称、类型、职业、评论数、收藏数、简介、infobox |
-| `Character` | 名称、角色类型、评论数、收藏数、简介、infobox |
-| `Episode` | 名称、播出日期、排序、类型、碟片、时长、作品 ID、简介 |
-
 ## 5. 构建流程
 
 | 命令 | 职责 |
 |---|---|
-| `scripts/fetch_dump.py` | 在同目录暂存、校验并解压完整代际，再成对替换归档与目录；提交失败恢复旧代 |
-| `scripts/build_db.py` | 生成 Parquet，在临时路径 COPY 全量建库，完成后原子替换正式数据库 |
+| `scripts/fetch_dump.py` | 下载、校验并原子替换归档与解压目录 |
+| `scripts/build_db.py` | 刷新映射，生成 Parquet generation，并原子重建 LadybugDB |
 | `scripts/verify_db.py` | 执行独立计数、全字段内容核验和查询冒烟测试 |
-| `scripts/layout.py` | 从 Parquet 生成 Canvas 3D 分层拓扑布局：最大分量形成 Leiden/UMAP 社区岛，小分量形成卫星岛，孤立节点形成外层球壳；UMAP 使用写入报告和 `shape_digest` 的 100-epoch 预算，所有随机算法播种，同一输入可复现 |
-| `scripts/bake_site.py` | 从 Parquet 和布局生成 SiteRelease 静态站点数据；先归一到 1200 的名义世界尺度，再按直径 2 的虚拟节点分离最终 `float32` 中心；前端仍在相同中心绘制实际小节点；分离后 bbox 可向外增长，不得再缩放 |
+| `scripts/layout.py` | 从 Parquet 生成三维拓扑坐标、缓存身份和质量报告 |
+| `scripts/bake_site.py` | 从 Parquet 与布局生成 SiteRelease |
 | `scripts/verify_site.py` | 独立对账 SiteRelease 与 Parquet 的内容与门禁 |
 
-`build_db.py` 包含三个阶段：
+`build_db.py` 先固定 `bangumi/common` 映射，再流式生成 Parquet。独立 oracle 与实际内容
+指纹一致后才发布 generation，随后在临时路径建库并原子替换正式数据库。generation 绑定
+归档、9 个 JSONL、映射、schema、11 张 Parquet、行数和语义身份；相同 `VERSION` 不能
+代替这些核验。SiteRelease 继续绑定该 generation 和布局身份，不能给旧投影换上新版本名。
 
-1. 从 `bangumi/common` 的单一 commit 刷新枚举映射并写入摘要 manifest；联网刷新失败会
-   中断构建，不会隐式复用旧数据。`--offline` 只接受 commit 和逐文件 SHA-256 校验通过的
-   本地快照。
-2. 流式解析 JSONL，转换字段并写入 Parquet；独立 oracle 重建 11 张表的规范行内容，
-   与实际 Parquet 指纹完全一致后才发布 generation；`--skip-parquet` 只能复用通过完整
-   内容身份核验的结果。发布还逐成员证明 9 个 JSONL 确实来自所声明的归档。
-3. 在同目录临时文件中创建 LadybugDB，先导入节点再导入边；完整关闭后原子替换旧库。
-
-使用 `--skip-parquet` 时，`VERSION` 相同还不够；当前归档、映射、11 张 Parquet、schema、
-行数、语义 oracle 和 generation 自身摘要必须全部一致。9 个 JSONL 与归档的逐字节关系在
-generation 发布时证明，`verify_db.py` 会重新执行 raw→Parquet 深度语义核验；布局、烘焙和
-站点核验只检查各自实际依赖的当前制品，避免反复扫描不参与计算的原始文件。SiteRelease
-记录 Parquet generation 和布局 cache 身份，不能把旧投影或旧坐标贴上当前 dump 的版本号。
-离线校验只能证明快照来源和文件一致性，不能证明该 commit 仍是上游最新版本；需要最新
-枚举时必须运行默认的联网刷新阶段，构建日志会输出实际使用的 commit。网络或上游响应
-异常是该阶段的显式失败，只有操作者主动传入 `--offline` 才改变新鲜度契约。
+联网映射刷新失败会中断；`--offline` 只能证明本地快照来源与内容一致，不能证明它仍是
+上游最新版本。`--skip-parquet` 也只复用通过完整 generation 核验的结果。
 
 ## 6. 验证与失败策略
 
@@ -223,12 +198,8 @@ generation 发布时证明，`verify_db.py` 会重新执行 raw→Parquet 深度
 5. 重复行敏感且与扫描顺序无关的多重集摘要。
 6. 代表性多跳查询结果。
 
-生成 Parquet 时，未知顶层字段、未知嵌套字段或无法建模的 `person_type` 会立即阻断
-构建。所有节点和关系原始枚举码都会按官方或显式声明的合同审计；合同外值保留原码并
-集中告警，不能静默进入产物。验证器会独立重复枚举审计，并用显式基线区分已知历史
-脏值和新增回归。数据库计数、内容或查询结果不一致时，验证器以非零状态退出，并阻断
-后续布局、站点烘焙和发布。对于无法解码但保留了原始码的历史关系枚举，验证器会报告
-其数量，并将超过显式基线的增长标记为警告。
+未知字段、无法建模的端点类型和枚举异常增长按 §2.3 的策略失败关闭。数据库计数、内容、
+枚举审计或查询结果不一致时，验证器以非零状态阻断后续布局、烘焙和发布。
 
 ## 7. 关键取舍
 
@@ -238,6 +209,3 @@ generation 发布时证明，`verify_db.py` 会重新执行 raw→Parquet 深度
 | 每周全量重建 | 避免增量状态和跨版本迁移 | 临时建库成功后才替换上一份数据库 |
 | 原始快照作为唯一无损数据层 | 避免重复建设 Raw Parquet；建图层只承担查询职责 | 投影中的筛选和归一必须显式，新增字段必须先建模 |
 | 悬空边不入库 | 图数据库无法建立端点缺失的边 | 必须逐表计数并在验证报告中公开 |
-
-当前数据版本、表行数、文件体积和阶段耗时分别以 `data/dump/VERSION`、验证输出、
-`site/data/manifest.json` 和 Actions 日志为准。
