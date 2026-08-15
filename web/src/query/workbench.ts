@@ -113,17 +113,6 @@ export function mergeQueryResultRefs(
   return [...refs];
 }
 
-/** Keep DOM pagination separate from the complete result buffer used by Canvas. */
-export function queryResultPresentation(
-  result: QueryResult,
-  shown: number,
-): { visible: QueryResult; highlightRefs: string[] } {
-  return {
-    visible: revealQueryResult(result, shown),
-    highlightRefs: queryResultEntityRefs(result),
-  };
-}
-
 export function queryWorkspaceVisibility(
   expanded: boolean,
   hasAnswer: boolean,
@@ -244,21 +233,7 @@ export class QueryWorkbench {
     if (!bundle) {
       if (!this.lastBundle) return;
       this.abortCurrent(new DOMException("query navigation", "AbortError"));
-      this.lastBundle = "";
-      this.answerBundle = "";
-      this.hasAnswer = false;
-      this.resultsCurrent = false;
-      this.highlightCount = 0;
-      this.renderHighlightStatus();
-      this.resultRefsBySection = new Map();
-      this.resultHighlightsBySection = new Map();
-      this.publishResultEntities();
-      this.answers.replaceChildren();
-      this.setStatus("");
-      this.bar.replace(defaultQueryDraft());
-      this.runnable = true;
-      this.updateRunState();
-      this.collapse(false);
+      this.resetQuery("navigation");
       return;
     }
     const normalized = normalizeBundle(bundle);
@@ -300,6 +275,10 @@ export class QueryWorkbench {
 
   private newQuery(): void {
     this.abortCurrent(new DOMException("new query", "AbortError"));
+    this.resetQuery("user");
+  }
+
+  private resetQuery(origin: "navigation" | "user"): void {
     this.lastBundle = "";
     this.answerBundle = "";
     this.hasAnswer = false;
@@ -309,16 +288,18 @@ export class QueryWorkbench {
     this.resultRefsBySection = new Map();
     this.resultHighlightsBySection = new Map();
     this.publishResultEntities();
-    state.queryBundle = null;
-    notify();
-    if (this.dependencies.pushUrl) this.dependencies.pushUrl();
-    else this.dependencies.updateUrl();
+    if (origin === "user") {
+      state.queryBundle = null;
+      notify();
+      if (this.dependencies.pushUrl) this.dependencies.pushUrl();
+      else this.dependencies.updateUrl();
+    }
     this.answers.replaceChildren();
     this.setStatus("");
     this.bar.replace(defaultQueryDraft());
     this.runnable = true;
     this.updateRunState();
-    this.collapse();
+    this.collapse(origin === "user");
   }
 
   private draftChanged(draft: QueryDraft): void {

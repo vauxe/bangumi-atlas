@@ -38,6 +38,13 @@ class SeparationReport:
     assignment_rounds: int
 
 
+def _require_coordinate_matrix(coordinates: np.ndarray) -> None:
+    if coordinates.ndim != 2 or coordinates.shape[1] != 3:
+        raise ValueError("coordinates must be (n, 3)")
+    if len(coordinates) == 0:
+        raise ValueError("layout must contain at least one node")
+
+
 def _encode_lattice_cells(cells: np.ndarray) -> np.ndarray:
     """Pack three signed 21-bit cell coordinates into one uint64."""
 
@@ -162,10 +169,7 @@ def normalize_world_scale(
 ) -> tuple[np.ndarray, float]:
     """Scale coordinates so the largest axis span equals ``span``."""
 
-    if coordinates.ndim != 2 or coordinates.shape[1] != 3:
-        raise ValueError("coordinates must be (n, 3)")
-    if len(coordinates) == 0:
-        raise ValueError("layout must contain at least one node")
+    _require_coordinate_matrix(coordinates)
     extent = float((coordinates.max(axis=0) - coordinates.min(axis=0)).max())
     if not np.isfinite(extent) or extent <= 0:
         raise ValueError("layout extent must be positive and finite")
@@ -191,10 +195,7 @@ def separate_published_nodes(
     the published bbox to frame the full graph.
     """
 
-    if coordinates.ndim != 2 or coordinates.shape[1] != 3:
-        raise ValueError("coordinates must be (n, 3)")
-    if len(coordinates) == 0:
-        raise ValueError("layout must contain at least one node")
+    _require_coordinate_matrix(coordinates)
     if not np.isfinite(coordinates).all():
         raise ValueError("coordinates must be finite")
     if not np.isfinite(minimum_distance) or minimum_distance <= 0:
@@ -254,10 +255,7 @@ def find_minimum_distance_violation(
 ) -> tuple[int, int, float] | None:
     """Return the first pair below the global center-distance contract."""
 
-    if coordinates.ndim != 2 or coordinates.shape[1] != 3:
-        raise ValueError("coordinates must be (n, 3)")
-    if len(coordinates) == 0:
-        raise ValueError("layout must contain at least one node")
+    _require_coordinate_matrix(coordinates)
     if not np.isfinite(coordinates).all():
         raise ValueError("coordinates must be finite")
     if not np.isfinite(minimum_distance) or minimum_distance <= 0:

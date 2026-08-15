@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { encodeBundle } from "../src/query/bundle-url";
+import { encodeShareableBundle } from "../src/query/bundle-url";
 import {
   comparisonRecipe,
   decompileQueryRecipe,
@@ -37,8 +37,8 @@ test("context actions compile to exact set and path sections", () => {
   assert.ok(Object.values(path.sections.paths!.query.operators)
     .some((operator) => operator.kind === "path"));
 
-  assert.doesNotThrow(() => encodeBundle(comparison));
-  assert.doesNotThrow(() => encodeBundle(path));
+  assert.ok(encodeShareableBundle(comparison));
+  assert.ok(encodeShareableBundle(path));
 });
 
 test("recipes do not truncate result sets behind the user's back", () => {

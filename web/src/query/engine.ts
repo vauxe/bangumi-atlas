@@ -1,3 +1,4 @@
+import type { StructuralOwner } from "../types";
 import {
   CanonicalValueMap,
   CanonicalValueSet,
@@ -174,7 +175,7 @@ export interface ExecutionOptions {
   onResultEntities?(entities: readonly QueryResultEntity[]): void;
 }
 
-export type QueryGraphEntityRef = `${Exclude<Owner, "episode">}:${number}`;
+export type QueryGraphEntityRef = `${StructuralOwner}:${number}`;
 
 export interface QueryResultEntity {
   ref: QueryEntityRef;

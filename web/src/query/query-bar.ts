@@ -1358,17 +1358,14 @@ export class QueryBar {
   }
 
   undo(): boolean {
-    const next = undoQueryHistory(this.history);
-    if (next === this.history) return false;
-    this.history = next;
-    this.closePanel();
-    this.render(true);
-    this.options.onChange(this.history.current);
-    return true;
+    return this.restoreHistory(undoQueryHistory(this.history));
   }
 
   redo(): boolean {
-    const next = redoQueryHistory(this.history);
+    return this.restoreHistory(redoQueryHistory(this.history));
+  }
+
+  private restoreHistory(next: QueryHistory): boolean {
     if (next === this.history) return false;
     this.history = next;
     this.closePanel();

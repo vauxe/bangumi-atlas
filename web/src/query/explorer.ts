@@ -163,65 +163,85 @@ function inputExpression(
   return { kind: "parameter", name: parameter };
 }
 
-function conditionExpression(
-  owner: Owner,
-  binding: string,
+interface ConditionTarget {
+  expression: Expression;
+  declaredType?: string;
+}
+
+function buildConditionExpression(
   condition: ExplorerCondition,
   collector: ParameterCollector,
+  resolveTarget: (field: string) => ConditionTarget,
 ): Expression {
   switch (condition.kind) {
-    case "compare":
-      assertFieldCapability(owner, condition.field, "filter");
+    case "compare": {
+      const target = resolveTarget(condition.field);
       const comparison: Expression = {
         kind: "compare",
         operator: condition.operator,
-        left: { kind: "field", binding, field: condition.field },
+        left: target.expression,
         right: inputExpression(
           condition.value,
           condition.parameter,
           collector,
-          fieldDefinition(owner, condition.field).type,
+          target.declaredType,
         ),
       };
       return condition.negated ? { kind: "not", term: comparison } : comparison;
+    }
     case "in": {
-      assertFieldCapability(owner, condition.field, "filter");
+      const target = resolveTarget(condition.field);
       if (!condition.values.length) throw new TypeError("值集合不能为空");
       const expression: Expression = {
         kind: "or",
         terms: condition.values.map((value) => ({
           kind: "compare",
           operator: "eq",
-          left: { kind: "field", binding, field: condition.field },
+          left: target.expression,
           right: { kind: "literal", value },
         })),
       };
       return condition.negated ? { kind: "not", term: expression } : expression;
     }
     case "isNull":
-    case "isMissing":
-      assertFieldCapability(owner, condition.field, "filter");
+    case "isMissing": {
+      const target = resolveTarget(condition.field);
       const presence: Expression = {
         kind: condition.kind,
-        term: { kind: "field", binding, field: condition.field },
+        term: target.expression,
       };
       return condition.negated ? { kind: "not", term: presence } : presence;
+    }
     case "all":
     case "any":
-      if (!condition.terms.length)
-        throw new TypeError("条件组不能为空");
+      if (!condition.terms.length) throw new TypeError("条件组不能为空");
       return {
         kind: condition.kind === "all" ? "and" : "or",
         terms: condition.terms.map((term) =>
-          conditionExpression(owner, binding, term, collector)
+          buildConditionExpression(term, collector, resolveTarget)
         ),
       };
     case "not":
       return {
         kind: "not",
-        term: conditionExpression(owner, binding, condition.term, collector),
+        term: buildConditionExpression(condition.term, collector, resolveTarget),
       };
   }
+}
+
+function conditionExpression(
+  owner: Owner,
+  binding: string,
+  condition: ExplorerCondition,
+  collector: ParameterCollector,
+): Expression {
+  return buildConditionExpression(condition, collector, (field) => {
+    assertFieldCapability(owner, field, "filter");
+    return {
+      expression: { kind: "field", binding, field },
+      declaredType: fieldDefinition(owner, field).type,
+    };
+  });
 }
 
 function factConditionExpression(
@@ -230,116 +250,22 @@ function factConditionExpression(
   condition: ExplorerCondition,
   collector: ParameterCollector,
 ): Expression {
-  switch (condition.kind) {
-    case "compare": {
-      assertFactFieldCapability(kind, condition.field, "filter");
-      const comparison: Expression = {
-        kind: "compare",
-        operator: condition.operator,
-        left: { kind: "field", binding, field: condition.field },
-        right: inputExpression(
-          condition.value,
-          condition.parameter,
-          collector,
-          factFieldDefinition(kind, condition.field).type,
-        ),
-      };
-      return condition.negated ? { kind: "not", term: comparison } : comparison;
-    }
-    case "in": {
-      assertFactFieldCapability(kind, condition.field, "filter");
-      if (!condition.values.length) throw new TypeError("值集合不能为空");
-      const expression: Expression = {
-        kind: "or",
-        terms: condition.values.map((value) => ({
-          kind: "compare",
-          operator: "eq",
-          left: { kind: "field", binding, field: condition.field },
-          right: { kind: "literal", value },
-        })),
-      };
-      return condition.negated ? { kind: "not", term: expression } : expression;
-    }
-    case "isNull":
-    case "isMissing": {
-      assertFactFieldCapability(kind, condition.field, "filter");
-      const presence: Expression = {
-        kind: condition.kind,
-        term: { kind: "field", binding, field: condition.field },
-      };
-      return condition.negated ? { kind: "not", term: presence } : presence;
-    }
-    case "all":
-    case "any":
-      if (!condition.terms.length) throw new TypeError("条件组不能为空");
-      return {
-        kind: condition.kind === "all" ? "and" : "or",
-        terms: condition.terms.map((term) =>
-          factConditionExpression(kind, binding, term, collector)
-        ),
-      };
-    case "not":
-      return {
-        kind: "not",
-        term: factConditionExpression(kind, binding, condition.term, collector),
-      };
-  }
+  return buildConditionExpression(condition, collector, (field) => {
+    assertFactFieldCapability(kind, field, "filter");
+    return {
+      expression: { kind: "field", binding, field },
+      declaredType: factFieldDefinition(kind, field).type,
+    };
+  });
 }
 
 function columnConditionExpression(
   condition: ExplorerCondition,
   collector: ParameterCollector,
 ): Expression {
-  switch (condition.kind) {
-    case "compare": {
-      const comparison: Expression = {
-        kind: "compare",
-        operator: condition.operator,
-        left: { kind: "column", name: condition.field },
-        right: inputExpression(
-          condition.value,
-          condition.parameter,
-          collector,
-        ),
-      };
-      return condition.negated ? { kind: "not", term: comparison } : comparison;
-    }
-    case "in": {
-      if (!condition.values.length) throw new TypeError("值集合不能为空");
-      const expression: Expression = {
-        kind: "or",
-        terms: condition.values.map((value) => ({
-          kind: "compare",
-          operator: "eq",
-          left: { kind: "column", name: condition.field },
-          right: { kind: "literal", value },
-        })),
-      };
-      return condition.negated ? { kind: "not", term: expression } : expression;
-    }
-    case "isNull":
-    case "isMissing": {
-      const presence: Expression = {
-        kind: condition.kind,
-        term: { kind: "column", name: condition.field },
-      };
-      return condition.negated ? { kind: "not", term: presence } : presence;
-    }
-    case "all":
-    case "any":
-      if (!condition.terms.length) throw new TypeError("条件组不能为空");
-      return {
-        kind: condition.kind === "all" ? "and" : "or",
-        terms: condition.terms.map((term) =>
-          columnConditionExpression(term, collector)
-        ),
-      };
-    case "not":
-      return {
-        kind: "not",
-        term: columnConditionExpression(condition.term, collector),
-      };
-  }
+  return buildConditionExpression(condition, collector, (name) => ({
+    expression: { kind: "column", name },
+  }));
 }
 
 export function compileExplorerQuery(draft: ExplorerQuery): QueryBundle {
@@ -348,6 +274,7 @@ export function compileExplorerQuery(draft: ExplorerQuery): QueryBundle {
   const parameters: ParameterCollector = { types: {}, values: {} };
   const text = draft.text?.value.trim();
   const fullText = draft.fullText?.value.trim();
+  let root = "source";
   if (text) {
     operators.source = {
       kind: "lookup",
@@ -356,39 +283,31 @@ export function compileExplorerQuery(draft: ExplorerQuery): QueryBundle {
       fields: fieldsWithCapability(draft.owner, "lookup") as LookupField[],
       text: inputExpression(text, draft.text?.parameter, parameters, "string"),
     };
-  } else if (fullText) {
-    if (!draft.fullText?.field) throw new TypeError("正文检索缺少内容字段");
-    assertFieldCapability(draft.owner, draft.fullText.field, "fullText");
-    operators.source = {
-      kind: "fullText",
-      target: "entity",
-      owner: draft.owner,
-      binding,
-      field: draft.fullText.field,
-      text: inputExpression(fullText, draft.fullText.parameter, parameters, "string"),
-    };
-  } else {
+  } else if (!fullText) {
     operators.source = { kind: "scan", owner: draft.owner, binding };
   }
-  let root = "source";
-  if (text && fullText) {
+  if (fullText) {
     if (!draft.fullText?.field) throw new TypeError("正文检索缺少内容字段");
     assertFieldCapability(draft.owner, draft.fullText.field, "fullText");
-    operators.fullTextSource = {
+    const source = text ? "fullTextSource" : "source";
+    const fullTextBinding = text ? "fullTextEntity" : binding;
+    operators[source] = {
       kind: "fullText",
       target: "entity",
       owner: draft.owner,
-      binding: "fullTextEntity",
+      binding: fullTextBinding,
       field: draft.fullText.field,
       text: inputExpression(fullText, draft.fullText.parameter, parameters, "string"),
     };
-    operators.fullTextExists = {
-      kind: "exists",
-      input: root,
-      match: "fullTextSource",
-      columns: [{ outer: binding, inner: "fullTextEntity" }],
-    };
-    root = "fullTextExists";
+    if (text) {
+      operators.fullTextExists = {
+        kind: "exists",
+        input: root,
+        match: source,
+        columns: [{ outer: binding, inner: fullTextBinding }],
+      };
+      root = "fullTextExists";
+    }
   }
   if (draft.condition) {
     operators.filter = {

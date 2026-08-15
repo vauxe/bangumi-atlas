@@ -11,7 +11,6 @@ import type {
   ExplorerAggregate,
   ExplorerAggregateMetric,
   ExplorerCondition,
-  ExplorerQuery,
 } from "./explorer";
 import type { AggregateFunction, LiteralValue } from "./document";
 import type { CompareOperator } from "./value";
@@ -19,7 +18,6 @@ import { MEDIA_NAMES } from "../types";
 import type { Mappings } from "../types";
 import { CAREER_VALUES } from "../value-labels";
 import { FACT_LABEL, OWNER_LABEL } from "./vocabulary";
-export { DEFAULT_RESULT_FIELDS } from "./result-columns";
 
 export { FACT_LABEL, OWNER_LABEL } from "./vocabulary";
 
@@ -161,16 +159,6 @@ const DESCENDING_SORT_FIELDS = new Set([
   "airdate",
 ]);
 
-const SUMMARY_OPERATOR: Record<CompareOperator, string> = {
-  eq: "=",
-  ne: "≠",
-  lt: "<",
-  lte: "≤",
-  gt: ">",
-  gte: "≥",
-  contains: "含",
-};
-
 export function queryFieldsFor(
   owner: Owner,
   capability: FieldCapability,
@@ -261,67 +249,6 @@ export function enumValuesFor(
     return { HAS: "有分集介绍", EMPTY: "无分集介绍" };
   if (definition?.type === "boolean") return { true: "是", false: "否" };
   return null;
-}
-
-function summaryValue(owner: Owner, field: string, value: unknown): string {
-  const enumValue = Object.entries(enumValuesFor(owner, field) ?? {})
-    .find(([candidate]) => candidate === String(value))?.[1];
-  if (enumValue) return enumValue;
-  if (typeof value === "string") return `「${value}」`;
-  if (typeof value === "boolean") return value ? "是" : "否";
-  if (value === null) return "空值";
-  return String(value);
-}
-
-function describeCondition(owner: Owner, condition: ExplorerCondition): string {
-  switch (condition.kind) {
-    case "compare":
-      const input = condition.parameter
-        ? `参数 ${condition.parameter}（${summaryValue(owner, condition.field, condition.value)}）`
-        : summaryValue(owner, condition.field, condition.value);
-      if (condition.negated && condition.operator === "contains")
-        return `${FIELD_LABEL[condition.field] ?? condition.field}不含${input}`;
-      if (condition.negated)
-        return `排除（${FIELD_LABEL[condition.field] ?? condition.field} ${SUMMARY_OPERATOR[condition.operator]} ${input}）`;
-      return `${FIELD_LABEL[condition.field] ?? condition.field} ${SUMMARY_OPERATOR[condition.operator]} ${input}`;
-    case "in":
-      return `${FIELD_LABEL[condition.field] ?? condition.field}${condition.negated ? "不属于" : "属于"}（${condition.values.map((value) => summaryValue(owner, condition.field, value)).join("、")}）`;
-    case "isNull":
-      return `${FIELD_LABEL[condition.field] ?? condition.field}${condition.negated ? "不为空" : "为空"}`;
-    case "isMissing":
-      return `${FIELD_LABEL[condition.field] ?? condition.field}${condition.negated ? "已提供" : "未提供"}`;
-    case "all":
-    case "any":
-      return `${condition.kind === "all" ? "全部" : "任一"}（${condition.terms.map((term) => describeCondition(owner, term)).join("、")}）`;
-    case "not":
-      return `排除（${describeCondition(owner, condition.term)}）`;
-  }
-}
-
-export function describeExplorerQuery(draft: ExplorerQuery): string {
-  const parts = [OWNER_LABEL[draft.owner]];
-  if (draft.text) parts.push(`名称含「${draft.text.value}」`);
-  if (draft.fullText) {
-    const scope = draft.fullText.field === "description" ? "分集介绍" : "简介";
-    parts.push(`${scope}含「${draft.fullText.value}」`);
-  }
-  if (draft.condition) parts.push(describeCondition(draft.owner, draft.condition));
-  for (const relation of draft.relations ?? []) {
-    const related = parseEntityRef(relation.related);
-    parts.push(
-      `与${OWNER_LABEL[related.owner]} #${related.archiveId} ${relation.exists ? "有" : "无"}${FACT_LABEL[relation.factKind] ?? relation.factKind}`,
-    );
-    for (const endpoint of relation.additionalEndpoints ?? []) {
-      const context = parseEntityRef(endpoint.related);
-      parts.push(`限定${OWNER_LABEL[context.owner]} #${context.archiveId}`);
-    }
-  }
-  for (const order of draft.orderBy ?? [])
-    parts.push(
-      `${FIELD_LABEL[order.column] ?? order.column}${order.direction === "asc" ? "升序" : "降序"}`,
-    );
-  if (parts.length === 1) parts.push("全部条目");
-  return parts.join(" · ");
 }
 
 export function queryConditionOperators(owner: Owner, field: string): string[] {
@@ -524,11 +451,6 @@ export function parseFactValues(
   return values;
 }
 
-export function queryProjectFields(owner: Owner): string[] {
-  return queryFieldsFor(owner, "project")
-    .filter((field) => !INTERNAL_FIELDS.has(field));
-}
-
 export function combineExplorerConditions(
   mode: "all" | "any",
   terms: ExplorerCondition[],
@@ -692,35 +614,6 @@ export function parseValues(
     .map((value) => parseValue(owner, field, byLabel.get(value) ?? value));
   if (!values.length) throw new TypeError("值集合不能为空");
   return values;
-}
-
-export function isExplorerConditionComplete(
-  owner: Owner,
-  field: string,
-  operator: string,
-  raw: string,
-): boolean {
-  if (
-    operator === "isNull" || operator === "isNotNull" ||
-    operator === "isMissing" || operator === "isPresent"
-  ) return true;
-  if (!field || !raw.trim()) return false;
-  if (operator === "in" || operator === "notIn") {
-    try {
-      parseValues(owner, field, raw);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  if (operator !== "notContains" && !COMPARE.has(operator as CompareOperator)) return false;
-  const type = QUERY_CONTRACT.owners[owner].fields[field]?.type;
-  if (type === "integer" || type === "number") {
-    const value = Number(raw);
-    return Number.isFinite(value) && (type !== "integer" || Number.isSafeInteger(value));
-  }
-  if (type === "boolean") return raw === "true" || raw === "false";
-  return true;
 }
 
 type EditableExplorerCondition = Extract<

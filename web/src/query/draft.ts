@@ -10,6 +10,7 @@ import {
   QUERY_CONTRACT,
   type Owner,
 } from "./contract";
+import { operatorInputs } from "./document";
 import type {
   FullTextField,
   OrderTerm,
@@ -336,6 +337,11 @@ function columnsForScope(
     : { columns: normalizeResultColumnSelection(scope, query.columns) };
 }
 
+function listQueryForScope(query: ListQuery, scope: EntityScope): ListQuery {
+  const { columns: _columns, ...rest } = query;
+  return { ...rest, scope, ...columnsForScope(query, scope) };
+}
+
 function explorerOf(query: ListQuery, owner: Owner): ExplorerQuery {
   const {
     scope: _scope,
@@ -415,14 +421,15 @@ export function applyQueryAction(
     if (draft.kind !== "list" || !draft.query)
       throw new TypeError("只有实体列表可以选择多个实体类型");
     const scope = normalizeEntityScope(action.scope);
-    const { orderBy: _previous, columns: _columns, ...query } = draft.query;
+    const { orderBy: _previous, ...query } = listQueryForScope(
+      draft.query,
+      scope,
+    );
     const orderBy = orderByForScope(draft.query, scope);
     return checked({
       kind: "list",
       query: {
         ...query,
-        scope,
-        ...columnsForScope(draft.query, scope),
         ...(orderBy.length ? { orderBy } : {}),
       },
     });
@@ -432,10 +439,9 @@ export function applyQueryAction(
       return checked({ kind: "aggregate", query: { ...draft.query, owner: action.owner } });
     if (draft.kind === "list" && draft.query) {
       const scope: EntityScope = [action.owner];
-      const { columns: _columns, ...query } = draft.query;
       return checked({
         kind: "list",
-        query: { ...query, scope, ...columnsForScope(draft.query, scope) },
+        query: listQueryForScope(draft.query, scope),
       });
     }
     return defaultQueryDraft(action.owner);
@@ -454,14 +460,9 @@ export function applyQueryAction(
       const scope = action.owner
         ? [action.owner] as EntityScope
         : draft.query.scope;
-      const { columns: _columns, ...query } = draft.query;
       return checked({
         kind: "list",
-        query: {
-          ...query,
-          scope,
-          ...columnsForScope(draft.query, scope),
-        },
+        query: listQueryForScope(draft.query, scope),
       });
     }
     return defaultQueryDraft(action.owner ?? DEFAULT_ENTITY_SCOPE);
@@ -789,19 +790,6 @@ export function compileQueryDraft(draft: QueryDraft): QueryBundle {
         maxPaths: draft.maxPaths,
       });
   }
-}
-
-function operatorInputs(operator: QueryOperator): string[] {
-  if (operator.kind === "union" || operator.kind === "intersect" || operator.kind === "except")
-    return operator.branches.map((branch) => branch.input);
-  if (operator.kind === "exists" || operator.kind === "notExists")
-    return [operator.input, operator.match];
-  if (
-    operator.kind === "filter" || operator.kind === "project" ||
-    operator.kind === "matchFact" || operator.kind === "followRef" ||
-    operator.kind === "aggregate" || operator.kind === "path"
-  ) return [operator.input];
-  return [];
 }
 
 function operatorSubtree(

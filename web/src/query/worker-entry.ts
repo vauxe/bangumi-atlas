@@ -18,6 +18,7 @@ import { createQueryWorkerRuntime } from "./worker-runtime";
 import { QUERY_CONTRACT } from "./contract";
 import { canonicalJson } from "./canonical";
 import { SiteRuntimeError } from "../site-error";
+import { sha256Hex } from "../data-integrity";
 
 interface WorkerScope {
   onmessage: ((event: MessageEvent<unknown>) => void) | null;
@@ -32,9 +33,7 @@ const REQUIRED_CAPABILITIES = [
 ] as const;
 
 async function contractDigest(): Promise<string> {
-  const bytes = new TextEncoder().encode(canonicalJson(QUERY_CONTRACT));
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-  return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return sha256Hex(canonicalJson(QUERY_CONTRACT));
 }
 
 const runtimeSource = loadManifest().then(async (manifest) => {

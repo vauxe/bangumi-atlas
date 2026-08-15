@@ -1,4 +1,4 @@
-import { canonicalJson, normalizeQuery } from "./canonical";
+import { normalizeQuery } from "./canonical";
 import type { ParameterValues, QueryDocument } from "./document";
 import { QUERY_SECURITY_PROFILE, safeRecordKey } from "./security";
 
@@ -84,10 +84,4 @@ export function normalizeBundle(bundle: QueryBundle): QueryBundle {
     release: { ...bundle.release },
     sections,
   };
-}
-
-export async function queryBundleDigest(bundle: QueryBundle): Promise<string> {
-  const bytes = new TextEncoder().encode(canonicalJson(normalizeBundle(bundle)));
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-  return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }

@@ -141,6 +141,22 @@ export interface Geometry {
 
 export type EntityKind = 1 | 2 | 3;
 
+export const ENTITY_OWNER_BY_KIND = [
+  "",
+  "subject",
+  "person",
+  "character",
+] as const;
+export type StructuralOwner = Exclude<
+  (typeof ENTITY_OWNER_BY_KIND)[number],
+  ""
+>;
+export const ENTITY_KIND_BY_OWNER = {
+  subject: 1,
+  person: 2,
+  character: 3,
+} as const satisfies Record<StructuralOwner, EntityKind>;
+
 export type TagVocabularyField = "metaTags" | "tags";
 
 export type NameRow = [
@@ -383,6 +399,6 @@ export const MEDIA_NAMES: Record<number, string> = {
 export const etype = (key: number): number => key >>> 24;
 export const eid = (key: number): number => key & 0xffffff;
 export const bgmUrl = (key: number): string => {
-  const kind = ["", "subject", "person", "character"][etype(key)];
+  const kind = ENTITY_OWNER_BY_KIND[etype(key)];
   return `https://bgm.tv/${kind}/${eid(key)}`;
 };

@@ -3,13 +3,11 @@ import { test } from "node:test";
 
 import {
   allRelationFacts,
-  factDirection,
   factLabel,
   factPrimaryOther,
   relationNeighbors,
   relationNeighborKeys,
   resolveLoadedNeighborRanks,
-  uniqueNeighbors,
 } from "../src/neighbors";
 import type { Fact, Mappings, Page } from "../src/types";
 
@@ -83,8 +81,6 @@ test("directional facts label the target side with a reverse arrow", () => {
   const fact = relates(S(1), S(2));
   assert.equal(factLabel(fact, S(1), mappings), "改编");
   assert.equal(factLabel(fact, S(2), mappings), "← 改编");
-  assert.equal(factDirection(fact, S(1)), 1);
-  assert.equal(factDirection(fact, S(2)), -1);
 });
 
 test("unknown raw codes stay visible as numbers instead of dropping", () => {
@@ -130,10 +126,6 @@ test("keeps every relationship label in the visual working set", () => {
   const ws = relationNeighbors(facts, self, mappings, rankOf, 4);
   assert.deepEqual(ws.ranks, [1, 1, 3]);
   assert.deepEqual(ws.labels, ["改编", "← 前传", "改编"]);
-
-  const unique = uniqueNeighbors(facts, self, mappings, rankOf, 4);
-  assert.deepEqual(unique.ranks, [1, 3]);
-  assert.deepEqual(unique.labels, ["改编", "改编"]);
 });
 
 test("keeps every relationship edge when no explicit cap is requested", () => {

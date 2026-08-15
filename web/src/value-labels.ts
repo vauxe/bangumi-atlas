@@ -2,7 +2,6 @@ import {
   MEDIA_NAMES,
   type EntityKind,
   type Mappings,
-  type StructuralEntity,
 } from "./types";
 import type { ProjectedEntity } from "./data";
 
@@ -22,31 +21,6 @@ export function careerValueLabel(value: string): string {
 
 function compactUnique(values: readonly (string | null | undefined)[]): string[] {
   return [...new Set(values.filter((value): value is string => Boolean(value)))];
-}
-
-/** Extra context for otherwise indistinguishable name suggestions. */
-export function entitySuggestionContext(
-  entity: StructuralEntity,
-  mappings: Mappings,
-): string {
-  if (entity.kind === "subject") {
-    const year = /^\d{4}/.exec(entity.date)?.[0];
-    return compactUnique([
-      mappings.subject_type[String(entity.type)] ?? MEDIA_NAMES[entity.type],
-      entity.platformCode === null
-        ? null
-        : mappings.platform[`${entity.type}:${entity.platformCode}`],
-      year,
-    ]).join(" · ");
-  }
-  if (entity.kind === "person") {
-    return compactUnique([
-      mappings.person_type[String(entity.type)],
-      ...entity.career.map((career) => CAREER_VALUES[career]).filter(Boolean)
-        .slice(0, 2),
-    ]).join(" · ");
-  }
-  return mappings.character_role[String(entity.role)] ?? "";
 }
 
 /** Format the same label from a query projection without hydrating full entities. */

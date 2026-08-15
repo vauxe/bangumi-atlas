@@ -98,24 +98,26 @@ interface ValueContext {
   mappings?: Mappings;
 }
 
+function rowOwner(row: Record<string, RuntimeValue>): Owner | null {
+  const ref = row.ref;
+  if (typeof ref !== "string") return null;
+  const separator = ref.indexOf(":");
+  if (separator <= 0) return null;
+  const owner = ref.slice(0, separator) as Owner;
+  return Object.hasOwn(QUERY_CONTRACT.owners, owner) ? owner : null;
+}
+
 function valueSemantic(context: ValueContext): string | undefined {
   if (context.semantic) return context.semantic;
-  const ref = context.row.ref;
-  if (typeof ref !== "string") return undefined;
-  const separator = ref.indexOf(":");
-  const owner = ref.slice(0, separator) as Owner;
-  return separator > 0 && Object.hasOwn(QUERY_CONTRACT.owners, owner) &&
-      Object.hasOwn(QUERY_CONTRACT.owners[owner].fields, context.column)
+  const owner = rowOwner(context.row);
+  return owner && Object.hasOwn(QUERY_CONTRACT.owners[owner].fields, context.column)
     ? `${owner}.${context.column}`
     : undefined;
 }
 
 function entityFieldUnavailable(context: ValueContext): boolean {
-  const ref = context.row.ref;
-  if (typeof ref !== "string") return false;
-  const separator = ref.indexOf(":");
-  const owner = ref.slice(0, separator) as Owner;
-  if (separator <= 0 || !Object.hasOwn(QUERY_CONTRACT.owners, owner)) return false;
+  const owner = rowOwner(context.row);
+  if (!owner) return false;
   const knownEntityField = Object.values(QUERY_CONTRACT.owners).some(({ fields }) =>
     Object.hasOwn(fields, context.column)
   );
@@ -165,13 +167,12 @@ function enumLabel(context: ValueContext): string | null {
 }
 
 function entityEnumText(value: number, context: ValueContext): string | null {
-  const ref = context.row.ref;
-  if (typeof ref !== "string") return null;
-  if (context.column === "type" && ref.startsWith("subject:"))
+  const owner = rowOwner(context.row);
+  if (context.column === "type" && owner === "subject")
     return MEDIA_NAMES[value] ?? `未知作品类型（${value}）`;
-  if (context.column === "type" && ref.startsWith("person:"))
+  if (context.column === "type" && owner === "person")
     return PERSON_TYPE_NAMES[value] ?? `未知人物类型（${value}）`;
-  if (context.column === "role" && ref.startsWith("character:"))
+  if (context.column === "role" && owner === "character")
     return CHARACTER_ROLE_NAMES[value] ?? `未知角色定位（${value}）`;
   return null;
 }

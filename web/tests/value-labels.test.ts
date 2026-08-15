@@ -1,15 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type {
-  CharacterEntity,
-  Mappings,
-  PersonEntity,
-  SubjectEntity,
-} from "../src/types";
+import type { Mappings } from "../src/types";
 import {
   ambiguousNameSuggestionRanks,
-  entitySuggestionContext,
   projectedEntitySuggestionContext,
 } from "../src/value-labels";
 
@@ -21,45 +15,6 @@ const mappings: Mappings = {
   character_role: { "1": "主角" },
   episode_type: {},
 };
-
-test("describes ambiguous works with type, platform, and year", () => {
-  const entity = {
-    kind: "subject",
-    type: 2,
-    platformCode: 1001,
-    date: "1995-10-04",
-  } as SubjectEntity;
-
-  assert.equal(
-    entitySuggestionContext(entity, mappings),
-    "动画 · TV · 1995",
-  );
-});
-
-test("describes ambiguous people and characters with readable domain values", () => {
-  const person = {
-    kind: "person",
-    type: 1,
-    career: ["actor", "seiyu", "writer"],
-  } as PersonEntity;
-  const character = { kind: "character", role: 1 } as CharacterEntity;
-
-  assert.equal(
-    entitySuggestionContext(person, mappings),
-    "个人 · 演员 · 声优",
-  );
-  assert.equal(entitySuggestionContext(character, mappings), "主角");
-});
-
-test("omits unavailable or technical fallback values from suggestion context", () => {
-  const person = {
-    kind: "person",
-    type: 99,
-    career: ["unmapped-career"],
-  } as PersonEntity;
-
-  assert.equal(entitySuggestionContext(person, mappings), "");
-});
 
 test("asks for extra context only when visible names collide within one entity kind", () => {
   const items = [

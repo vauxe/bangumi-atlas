@@ -7,6 +7,7 @@ import {
   parseFactRef,
   type Owner,
 } from "./contract";
+import { operatorInputs } from "./document";
 import type {
   AggregateOperator,
   ExistsOperator,
@@ -30,6 +31,7 @@ import type {
 } from "./document";
 import { QUERY_SECURITY_PROFILE, safeRecordKey } from "./security";
 import { validateQuery } from "./validate";
+import { sha256Hex } from "../data-integrity";
 
 function queryOwner(value: Owner): Owner {
   if (!Object.hasOwn(QUERY_CONTRACT.owners, value))
@@ -225,25 +227,6 @@ function normalizeExpression(
   }
 }
 
-function operatorInputs(operator: QueryOperator): string[] {
-  if (
-    operator.kind === "union" ||
-    operator.kind === "intersect" ||
-    operator.kind === "except"
-  )
-    return operator.branches.map((branch) => branch.input);
-  if (operator.kind === "exists" || operator.kind === "notExists")
-    return [operator.input, operator.match];
-  return operator.kind === "filter" ||
-    operator.kind === "project" ||
-    operator.kind === "matchFact" ||
-    operator.kind === "followRef" ||
-    operator.kind === "aggregate" ||
-    operator.kind === "path"
-    ? [operator.input]
-    : [];
-}
-
 interface BindingState {
   names: Map<string, string>;
   used: Set<string>;
@@ -283,6 +266,17 @@ function allocateBinding(state: BindingState, source: string): string {
   state.names.set(source, binding);
   state.used.add(binding);
   return binding;
+}
+
+function renameRoles(
+  roles: Record<string, string>,
+  state: BindingState,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(roles)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([role, binding]) => [role, allocateBinding(state, binding)]),
+  );
 }
 
 function renameExpressionBindings(
@@ -380,14 +374,9 @@ function canonicalizeBindings(
           };
         } else {
           state = outputBindingState([]);
-          const roles = Object.fromEntries(
-            Object.entries(operator.roles)
-              .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-              .map(([role, binding]) => [role, allocateBinding(state, binding)]),
-          );
           normalized = {
             ...operator,
-            roles,
+            roles: renameRoles(operator.roles, state),
             factBinding: allocateBinding(state, operator.factBinding),
             text: renameExpressionBindings(operator.text, outputBindingState([])),
           };
@@ -395,14 +384,9 @@ function canonicalizeBindings(
         break;
       case "factLookup": {
         state = outputBindingState([]);
-        const roles = Object.fromEntries(
-          Object.entries(operator.roles)
-            .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-            .map(([role, binding]) => [role, allocateBinding(state, binding)]),
-        );
         normalized = {
           ...operator,
-          roles,
+          roles: renameRoles(operator.roles, state),
           factBinding: allocateBinding(state, operator.factBinding),
           ref: renameExpressionBindings(operator.ref, outputBindingState([])),
         };
@@ -455,14 +439,9 @@ function canonicalizeBindings(
       }
       case "matchFact": {
         state = copyBindingState(visit(operator.input));
-        const roles = Object.fromEntries(
-          Object.entries(operator.roles)
-            .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-            .map(([role, binding]) => [role, allocateBinding(state, binding)]),
-        );
         normalized = {
           ...operator,
-          roles,
+          roles: renameRoles(operator.roles, state),
           factBinding: allocateBinding(state, operator.factBinding),
         };
         break;
@@ -1178,7 +1157,5 @@ export function normalizeQuery(
 }
 
 export async function queryDigest(document: QueryDocument): Promise<string> {
-  const bytes = new TextEncoder().encode(canonicalJson(document));
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-  return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return sha256Hex(canonicalJson(document));
 }
