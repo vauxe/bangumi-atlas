@@ -299,6 +299,30 @@ test("renders person careers as readable labels without changing raw data", () =
   }), "声优、作家");
 });
 
+test("renders content presence states as user-facing labels", () => {
+  assert.equal(queryValueText("HAS", {
+    column: "summaryState",
+    row: { ref: "subject:42" },
+  }), "有简介");
+  assert.equal(queryValueText("EMPTY", {
+    column: "summaryState",
+    row: { ref: "person:42" },
+  }), "无简介");
+  assert.equal(queryValueText("HAS", {
+    column: "descriptionState",
+    row: { ref: "episode:42" },
+  }), "有分集介绍");
+  assert.equal(queryValueText("EMPTY", {
+    column: "descriptionState",
+    row: { ref: "episode:42" },
+  }), "无分集介绍");
+  assert.equal(queryValueText("HAS", {
+    column: "summaryState",
+    row: { ref: "fact:42" },
+    semantic: "VOICE_CREDIT.summaryState",
+  }), "有说明");
+});
+
 test("labels unknown release enum values with their domain meaning", () => {
   assert.equal(queryValueText(99, {
     column: "type",
