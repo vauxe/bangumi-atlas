@@ -482,6 +482,13 @@ export async function loadManifest(): Promise<Manifest> {
       `布局应为 3D,实际为 ${String(m.layout?.dimensions ?? "缺失")}`,
     );
   if (
+    !Number.isFinite(m.layout.minimum_node_center_distance) ||
+    m.layout.minimum_node_center_distance <= 0
+  )
+    throw new SiteDataContractError(
+      "layout.minimum_node_center_distance 必须为有限正数",
+    );
+  if (
     !Array.isArray(m.bbox) ||
     m.bbox.length !== 2 ||
     m.bbox.some(

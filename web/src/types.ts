@@ -23,6 +23,12 @@ export interface PositionEncoding {
   scale: [number, number, number];
 }
 
+export interface LayoutContract extends Record<string, unknown> {
+  dimensions: 3;
+  /** Final decoded center-distance floor used to calibrate local navigation. */
+  minimum_node_center_distance: number;
+}
+
 export interface SubjectQueryColumnLayout {
   order: "source-id";
   count: number;
@@ -120,7 +126,7 @@ export interface Manifest {
   year_range: [number, number];
   /** top-32 元标签名,下标 = tags.bin 位图的 bit 序。 */
   tags: string[];
-  layout: Record<string, unknown> | null;
+  layout: LayoutContract;
   /** 逻辑文件名 -> [bytes, sha256, 不可变物理文件名]。 */
   files: Record<string, [number, string, string]>;
   core_bytes: number;

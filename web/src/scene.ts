@@ -20,14 +20,12 @@ import { cursorRay, nearestAlongRay } from "./anchor";
 import {
   AtlasOrbitController,
   Camera,
-  FOCUS_ZOOM,
   prefersReducedMotion,
 } from "./camera";
 import type { OrbitState } from "./camera";
 import { COVER_SIZES, coverItems, coverUrl } from "./covers";
 import type { CoverItem } from "./covers";
 import {
-  NEARBY_LABEL_ZOOM,
   nearbyLabelLayers as makeNearbyLabelLayers,
   nearbyLabelRanks,
   visibleLabelPoint,
@@ -36,6 +34,8 @@ import {
 import { state } from "./store";
 import { TYPE_COLORS, etype } from "./types";
 import type { Bounds3D, Geometry } from "./types";
+import { focusPixelsToWorldUnits } from "./view-calibration";
+import type { ViewCalibration } from "./view-calibration";
 
 export type { OrbitState } from "./camera";
 
@@ -55,12 +55,14 @@ const CASCADE_STEPS = 50;
 const PULSE_MS = 500;
 const ANCHOR_FLASH_MS = 500;
 const NEARBY_LABEL_SETTLE_MS = 140;
-// 持久节点使用世界尺寸：在标准聚焦层级保持原有屏幕观感，继续靠近时
-// 则遵循 3D 投影自然放大。只保留远景最小像素尺寸，不设近景上限。
-const FOCUS_SCALE = 2 ** FOCUS_ZOOM;
-const WORKING_NODE_RADIUS = 9 / FOCUS_SCALE;
-const WORKING_COVER_SIZE = 16.5 / FOCUS_SCALE;
-const WORKING_GLOW_RADIUS = 36 / FOCUS_SCALE;
+// 持久节点使用世界尺寸：在当前发布的聚焦层级保持这些屏幕像素语义，
+// 继续靠近时遵循 3D 投影自然放大。只保留远景最小像素尺寸。
+const WORKING_NODE_RADIUS_AT_FOCUS_PX = 9;
+const WORKING_COVER_SIZE_AT_FOCUS_PX = 16.5;
+const WORKING_GLOW_RADIUS_AT_FOCUS_PX = 36;
+// 旧语境节点的 0.02 common-unit 系数在 zoom 6.2 下对应的像素系数；
+// 固化的是屏显语义，而非发布坐标单位。
+const CONTEXT_RADIUS_SCALE_AT_FOCUS_PX = 0.02 * 2 ** 6.2;
 
 function cascadeProgress(
   elapsed: number,
@@ -405,9 +407,10 @@ export class Scene {
     geo: Geometry,
     bounds: Bounds3D,
     private cb: SceneCallbacks,
+    private readonly calibration: ViewCalibration,
   ) {
     this.geo = geo;
-    this.camera = new Camera(bounds);
+    this.camera = new Camera(bounds, calibration);
     const n = geo.key.length;
     this.styleBuf = new Uint8Array(n * 4);
     this.queryResultMask = new Uint8Array(n);
@@ -428,7 +431,7 @@ export class Scene {
         // 前进没有顶。无上限的 zoom 会让交互步长 ∝ 每像素世界
         // 距离,画面如同冻结
         minZoom: -2,
-        maxZoom: 10,
+        maxZoom: this.calibration.maxZoom,
         // 自定义选项经 view 的 controllerProps 原样透传给控制器,
         // deck 的 ControllerOptions 类型未涵盖
         zoomAnchor: (px: number, py: number) => this.rayAnchor(px, py),
@@ -534,7 +537,7 @@ export class Scene {
     if (
       hasWorkingSet() ||
       !this.cb.nameOf ||
-      this.camera.viewState.zoom < NEARBY_LABEL_ZOOM
+      this.camera.viewState.zoom < this.calibration.nearbyLabelZoom
     ) {
       this.nearbyRanks = [];
       return;
@@ -561,6 +564,7 @@ export class Scene {
             this.camera.viewState.zoom,
             viewport.width,
             viewport.height,
+            this.calibration,
             {
               visible: (position) =>
                 visibleLabelPoint(position, project, viewport) !== null,
@@ -869,7 +873,10 @@ export class Scene {
             },
           },
           radiusUnits: "common",
-          getRadius: WORKING_NODE_RADIUS,
+          getRadius: focusPixelsToWorldUnits(
+            WORKING_NODE_RADIUS_AT_FOCUS_PX,
+            this.calibration,
+          ),
           radiusMinPixels: 3,
           filled: false,
           stroked: true,
@@ -892,7 +899,10 @@ export class Scene {
             },
           },
           radiusUnits: "common",
-          getRadius: WORKING_NODE_RADIUS,
+          getRadius: focusPixelsToWorldUnits(
+            WORKING_NODE_RADIUS_AT_FOCUS_PX,
+            this.calibration,
+          ),
           radiusMinPixels: 3,
           stroked: true,
           getLineColor: [255, 255, 255, 200],
@@ -1017,7 +1027,10 @@ export class Scene {
         },
         getFillColor: [242, 91, 166, 60],
         radiusUnits: "common",
-        getRadius: WORKING_GLOW_RADIUS,
+        getRadius: focusPixelsToWorldUnits(
+          WORKING_GLOW_RADIUS_AT_FOCUS_PX,
+          this.calibration,
+        ),
         radiusMinPixels: 12,
         billboard: true,
         parameters: { depthCompare: "always", depthWriteEnabled: false },
@@ -1033,7 +1046,10 @@ export class Scene {
           attributes: { getPosition: { value: pinPos, size: 3 } },
         },
         radiusUnits: "common",
-        getRadius: WORKING_NODE_RADIUS * 1.65,
+        getRadius: focusPixelsToWorldUnits(
+          WORKING_NODE_RADIUS_AT_FOCUS_PX * 1.65,
+          this.calibration,
+        ),
         radiusMinPixels: 8,
         filled: false,
         stroked: true,
@@ -1224,7 +1240,10 @@ export class Scene {
             height: 100,
           }),
           getPosition: (d) => this.posOf(d.rank) ?? [0, 0, 0],
-          getSize: WORKING_COVER_SIZE,
+          getSize: focusPixelsToWorldUnits(
+            WORKING_COVER_SIZE_AT_FOCUS_PX,
+            this.calibration,
+          ),
           getColor: (d) => {
             const neighborIndex = neighborIndexByRank.get(d.rank);
             const k =
@@ -1267,6 +1286,7 @@ export class Scene {
           },
           viewport,
           this.camera.viewState.zoom,
+          this.calibration,
         );
         if (missing.length) this.requestLabelNames(missing);
         layers.push(...nameLayers);
@@ -1409,7 +1429,10 @@ export class Scene {
         id: "context",
         data: this.buildContextData() as never,
         radiusUnits: "common",
-        radiusScale: 0.02,
+        radiusScale: focusPixelsToWorldUnits(
+          CONTEXT_RADIUS_SCALE_AT_FOCUS_PX,
+          this.calibration,
+        ),
         radiusMinPixels: 1.5,
         radiusMaxPixels: 6,
         billboard: true,
