@@ -30,6 +30,7 @@ import { beginSelection, notify, state, subscribe } from "./store";
 import { TYPE_NAMES, etype } from "./types";
 import { locateStableTarget, resolveUrlSelection } from "./url-restore";
 import { decodeViewUrl, encodeViewUrl } from "./view-url";
+import { viewCalibration } from "./view-calibration";
 
 const HOVER_PREFETCH_MS = 150;
 
@@ -61,6 +62,9 @@ async function boot(): Promise<void> {
   });
   hud.textContent = "加载清单…";
   const manifest = await loadManifest();
+  const calibration = viewCalibration(
+    manifest.layout.minimum_node_center_distance,
+  );
   let dataPreparation: Promise<Data> | null = null;
   const prepareData = (): Promise<Data> => {
     if (dataPreparation) return dataPreparation;
@@ -248,7 +252,7 @@ async function boot(): Promise<void> {
       hud.dataset.state = "error";
       hud.textContent = sceneFailureMessage;
     },
-  });
+  }, calibration);
   // ---- 几何流:场景已就绪,首块回调即可渲染 ----
   let geometryComplete = false;
   let pendingUrlHash: string | null = null;

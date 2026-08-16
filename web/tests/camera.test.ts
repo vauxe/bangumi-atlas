@@ -11,6 +11,7 @@ import {
   zoomTowardAnchor,
 } from "../src/camera";
 import type { Bounds3D } from "../src/types";
+import { viewCalibration } from "../src/view-calibration";
 
 Object.defineProperties(globalThis, {
   innerWidth: { configurable: true, value: 1280 },
@@ -25,10 +26,11 @@ const cube = (size: number): Bounds3D => [
   [-size / 2, -size / 2, -size / 2],
   [size / 2, size / 2, size / 2],
 ];
+const calibration = viewCalibration(2);
 
 test("uses the bounding box to frame and restore the full graph", () => {
-  const camera = new Camera(cube(100));
-  const largerWorld = new Camera(cube(1000));
+  const camera = new Camera(cube(100), calibration);
+  const largerWorld = new Camera(cube(1000), calibration);
   const homeZoom = camera.viewState.zoom;
 
   assert.ok(homeZoom > largerWorld.viewState.zoom);
@@ -46,9 +48,9 @@ test("uses the bounding box to frame and restore the full graph", () => {
   assert.equal(camera.home().zoom, homeZoom);
 });
 
-test("keeps focus and explicit zoom independent of full-graph fit", () => {
-  const smallWorld = new Camera(cube(100));
-  const largeWorld = new Camera(cube(1000));
+test("uses calibrated focus independent of full-graph fit", () => {
+  const smallWorld = new Camera(cube(100), calibration);
+  const largeWorld = new Camera(cube(1000), calibration);
 
   smallWorld.absorb({
     target: [0, 0, 0],
@@ -66,7 +68,7 @@ test("keeps focus and explicit zoom independent of full-graph fit", () => {
   const smallFocus = smallWorld.flyTo([1, 2, 3]).zoom;
   const largeFocus = largeWorld.flyTo([1, 2, 3]).zoom;
   assert.equal(smallFocus, largeFocus);
-  assert.ok(smallFocus > 1);
+  assert.equal(smallFocus, calibration.focusZoom);
 
   const explicitZoom = largeWorld.flyTo([4, 5, 6], 12);
   assert.equal(explicitZoom.zoom, 12);
@@ -74,7 +76,7 @@ test("keeps focus and explicit zoom independent of full-graph fit", () => {
 });
 
 test("single-click selection preserves the view for a nearby node", () => {
-  const camera = new Camera(cube(100));
+  const camera = new Camera(cube(100), calibration);
   camera.absorb({
     target: [0, 0, 0],
     zoom: 6,
@@ -104,7 +106,7 @@ test("centers home and leaves restored or deliberate pans free", () => {
     [-311.69, -89.26, -311.69],
     [311.68, 66.96, 311.69],
   ];
-  const camera = new Camera(bounds);
+  const camera = new Camera(bounds, calibration);
 
   assert.ok(Math.abs(camera.viewState.target[0] + 0.005) < 1e-10);
   assert.ok(Math.abs(camera.viewState.target[1] + 11.15) < 1e-10);
@@ -130,7 +132,7 @@ test("expands the far plane enough to contain the bounded graph at deep zoom", (
     [-311.69, -89.26, -311.69],
     [311.68, 66.96, 311.69],
   ];
-  const camera = new Camera(bounds);
+  const camera = new Camera(bounds, calibration);
   camera.resize(900);
   camera.absorb({
     target: [-400, 228.36, 500],

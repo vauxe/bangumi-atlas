@@ -346,7 +346,11 @@ function testManifest(
     ],
     year_range: [1900, 2035],
     tags: [],
-    layout: { dimensions: 3, shape_digest: "c80e48f8" },
+    layout: {
+      dimensions: 3,
+      minimum_node_center_distance: 2,
+      shape_digest: "c80e48f8",
+    },
     files: completeFiles,
     core_bytes: 0,
     total_bytes: Object.values(completeFiles).reduce(
@@ -1328,11 +1332,27 @@ test("rejects obsolete geometry manifests before streaming", async () => {
 
   const obsoleteLayout = {
     ...testManifest({}),
-    layout: { dimensions: 2, shape_digest: "c80e48f8" },
+    layout: {
+      dimensions: 2,
+      minimum_node_center_distance: 2,
+      shape_digest: "c80e48f8",
+    },
   };
   globalThis.fetch = (async () =>
     new Response(JSON.stringify(obsoleteLayout))) as typeof fetch;
   await assert.rejects(loadManifest(), /布局应为 3D.*实际为 2.*重建站点数据/);
+
+  const invalidCenterDistance = {
+    ...testManifest({}),
+    layout: {
+      dimensions: 3,
+      minimum_node_center_distance: 0,
+      shape_digest: "c80e48f8",
+    },
+  };
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(invalidCenterDistance))) as typeof fetch;
+  await assert.rejects(loadManifest(), /minimum_node_center_distance/);
 
   const invalidBounds = {
     ...testManifest({}),

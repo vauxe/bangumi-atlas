@@ -10,10 +10,11 @@ import {
   Scene,
   updateQueryResultMask,
 } from "../src/scene";
-import { FOCUS_ZOOM } from "../src/camera";
-import { NEARBY_LABEL_ZOOM } from "../src/labels";
 import type { OrbitState } from "../src/camera";
 import { removePinnedSelection, state } from "../src/store";
+import { viewCalibration } from "../src/view-calibration";
+
+const calibration = viewCalibration(2);
 
 const projectedCommonPixels = (
   value: number,
@@ -58,6 +59,8 @@ test("keeps graph controls in one passive line with direct wording", () => {
   assert.doesNotMatch(frontendSource, /key\.toLowerCase\(\) === ["'][str]["']/);
   assert.doesNotMatch(frontendSource, /const k = ev\.key\.toLowerCase\(\)/);
   assert.doesNotMatch(sceneSource, /touchRotate/);
+  assert.match(sceneSource, /maxZoom:\s*this\.calibration\.maxZoom/);
+  assert.doesNotMatch(sceneSource, /maxZoom:\s*10/);
   assert.doesNotMatch(mainSource, /coarsePointer|\(pointer:\s*coarse\)/);
   assert.doesNotMatch(pageSource, /@media\s*\(max-width:/);
   assert.match(pageSource, /aria-label="节点图例"/);
@@ -369,6 +372,7 @@ test("keeps query results in the base layer without color or outline overlays", 
       gpu: null,
       contextData: null,
       contextLength: -1,
+      calibration,
       buildContextData: () => ({ length: 2, attributes: {} }),
       nearbyLabelLayers: () => [],
       workingSetLayers: () => [],
@@ -384,6 +388,13 @@ test("keeps query results in the base layer without color or outline overlays", 
 
     assert.deepEqual(rendered.map((layer) => layer.id), ["context"]);
     assert.equal(rendered[0]?.props.pickable, true);
+    assert.ok(
+      Math.abs(
+        (rendered[0]?.props.radiusScale as number) *
+            2 ** calibration.focusZoom -
+          0.02 * 2 ** 6.2,
+      ) < 1e-12,
+    );
     assert.deepEqual(
       [...(Reflect.get(scene, "queryResultMask") as Uint8Array)],
       [255, 255],
@@ -408,6 +419,7 @@ test("selects the clicked context node without cycling overlapping candidates", 
       gpu: null,
       contextData: null,
       contextLength: -1,
+      calibration,
       buildContextData: () => ({ length: 2, attributes: {} }),
       nearbyLabelLayers: () => [],
       workingSetLayers: () => [],
@@ -498,11 +510,12 @@ test("loads and draws nearby names only while no working set is selected", async
       camera: {
         viewState: {
           target: [0, 0, 0],
-          zoom: NEARBY_LABEL_ZOOM,
+          zoom: calibration.nearbyLabelZoom,
           rotationX: 25,
           rotationOrbit: 0,
         },
       },
+      calibration,
       deck: { getViewports: () => [viewport] },
       cb: {
         nameOf: (rank: number) => rank === 0 ? "近节点" : null,
@@ -605,11 +618,12 @@ test("rebuilds nearby label layout after a resize with the same ranks", () => {
       camera: {
         viewState: {
           target: [0, 0, 0],
-          zoom: NEARBY_LABEL_ZOOM,
+          zoom: calibration.nearbyLabelZoom,
           rotationX: 25,
           rotationOrbit: 0,
         },
       },
+      calibration,
       deck: { getViewports: () => [viewport] },
       nearbyRanks: [],
       render: () => renderedWidths.push(viewport.width),
@@ -649,6 +663,7 @@ test("lets working-set nodes grow when zooming in", () => {
         key: new Uint32Array([(1 << 24) | 1, (1 << 24) | 2]),
       },
       wsAnimStart: performance.now(),
+      calibration,
       posOf: (rank: number): [number, number, number] => [rank, 0, 0],
       cb: {
         onHover: () => undefined,
@@ -677,13 +692,13 @@ test("lets working-set nodes grow when zooming in", () => {
     ): void => {
       const atFocus = projectedCommonPixels(
         value,
-        FOCUS_ZOOM,
+        calibration.focusZoom,
         minPixels,
         maxPixels,
       );
       const oneLevelCloser = projectedCommonPixels(
         value,
-        FOCUS_ZOOM + 1,
+        calibration.focusZoom + 1,
         minPixels,
         maxPixels,
       );
@@ -732,6 +747,7 @@ test("reveals every relationship edge by the final animation frame", () => {
     const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
       geo: { key: new Uint32Array(76) },
       wsAnimStart: performance.now() - 2_200,
+      calibration,
       posOf: (rank: number): [number, number, number] => [rank, 0, 0],
       cb: {
         onHover: () => undefined,
@@ -828,6 +844,7 @@ test("keeps pinned nodes selected while the current selection changes", () => {
     const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
       geo: { key: new Uint32Array(4) },
       wsAnimStart: performance.now(),
+      calibration,
       posOf: (rank: number): [number, number, number] => [rank, 0, 0],
       cb: {
         onHover: () => undefined,
@@ -919,6 +936,7 @@ test("retains each pinned node's complete relation fan for cumulative expansion"
     const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
       geo: { key: new Uint32Array(5) },
       wsAnimStart: performance.now(),
+      calibration,
       posOf: (rank: number): [number, number, number] => [rank, 0, 0],
       cb: {
         onHover: () => undefined,
@@ -1013,6 +1031,7 @@ test("does not draw a retained fan twice while its root is the current focus", (
     const scene = Object.assign(Object.create(Scene.prototype) as Scene, {
       geo: { key: new Uint32Array(4) },
       wsAnimStart: performance.now(),
+      calibration,
       posOf: (rank: number): [number, number, number] => [rank, 0, 0],
       cb: {
         onHover: () => undefined,
@@ -1080,6 +1099,7 @@ test("reuses stable working-set geometry across camera renders", () => {
         sparse: new Map<number, [number, number, number]>(),
       },
       wsAnimStart: 0,
+      calibration,
       posOf: (rank: number): [number, number, number] => [rank, 0, 0],
       cb: {
         onHover: () => undefined,
@@ -1159,6 +1179,7 @@ test("reuses retained geometry while the current relation fan animates", () => {
         sparse: new Map<number, [number, number, number]>(),
       },
       wsAnimStart: performance.now(),
+      calibration,
       posOf: (rank: number): [number, number, number] => [rank, 0, 0],
       cb: {
         onHover: () => undefined,

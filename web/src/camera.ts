@@ -8,6 +8,7 @@ import {
 } from "@deck.gl/core";
 import type { MjolnirWheelEvent } from "mjolnir.js";
 import type { Bounds3D } from "./types";
+import type { ViewCalibration } from "./view-calibration";
 
 export interface OrbitState {
   target: [number, number, number];
@@ -23,9 +24,6 @@ export function prefersReducedMotion(): boolean {
 
 const FLY_MS = 400;
 const SELECTION_KEEP_VIEW_PX = 80;
-// OrbitView 在 zoom=0 时以一世界单位对应一像素；聚焦采用稳定的局部
-// 空间尺度。zoom=6.2 时 0.28 世界尺度略大于高亮节点的 18 px 直径。
-export const FOCUS_ZOOM = 6.2;
 const FAR_MARGIN = 1.1;
 
 /** deck 的滚轮曲线：单次事件的缩放级别增量，双向对称、封顶 ±1。 */
@@ -439,7 +437,10 @@ export class Camera {
   private homeState: OrbitState;
   private viewportHeight = Math.max(innerHeight, 1);
 
-  constructor(bounds: Bounds3D) {
+  constructor(
+    bounds: Bounds3D,
+    private readonly calibration: ViewCalibration,
+  ) {
     this.bounds = [
       [...bounds[0]],
       [...bounds[1]],
@@ -451,7 +452,7 @@ export class Camera {
       hi[2] - lo[2],
     ];
     const worldSize = Math.max(...spans);
-    // 仅用 bbox 标定全图 home；交互与局部渲染使用绝对 zoom。
+    // 全图 home 由 bbox 标定；局部交互尺度由发布几何契约独立标定。
     const fitZoom = Math.log2(
       Math.min(innerWidth, innerHeight) / Math.max(worldSize, 1),
     );
@@ -521,7 +522,10 @@ export class Camera {
     this.viewState = {
       ...this.viewState,
       target: this.clampTarget(pos),
-      zoom: zoom ?? Math.max(this.viewState.zoom, FOCUS_ZOOM),
+      zoom: zoom ?? Math.max(
+        this.viewState.zoom,
+        this.calibration.focusZoom,
+      ),
     };
     return {
       ...this.viewState,

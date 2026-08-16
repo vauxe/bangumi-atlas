@@ -11,7 +11,7 @@
  * 批量补载后重绘。 */
 
 import { TextLayer } from "@deck.gl/layers";
-import { FOCUS_ZOOM } from "./camera";
+import type { ViewCalibration } from "./view-calibration";
 
 // 圆体优先(macOS 圆体 / Windows 幼圆);canvas font 字符串不能含
 // ui-rounded 这类新 CSS 泛型,否则整串被忽略
@@ -30,8 +30,6 @@ const NODE_NAME_SIZE = 14;
 const EDGE_NAME_SIZE = 12;
 const NEARBY_NODE_NAME_SIZE = 13;
 
-/** 普通节点只在聚焦层级继续深入后显示名字，避免概览阶段文字成墙。 */
-export const NEARBY_LABEL_ZOOM = FOCUS_ZOOM + 1.3;
 /** 候选数随屏幕面积增长，但保留硬上限约束名字块请求和布局开销。 */
 const NEARBY_LABEL_BASE_LIMIT = 24;
 export const NEARBY_LABEL_MAX_CANDIDATES = 64;
@@ -86,10 +84,11 @@ export function nearbyLabelRanks(
   zoom: number,
   viewportWidth: number,
   viewportHeight: number,
+  calibration: ViewCalibration,
   options: NearbyLabelOptions = {},
 ): number[] {
   if (
-    zoom < NEARBY_LABEL_ZOOM ||
+    zoom < calibration.nearbyLabelZoom ||
     !Number.isFinite(zoom) ||
     !Number.isFinite(viewportWidth) ||
     !Number.isFinite(viewportHeight) ||
@@ -473,10 +472,11 @@ export function workingLabelLayers(
   project: ScreenProjector,
   viewport: PerspectiveViewport,
   zoom: number,
+  calibration: ViewCalibration,
 ): { layers: unknown[]; missing: number[] } {
   const data = buildWorkingLabels(members, edges, nameOf);
   // 当前实际屏显字号(去重叠的占格与名字-节点间距都按它算)
-  const scale = 2 ** (zoom - FOCUS_ZOOM);
+  const scale = 2 ** (zoom - calibration.focusZoom);
   const clampPx = (base: number): number =>
     Math.min(base * 2, Math.max(base, base * scale));
   const nodePx = clampPx(NODE_NAME_SIZE);

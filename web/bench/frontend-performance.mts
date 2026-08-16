@@ -8,7 +8,7 @@ import { performance } from "node:perf_hooks";
 
 import { nearestAlongRay } from "../src/anchor";
 import { Data } from "../src/data";
-import { nearbyLabelRanks, NEARBY_LABEL_ZOOM } from "../src/labels";
+import { nearbyLabelRanks } from "../src/labels";
 import {
   loadManifest,
   openSearchAliases,
@@ -20,6 +20,7 @@ import {
 import { hasVisibleSortedRank } from "../src/scene";
 import { searchNameSuggestions } from "../src/search";
 import type { Fact, Mappings } from "../src/types";
+import { viewCalibration } from "../src/view-calibration";
 
 interface PublishedFile {
   0: number;
@@ -37,6 +38,7 @@ interface LocalManifest {
     offset: [number, number, number];
     scale: [number, number, number];
   };
+  layout: { minimum_node_center_distance: number };
 }
 
 const requestedScenario = process.argv[2];
@@ -64,6 +66,9 @@ const siteDir = resolve(process.env["ATLAS_SITE_DIR"] ?? "../site");
 const manifest = JSON.parse(
   readFileSync(resolve(siteDir, "data/manifest.json"), "utf8"),
 ) as LocalManifest;
+const calibration = viewCalibration(
+  manifest.layout.minimum_node_center_distance,
+);
 
 if (
   scenario === "anchor" ||
@@ -139,9 +144,10 @@ if (
       positions,
       manifest.n_nodes,
       target,
-      NEARBY_LABEL_ZOOM,
+      calibration.nearbyLabelZoom,
       1_440,
       900,
+      calibration,
       { visible: () => true },
     );
     for (let index = 0; index < 2; index++) execute();

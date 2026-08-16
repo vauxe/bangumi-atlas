@@ -8,13 +8,13 @@ import {
   buildWorkingLabels,
   declutter,
   NEARBY_LABEL_MAX_CANDIDATES,
-  NEARBY_LABEL_ZOOM,
   nearbyLabelLayers,
   nearbyLabelRanks,
   perspectiveTextSize,
   workingLabelLayers,
 } from "../src/labels";
 import type { WorkingEdge, WorkingMember } from "../src/labels";
+import { viewCalibration } from "../src/view-calibration";
 
 const members: WorkingMember[] = [
   { rank: 0, pos: [0, 0, 0] },
@@ -25,6 +25,7 @@ const edges: WorkingEdge[] = [
   { a: [0, 0, 0], b: [0, 10, 0], label: "" },
 ];
 const flat = (p: [number, number, number]): [number, number] => [p[0], p[1]];
+const calibration = viewCalibration(2);
 
 test("assembles node names, edge names at midpoints, and the charset", () => {
   const data = buildWorkingLabels(members, edges, (rank) =>
@@ -62,9 +63,10 @@ test("reveals only the nearest bounded node names in close view", () => {
       positions,
       4,
       [0, 0, 0],
-      NEARBY_LABEL_ZOOM - 0.01,
+      calibration.nearbyLabelZoom - 0.01,
       1_000,
       600,
+      calibration,
     ),
     [],
   );
@@ -73,9 +75,10 @@ test("reveals only the nearest bounded node names in close view", () => {
       positions,
       4,
       [0, 0, 0],
-      NEARBY_LABEL_ZOOM,
+      calibration.nearbyLabelZoom,
       1_000,
       600,
+      calibration,
       { limit: 2 },
     ),
     [0, 2],
@@ -85,9 +88,10 @@ test("reveals only the nearest bounded node names in close view", () => {
       positions,
       4,
       [0, 0, 0],
-      NEARBY_LABEL_ZOOM,
+      calibration.nearbyLabelZoom,
       1_000,
       600,
+      calibration,
       { limit: 2, visible: ([x]) => x > 0 },
     ),
     [2, 1],
@@ -99,9 +103,10 @@ test("reveals only the nearest bounded node names in close view", () => {
       crowded,
       80,
       [0, 0, 0],
-      NEARBY_LABEL_ZOOM,
+      calibration.nearbyLabelZoom,
       1_000,
       600,
+      calibration,
       { limit: 100 },
     ).length,
     NEARBY_LABEL_MAX_CANDIDATES,
@@ -111,9 +116,10 @@ test("reveals only the nearest bounded node names in close view", () => {
       crowded,
       80,
       [0, 0, 0],
-      NEARBY_LABEL_ZOOM,
+      calibration.nearbyLabelZoom,
       1_000,
       600,
+      calibration,
     ).length,
     24,
   );
@@ -122,9 +128,10 @@ test("reveals only the nearest bounded node names in close view", () => {
       crowded,
       80,
       [0, 0, 0],
-      NEARBY_LABEL_ZOOM,
+      calibration.nearbyLabelZoom,
       1_440,
       900,
+      calibration,
     ).length,
     52,
   );
@@ -163,9 +170,10 @@ test("heap selection exactly matches a full distance sort", () => {
       positions,
       1_000,
       [0, 0, 0],
-      NEARBY_LABEL_ZOOM,
+      calibration.nearbyLabelZoom,
       1_440,
       900,
+      calibration,
       { limit: 37, visible: ([x]) => x >= 0 },
     ),
     expected,
@@ -307,6 +315,7 @@ test("keeps the arrow direction when its source crosses the camera plane", () =>
       (position) => viewport.project(position) as [number, number],
       viewport,
       zoom,
+      calibration,
     );
     const arrow = layers.find(
       (layer) => (layer as { id?: string }).id === "ws-edge-arrows",
