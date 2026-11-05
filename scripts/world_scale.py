@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from math import sqrt
 
 import numpy as np
@@ -19,9 +20,7 @@ MIN_NODE_CENTER_DISTANCE = 2.0
 _LATTICE_EXTRA_DISTANCE = 0.08
 _LATTICE_BITS = 21
 _LATTICE_BIAS = 1 << (_LATTICE_BITS - 1)
-_INITIAL_OFFSET_COUNT = 8192
 _OFFSET_SEARCH_STRIDE = 1024
-_MAX_ASSIGNMENT_ROUNDS = 128
 _HASH_MULTIPLIER = 11_400_714_819_323_198_485
 
 
@@ -58,29 +57,58 @@ def _encode_lattice_cells(cells: np.ndarray) -> np.ndarray:
     )
 
 
-def _nearest_lattice_offsets(count: int) -> np.ndarray:
-    """Build at least ``count`` integer offsets, nearest shells first."""
+@lru_cache(maxsize=8)
+def _lattice_shell_offsets(shell: int) -> np.ndarray:
+    """Enumerate only one cube surface in the original candidate order."""
 
-    offsets = [(0, 0, 0)]
-    shell = 1
-    while len(offsets) < count:
-        part = [
-            (dx, dy, dz)
-            for dx in range(-shell, shell + 1)
-            for dy in range(-shell, shell + 1)
-            for dz in range(-shell, shell + 1)
-            if max(abs(dx), abs(dy), abs(dz)) == shell
-        ]
-        part.sort(
-            key=lambda p: (
-                p[0] * p[0] + p[1] * p[1] + p[2] * p[2],
-                abs(p[1]),
-                p,
-            )
+    if shell == 0:
+        return np.zeros((1, 3), dtype=np.int32)
+    axis = np.arange(-shell, shell + 1, dtype=np.int32)
+    faces = []
+    for fixed_axis in range(3):
+        other_axes = [a for a in range(3) if a != fixed_axis]
+        # Earlier faces own their edges and corners; never emit them twice.
+        grids = np.meshgrid(
+            *[axis[1:-1] if a < fixed_axis else axis for a in other_axes],
+            indexing="ij",
         )
-        offsets.extend(part)
-        shell += 1
-    return np.asarray(offsets, dtype=np.int32)
+        for sign in (-1, 1):
+            face = np.empty((grids[0].size, 3), dtype=np.int32)
+            face[:, fixed_axis] = sign * shell
+            for a, grid in zip(other_axes, grids, strict=True):
+                face[:, a] = grid.ravel()
+            faces.append(face)
+    offsets = np.concatenate(faces)
+    distance = np.sum(offsets.astype(np.int64) ** 2, axis=1)
+    order = np.lexsort(
+        (
+            offsets[:, 2],
+            offsets[:, 1],
+            offsets[:, 0],
+            np.abs(offsets[:, 1]),
+            distance,
+        )
+    )
+    result = offsets[order]
+    result.flags.writeable = False
+    return result
+
+
+def _lattice_offsets(indices: np.ndarray) -> np.ndarray:
+    """Look up candidates without materializing the enclosing cube."""
+
+    shells = np.floor((np.cbrt(indices) + 1) / 2).astype(np.int64)
+    # Correct floating-point cube-root rounding at exact shell boundaries.
+    shells += (2 * shells + 1) ** 3 <= indices
+    shells -= (2 * shells - 1) ** 3 > indices
+    result = np.empty((len(indices), 3), dtype=np.int32)
+    for shell in np.unique(shells):
+        selected = shells == shell
+        start = max(0, (2 * int(shell) - 1) ** 3)
+        result[selected] = _lattice_shell_offsets(int(shell))[
+            indices[selected] - start
+        ]
+    return result
 
 
 def _orient_offsets(offsets: np.ndarray, seeds: np.ndarray) -> np.ndarray:
@@ -119,21 +147,17 @@ def _assign_unique_cells(
     assigned[anchors] = preferred[anchors]
     occupied = sorted_keys[starts]
     unresolved = np.flatnonzero(~anchors)
-    attempt = ordinal[unresolved].copy()
-    offset_count = max(
-        _INITIAL_OFFSET_COUNT,
-        int(attempt.max(initial=0)) + _OFFSET_SEARCH_STRIDE,
-    )
-    offsets = _nearest_lattice_offsets(offset_count)
+    attempt = ordinal[unresolved].astype(np.int64)
     assignment_rounds = 0
 
-    for round_number in range(1, _MAX_ASSIGNMENT_ROUNDS + 1):
+    # Each node tries distinct cells. A rejected candidate stays occupied,
+    # including ties won by another node. With n - 1 other nodes, no node
+    # can lose n times. This bound follows from capacity, not local density.
+    for round_number in range(1, len(preferred) + 1):
         if len(unresolved) == 0:
             break
         assignment_rounds = round_number
-        if int(attempt.max()) >= len(offsets):
-            offsets = _nearest_lattice_offsets(len(offsets) * 2)
-        raw_offsets = offsets[attempt]
+        raw_offsets = _lattice_offsets(attempt)
         candidates = preferred[unresolved] + _orient_offsets(
             raw_offsets, preferred_keys[unresolved]
         )
@@ -155,10 +179,7 @@ def _assign_unique_cells(
         unresolved = unresolved[keep]
         attempt = attempt[keep] + _OFFSET_SEARCH_STRIDE
     if len(unresolved):
-        raise RuntimeError(
-            f"cannot assign {len(unresolved)} nodes after "
-            f"{_MAX_ASSIGNMENT_ROUNDS} lattice rounds"
-        )
+        raise RuntimeError("lattice assignment exceeded node-count bound")
     return assigned, assignment_rounds
 
 
