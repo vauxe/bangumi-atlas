@@ -13,15 +13,15 @@
     "bench:query": "esbuild bench/query-performance.mts --bundle --platform=node --format=esm --outfile=.test-dist/query-performance.mjs && node --expose-gc .test-dist/query-performance.mjs"
   },
   "devDependencies": {
-    "@types/node": "^26.1.2",
-    "esbuild": "^0.28.1",
+    "@types/node": "^26.5.1",
+    "esbuild": "^0.28.2",
     "http-server": "^14.1.1",
     "typescript": "^7.0.2"
   },
   "dependencies": {
     "@bgm38/wiki": "0.3.3",
-    "@deck.gl/core": "^9.3.7",
-    "@deck.gl/layers": "^9.3.7",
+    "@deck.gl/core": "^9.4.0",
+    "@deck.gl/layers": "^9.4.0",
     "@luma.gl/core": "^9.3.6",
     "mjolnir.js": "^3.0.0"
   }
